@@ -1,62 +1,156 @@
 use eframe::egui;
 
 use crate::db::ConnectionParams;
+use crate::profiles::ConnectionProfile;
 
-/// Muestra el formulario de conexión.
-/// Retorna `true` si el usuario pulsó el botón Conectar.
-pub fn show(
+/// Resultado de la interacción con el formulario de conexión.
+#[derive(Default)]
+pub struct FormResult {
+    pub connect: bool,
+    pub save_profile: bool,
+    pub delete_profile: bool,
+}
+
+/// Panel izquierdo: lista de favoritos guardados.
+/// Retorna el índice del perfil seleccionado si el usuario hace click en uno.
+pub fn show_favorites(
+    ui: &mut egui::Ui,
+    profiles: &[ConnectionProfile],
+    selected_idx: &Option<usize>,
+) -> Option<usize> {
+    let mut clicked = None;
+
+    ui.add_space(8.0);
+    ui.heading("Favoritos");
+    ui.separator();
+
+    if profiles.is_empty() {
+        ui.add_space(8.0);
+        ui.label("Sin conexiones guardadas.");
+        ui.add_space(4.0);
+        ui.label("Rellena el formulario\ny pulsa Guardar.");
+    } else {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (i, profile) in profiles.iter().enumerate() {
+                let is_selected = selected_idx.is_some_and(|s| s == i);
+                if ui.selectable_label(is_selected, &profile.name).clicked() {
+                    clicked = Some(i);
+                }
+            }
+        });
+    }
+
+    clicked
+}
+
+/// Panel derecho: formulario de conexión + botones de gestión.
+pub fn show_form(
     ui: &mut egui::Ui,
     params: &mut ConnectionParams,
     port_str: &mut String,
     error_message: &Option<String>,
-) -> bool {
-    let mut connect_clicked = false;
+    profile_name: &mut String,
+    save_password: &mut bool,
+    selected_idx: &Option<usize>,
+) -> FormResult {
+    let mut result = FormResult::default();
 
-    ui.add_space(60.0);
-
+    ui.add_space(24.0);
     ui.vertical_centered(|ui| {
         ui.heading("RustQL");
-        ui.add_space(4.0);
         ui.label("Conectar a base de datos");
-        ui.add_space(24.0);
+    });
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(12.0);
 
-        egui::Grid::new("connection_form")
-            .num_columns(2)
-            .spacing([16.0, 10.0])
-            .min_col_width(80.0)
-            .show(ui, |ui| {
-                ui.label("Host:");
-                ui.add(egui::TextEdit::singleline(&mut params.host).min_size(egui::vec2(200.0, 0.0)));
-                ui.end_row();
+    egui::Grid::new("connection_form")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .min_col_width(70.0)
+        .show(ui, |ui| {
+            ui.label("Host:");
+            ui.add(
+                egui::TextEdit::singleline(&mut params.host)
+                    .min_size(egui::vec2(220.0, 0.0)),
+            );
+            ui.end_row();
 
-                ui.label("Puerto:");
-                ui.add(egui::TextEdit::singleline(port_str).min_size(egui::vec2(200.0, 0.0)));
-                ui.end_row();
+            ui.label("Puerto:");
+            ui.add(
+                egui::TextEdit::singleline(port_str)
+                    .min_size(egui::vec2(220.0, 0.0)),
+            );
+            ui.end_row();
 
-                ui.label("Usuario:");
-                ui.add(egui::TextEdit::singleline(&mut params.user).min_size(egui::vec2(200.0, 0.0)));
-                ui.end_row();
+            ui.label("Usuario:");
+            ui.add(
+                egui::TextEdit::singleline(&mut params.user)
+                    .min_size(egui::vec2(220.0, 0.0)),
+            );
+            ui.end_row();
 
-                ui.label("Contraseña:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut params.password)
-                        .password(true)
-                        .min_size(egui::vec2(200.0, 0.0)),
-                );
-                ui.end_row();
-            });
+            ui.label("Contraseña:");
+            ui.add(
+                egui::TextEdit::singleline(&mut params.password)
+                    .password(true)
+                    .min_size(egui::vec2(220.0, 0.0)),
+            );
+            ui.end_row();
 
-        ui.add_space(12.0);
+            ui.label("");
+            ui.checkbox(save_password, "Guardar contraseña");
+            ui.end_row();
+        });
 
-        if let Some(err) = error_message {
-            ui.colored_label(egui::Color32::RED, err);
-            ui.add_space(8.0);
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    // Sección guardar/eliminar favorito
+    egui::Grid::new("profile_form")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .min_col_width(70.0)
+        .show(ui, |ui| {
+            ui.label("Nombre:");
+            ui.add(
+                egui::TextEdit::singleline(profile_name)
+                    .hint_text("Mi servidor...")
+                    .min_size(egui::vec2(220.0, 0.0)),
+            );
+            ui.end_row();
+        });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Guardar").clicked() {
+            result.save_profile = true;
         }
-
-        if ui.button("  Conectar  ").clicked() {
-            connect_clicked = true;
+        if selected_idx.is_some()
+            && ui.button("Eliminar").clicked()
+        {
+            result.delete_profile = true;
         }
     });
 
-    connect_clicked
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(12.0);
+
+    if let Some(err) = error_message {
+        ui.colored_label(egui::Color32::RED, err);
+        ui.add_space(8.0);
+    }
+
+    ui.vertical_centered(|ui| {
+        if ui
+            .add_sized([160.0, 32.0], egui::Button::new("Conectar"))
+            .clicked()
+        {
+            result.connect = true;
+        }
+    });
+
+    result
 }
