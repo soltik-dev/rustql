@@ -1,4 +1,4 @@
-use mysql::{Opts, OptsBuilder, Pool, PooledConn, Value, prelude::Queryable};
+use mysql::{Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, TableInfo,
@@ -67,11 +67,16 @@ impl MysqlBackend {
         on_status: impl Fn(&str),
     ) -> DbResult<Self> {
         on_status("Estableciendo conexión TCP...");
+        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10)
+        // para un cliente GUI con un solo usuario basta con min:0, max:1
+        let pool_constraints = PoolConstraints::new(0, 1).unwrap();
+        let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
         let opts: Opts = OptsBuilder::new()
             .ip_or_hostname(Some(params.host.as_str()))
             .tcp_port(params.port)
             .user(Some(params.user.as_str()))
             .pass(Some(params.password.as_str()))
+            .pool_opts(pool_opts)
             .into();
 
         let pool = Pool::new(opts).map_err(|e| format!("Error de conexión: {e}"))?;

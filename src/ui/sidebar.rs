@@ -31,10 +31,13 @@ pub enum SidebarAction {
     CopyTableName(String),
     Refresh,
     Disconnect,
+    ToggleFav { db: String, table: String },
+    PinTable { db: String, table: String },
+    OpenTableStructure { db: String, table: String },
+    OpenInSql { db: String, table: String },
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
-/// Retorna la acción que el usuario tomó.
 pub fn show(
     ui: &mut egui::Ui,
     backend: &mut Box<dyn DbBackend>,
@@ -43,17 +46,40 @@ pub fn show(
     selected_db: Option<&str>,
     selected_table: Option<&str>,
     table_search: &mut String,
+    fav_tables: &std::collections::HashSet<String>,
+    show_only_fav: &mut bool,
     host: &str,
+    server_name: &str,
 ) -> SidebarAction {
     let action: RefCell<SidebarAction> = RefCell::new(SidebarAction::None);
 
     ui.heading("Esquema");
 
-    ui.add(
-        egui::TextEdit::singleline(table_search)
-            .hint_text("Buscar tabla...")
-            .desired_width(f32::INFINITY),
-    );
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(table_search)
+                .hint_text("Buscar tabla...")
+                .desired_width(ui.available_width() - 50.0),
+        );
+        let fav_btn = ui.add(
+            egui::Button::new("⭐")
+                .selected(*show_only_fav)
+                .small(),
+        );
+        if fav_btn.clicked() {
+            *show_only_fav = !*show_only_fav;
+        }
+        fav_btn.on_hover_text(if *show_only_fav {
+            "Mostrando solo favoritos"
+        } else {
+            "Filtrar favoritos"
+        });
+        let refresh_btn = ui.add(egui::Button::new("🔄").small());
+        if refresh_btn.clicked() {
+            *action.borrow_mut() = SidebarAction::Refresh;
+        }
+        refresh_btn.on_hover_text("Recargar esquema");
+    });
     ui.separator();
 
     if databases.is_empty() {
@@ -69,9 +95,13 @@ pub fn show(
     let filter = table_search.to_lowercase();
     let filtering = !filter.is_empty();
 
-    let server_label = format!("🔌 {}", clip_text(host, 28));
+    let _ = host;
+    let server_label = format!("🔌 {}", clip_text(server_name, 28));
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    ui.spacing_mut().indent = 10.0;
+
+    egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         let dbs = databases.clone();
 
         let server_ch = egui::CollapsingHeader::new(&server_label)
@@ -79,7 +109,6 @@ pub fn show(
             .default_open(true)
             .show(ui, |ui| {
                 for db in &dbs {
-                    // Cargar tablas si necesario para filtrar
                     if filtering && !tables_cache.contains_key(db) {
                         if let Ok(tables) = backend.list_tables(db) {
                             tables_cache.insert(db.clone(), tables);
@@ -100,12 +129,19 @@ pub fn show(
                         vec![]
                     };
 
+                    if *show_only_fav {
+                        let has_fav = tables_cache.get(db).map_or(false, |ts| {
+                            ts.iter().any(|t| fav_tables.contains(&format!("{}/{}", db, t)))
+                        });
+                        if !has_fav {
+                            continue;
+                        }
+                    }
                     if filtering && matching.is_empty() {
                         continue;
                     }
 
                     let open = if filtering { Some(true) } else { None };
-
                     let is_db_selected = selected_db == Some(db.as_str());
                     let db_label = clip_text(db, 24);
 
@@ -116,7 +152,6 @@ pub fn show(
                     .default_open(false)
                     .open(open)
                     .show(ui, |ui: &mut egui::Ui| {
-                        // Sin filtro: carga lazy al expandir
                         if !filtering && !tables_cache.contains_key(db) {
                             match backend.list_tables(db) {
                                 Ok(tables) => {
@@ -129,10 +164,19 @@ pub fn show(
                             }
                         }
 
-                        let tables: Vec<String> = if filtering {
-                            matching.clone()
-                        } else {
-                            tables_cache.get(db).cloned().unwrap_or_default()
+                        let tables: Vec<String> = {
+                            let base = if filtering {
+                                matching.clone()
+                            } else {
+                                tables_cache.get(db).cloned().unwrap_or_default()
+                            };
+                            if *show_only_fav {
+                                base.into_iter()
+                                    .filter(|t| fav_tables.contains(&format!("{}/{}", db, t)))
+                                    .collect()
+                            } else {
+                                base
+                            }
                         };
 
                         if tables.is_empty() {
@@ -145,11 +189,33 @@ pub fn show(
                         }
 
                         for table in &tables {
-                            let is_selected = is_db_selected
-                                && selected_table == Some(table.as_str());
+                            let is_selected =
+                                is_db_selected && selected_table == Some(table.as_str());
 
-                            let display = format!("  {}", clip_text(table, 22));
-                            let resp = ui.selectable_label(is_selected, display);
+                            let display = clip_text(table, 26);
+                            let db_clone = db.clone();
+                            let table_clone = table.clone();
+
+                            let fav_key = format!("{}/{}", db, table);
+                            let is_fav = fav_tables.contains(&fav_key);
+
+                            let fav_color = if ui.visuals().dark_mode {
+                                egui::Color32::from_rgb(210, 170, 50)
+                            } else {
+                                egui::Color32::from_rgb(150, 85, 10)
+                            };
+                            let label_text = egui::RichText::new(&display).color(
+                                if is_fav { fav_color } else { ui.visuals().text_color() },
+                            );
+
+                            let resp = ui.selectable_label(is_selected, label_text);
+
+                            if resp.clicked() || resp.double_clicked() {
+                                *action.borrow_mut() = SidebarAction::SelectTable {
+                                    db: db_clone.clone(),
+                                    table: table_clone.clone(),
+                                };
+                            }
 
                             let resp = if table.len() > 22 {
                                 resp.on_hover_text(table)
@@ -157,20 +223,39 @@ pub fn show(
                                 resp
                             };
 
-                            if resp.clicked() {
-                                *action.borrow_mut() = SidebarAction::SelectTable {
-                                    db: db.clone(),
-                                    table: table.clone(),
-                                };
-                            }
-
-                            let db_clone = db.clone();
-                            let table_clone = table.clone();
                             resp.context_menu(|ui: &mut egui::Ui| {
+                                if ui.button("⭐ Marcar favorito").clicked() {
+                                    *action.borrow_mut() = SidebarAction::ToggleFav {
+                                        db: db_clone.clone(),
+                                        table: table_clone.clone(),
+                                    };
+                                    ui.close();
+                                }
+                                if ui.button("📌 Fijar tabla").clicked() {
+                                    *action.borrow_mut() = SidebarAction::PinTable {
+                                        db: db_clone.clone(),
+                                        table: table_clone.clone(),
+                                    };
+                                    ui.close();
+                                }
+                                if ui.button("✏ Ver estructura").clicked() {
+                                    *action.borrow_mut() = SidebarAction::OpenTableStructure {
+                                        db: db_clone.clone(),
+                                        table: table_clone.clone(),
+                                    };
+                                    ui.close();
+                                }
+                                if ui.button("▶ Abrir en SQL").clicked() {
+                                    *action.borrow_mut() = SidebarAction::OpenInSql {
+                                        db: db_clone.clone(),
+                                        table: table_clone.clone(),
+                                    };
+                                    ui.close();
+                                }
                                 if ui.button("📋 Copiar nombre").clicked() {
                                     *action.borrow_mut() =
                                         SidebarAction::CopyTableName(table_clone.clone());
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 ui.separator();
                                 if ui.button("🗑 Truncar tabla").clicked() {
@@ -178,7 +263,7 @@ pub fn show(
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
                                     };
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 if ui
                                     .add(egui::Button::new("✖ Eliminar tabla").fill(
@@ -190,13 +275,12 @@ pub fn show(
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
                                     };
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             });
                         }
                     });
 
-                    // Click en la cabecera de BBDD → seleccionar
                     if db_ch.header_response.clicked() {
                         *action.borrow_mut() = SidebarAction::SelectDatabase(db.clone());
                     }
@@ -206,13 +290,13 @@ pub fn show(
                         if ui.button("➕ Crear tabla").clicked() {
                             *action.borrow_mut() =
                                 SidebarAction::CreateTable { db: db_clone2.clone() };
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                         if ui.button("🔄 Vaciar todas las tablas").clicked() {
                             *action.borrow_mut() =
                                 SidebarAction::TruncateAllTables { db: db_clone2.clone() };
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui
                             .add(egui::Button::new("✖ Eliminar base de datos").fill(
@@ -222,13 +306,12 @@ pub fn show(
                         {
                             *action.borrow_mut() =
                                 SidebarAction::DropDatabase { db: db_clone2.clone() };
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 }
             });
 
-        // Click en la raíz Servidor → seleccionar
         if server_ch.header_response.clicked() {
             *action.borrow_mut() = SidebarAction::SelectServer;
         }
@@ -236,16 +319,16 @@ pub fn show(
         server_ch.header_response.context_menu(|ui| {
             if ui.button("➕ Crear base de datos").clicked() {
                 *action.borrow_mut() = SidebarAction::CreateDatabase;
-                ui.close_menu();
+                ui.close();
             }
             ui.separator();
             if ui.button("🔄 Refrescar").clicked() {
                 *action.borrow_mut() = SidebarAction::Refresh;
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("⏏ Desconectar").clicked() {
                 *action.borrow_mut() = SidebarAction::Disconnect;
-                ui.close_menu();
+                ui.close();
             }
         });
     });

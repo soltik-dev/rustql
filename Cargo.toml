@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.29"
-egui_extras = "0.29"
-mysql = "25"
+eframe = "0.33"
+egui_extras = "0.33"
+mysql = "27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 dark-light = "1"
+arboard = "3"

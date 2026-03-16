@@ -10,15 +10,14 @@ use crate::db::{
 };
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnectionProfile};
-use crate::settings::{self, AppSettings};
+use crate::settings::{self, AppSettings, SavedSqlTab};
+use crate::table_state::{self, TableStates};
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::modals::{self, DropKind, ModalAction, ModalState, NewColumnDef, TruncateKind};
-use crate::ui::results_grid::{
-    EditingCell, GridAction, PendingEdit, SortSpec, compute_sort_indices,
-};
+use crate::ui::results_grid::{EditingCell, GridAction, PendingEdit, SortDir, SortSpec};
 use crate::ui::sidebar::SidebarAction;
-use crate::ui::sql_editor::SqlEditorAction;
-use crate::ui::tab_bar::ActiveTab;
+use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
+use crate::ui::tab_bar::{ActiveTab, TabBarResult};
 use crate::ui::{
     connection_panel, db_info, filter_bar, log_panel, modals as modals_ui, results_grid,
     server_info, settings_panel, sidebar, sql_editor, statusbar, tab_bar, table_structure,
@@ -78,9 +77,13 @@ pub struct RustqlApp {
     pub tables_info: HashMap<String, Vec<TableInfo>>,
     pub columns_info: HashMap<(String, String), Vec<ColumnInfo>>,
 
-    // Editor SQL libre
+    // Editor SQL libre (legacy fields kept for compat)
     pub sql_editor_text: String,
     pub sql_editor_result: Option<Result<QueryResult, String>>,
+
+    // Multi-tab SQL editor
+    pub sql_tabs: Vec<SqlTab>,
+    pub pinned_tables: Vec<(String, String)>,
 
     // Modal activo
     pub modal: ModalState,
@@ -98,12 +101,22 @@ pub struct RustqlApp {
     pub show_settings: bool,
     pub settings: AppSettings,
     pub settings_dirty: bool,
+
+    // Estado persistido por tabla (sort, filtro, historial)
+    pub table_states: TableStates,
+    pub filter_history: Vec<String>,
+
+    pub selected_cell: Option<(usize, usize)>,
+    pub show_only_fav: bool,
 }
 
 impl Default for RustqlApp {
     fn default() -> Self {
         let params = ConnectionParams::default();
         let port_str = params.port.to_string();
+        let settings = settings::load();
+        let show_sidebar = settings.show_sidebar;
+        let show_log = settings.show_log;
         Self {
             state: AppState::Disconnected,
             port_str,
@@ -127,17 +140,23 @@ impl Default for RustqlApp {
             columns_info: HashMap::new(),
             sql_editor_text: String::new(),
             sql_editor_result: None,
+            sql_tabs: vec![SqlTab::default()],
+            pinned_tables: Vec::new(),
             modal: ModalState::None,
             query_log: Vec::new(),
             profiles: profiles::load(),
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
-            show_sidebar: true,
-            show_log: true,
+            show_sidebar,
+            show_log,
             show_settings: false,
-            settings: settings::load(),
+            settings,
             settings_dirty: true,
+            table_states: table_state::load(),
+            filter_history: Vec::new(),
+            selected_cell: None,
+            show_only_fav: false,
         }
     }
 }
@@ -157,7 +176,7 @@ impl RustqlApp {
             Ok(data) => {
                 let rows = data.rows.len();
                 self.push_log(LogEntry::ok(sql, duration_ms, rows));
-                self.sort_specs.clear();
+                // La ordenación es server-side: los índices son identidad.
                 self.sort_indices = (0..rows).collect();
                 self.table_data = Some(data);
                 self.table_error = None;
@@ -166,7 +185,6 @@ impl RustqlApp {
                 self.push_log(LogEntry::err(sql, duration_ms, &e));
                 self.table_data = None;
                 self.table_error = Some(e);
-                self.sort_specs.clear();
                 self.sort_indices.clear();
             }
         }
@@ -195,20 +213,26 @@ impl RustqlApp {
 
     fn build_sql(&self, db: &str, table: &str) -> String {
         let filter = self.filter_text.trim();
+
+        let order_by = if self.sort_specs.is_empty() {
+            String::new()
+        } else {
+            let parts: Vec<String> = self.sort_specs.iter().map(|s| {
+                let dir = if s.dir == SortDir::Desc { "DESC" } else { "ASC" };
+                format!("`{}` {}", s.col_name.replace('`', "``"), dir)
+            }).collect();
+            format!(" ORDER BY {}", parts.join(", "))
+        };
+
         if filter.is_empty() {
-            format!("SELECT * FROM `{}`.`{}` LIMIT 500", escape_sql(db), escape_sql(table))
+            format!("SELECT * FROM `{}`.`{}`{} LIMIT 500", escape_sql(db), escape_sql(table), order_by)
         } else {
             format!(
-                "SELECT * FROM `{}`.`{}` WHERE {filter} LIMIT 500",
+                "SELECT * FROM `{}`.`{}` WHERE {filter}{} LIMIT 500",
                 escape_sql(db),
-                escape_sql(table)
+                escape_sql(table),
+                order_by
             )
-        }
-    }
-
-    fn recompute_sort(&mut self) {
-        if let Some(data) = &self.table_data {
-            self.sort_indices = compute_sort_indices(&data.rows, &self.sort_specs);
         }
     }
 
@@ -281,7 +305,7 @@ impl RustqlApp {
                     }
                 }
             }
-            _ => {}
+            ActiveTab::Sql(_) | ActiveTab::Pinned(_) | ActiveTab::Datos => {}
         }
     }
 
@@ -374,12 +398,16 @@ impl RustqlApp {
                 continue;
             }
 
+            let set_clause = if edit.is_null {
+                format!("`{}` = NULL", col_name.replace('`', "``"))
+            } else {
+                format!("`{}` = '{}'", col_name.replace('`', "``"), escape_sql(&edit.new_value))
+            };
             let sql = format!(
-                "UPDATE `{}`.`{}` SET `{}` = '{}' WHERE {}",
+                "UPDATE `{}`.`{}` SET {} WHERE {}",
                 db.replace('`', "``"),
                 table.replace('`', "``"),
-                col_name.replace('`', "``"),
-                escape_sql(&edit.new_value),
+                set_clause,
                 where_parts.join(" AND ")
             );
 
@@ -394,6 +422,59 @@ impl RustqlApp {
             let sql = self.build_sql(&db, &table);
             self.run_query(&sql);
         }
+    }
+
+    /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
+    fn save_table_state(&mut self) {
+        if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+            let mut ts = table_state::get(&self.table_states, db, table);
+            ts.sort_specs = self.sort_specs.clone();
+            ts.filter_text = self.filter_text.clone();
+            ts.filter_history = self.filter_history.clone();
+            table_state::set(&mut self.table_states, db, table, ts);
+            table_state::save(&self.table_states);
+        }
+    }
+
+    /// Cambia la tabla seleccionada: guarda el estado actual, restaura el
+    /// de la nueva tabla, ejecuta la query con el filtro guardado y reaplica
+    /// la ordenación guardada.
+    fn on_table_selected(&mut self, db: String, table: String) {
+        self.selected_cell = None;
+
+        // 1. Guardar estado de la tabla anterior
+        self.save_table_state();
+
+        // 2. Cargar estado de la nueva tabla
+        let ts = table_state::get(&self.table_states, &db, &table);
+        self.filter_text = ts.filter_text.clone();
+        self.filter_history = ts.filter_history.clone();
+
+        // 3. Actualizar selección y limpiar ediciones
+        self.selected_node =
+            Some(SelectedNode::Table { db: db.clone(), table: table.clone() });
+        self.pending_edits.clear();
+        self.editing_cell = None;
+
+        // 4. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
+        self.sort_specs = ts.sort_specs.clone();
+
+        // 5. Ejecutar query (server-side sort + filter restaurados)
+        let sql = self.build_sql(&db, &table);
+        self.run_query(&sql);
+        // sort_indices es identidad tras run_query (datos ya ordenados por servidor)
+
+        // 6. Cargar claves primarias
+        self.load_primary_keys(&db, &table);
+    }
+
+    fn save_tabs_state(&mut self) {
+        self.settings.pinned_tables = self.pinned_tables.clone();
+        self.settings.sql_tabs = self.sql_tabs.iter().map(|t| SavedSqlTab {
+            db_context: t.db_context.clone(),
+            sql_text: t.sql_text.clone(),
+        }).collect();
+        settings::save(&self.settings);
     }
 
     fn on_connected(&mut self, backend: Box<dyn DbBackend>) {
@@ -418,6 +499,17 @@ impl RustqlApp {
         self.columns_info.clear();
         self.sql_editor_text.clear();
         self.sql_editor_result = None;
+        // Restaurar pestañas guardadas desde settings
+        self.pinned_tables = self.settings.pinned_tables.clone();
+        self.sql_tabs = if self.settings.sql_tabs.is_empty() {
+            vec![SqlTab::default()]
+        } else {
+            self.settings.sql_tabs.iter().map(|t| SqlTab {
+                db_context: t.db_context.clone(),
+                sql_text: t.sql_text.clone(),
+                result: None,
+            }).collect()
+        };
         self.query_log.clear();
     }
 }
@@ -434,6 +526,7 @@ impl eframe::App for RustqlApp {
         }
 
         let f9 = ctx.input(|i| i.key_pressed(egui::Key::F9));
+        let f5 = ctx.input(|i| i.key_pressed(egui::Key::F5));
         let ctrl_enter =
             ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
 
@@ -477,6 +570,9 @@ impl eframe::App for RustqlApp {
             }
         }
 
+        // Snapshot de visibilidad de paneles para detectar cambios
+        let (prev_sidebar, prev_log) = (self.show_sidebar, self.show_log);
+
         // ── Señales del frame ────────────────────────────────────────────
         let mut connect_clicked = false;
         let mut cancel_connect = false;
@@ -488,10 +584,12 @@ impl eframe::App for RustqlApp {
         let mut settings_changed = false;
         let mut grid_action = GridAction::None;
         let mut apply_bar_action = GridAction::None;
-        let mut tab_clicked: Option<ActiveTab> = None;
+        let mut tab_bar_result = TabBarResult::default();
         let mut db_info_action = DbInfoAction::None;
         let mut sql_action = SqlEditorAction::None;
         let mut should_disconnect = false;
+
+        let ctrl_t = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::T));
 
         // ── Paneles inferiores (primero siempre) ─────────────────────────
         if matches!(self.state, AppState::Connected(_)) {
@@ -532,11 +630,15 @@ impl eframe::App for RustqlApp {
                 egui::SidePanel::left("conn_favorites")
                     .exact_width(200.0)
                     .show(ctx, |ui| {
-                        profile_selected = connection_panel::show_favorites(
+                        let (sel, connect_now) = connection_panel::show_favorites(
                             ui,
                             &self.profiles,
                             &self.selected_profile_idx,
                         );
+                        profile_selected = sel;
+                        if connect_now {
+                            connect_clicked = true;
+                        }
                     });
 
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -549,7 +651,7 @@ impl eframe::App for RustqlApp {
                         &mut self.save_password,
                         &self.selected_profile_idx,
                     );
-                    connect_clicked = result.connect;
+                    connect_clicked |= result.connect;
                     save_profile = result.save_profile;
                     delete_profile = result.delete_profile;
                 });
@@ -562,7 +664,7 @@ impl eframe::App for RustqlApp {
                 egui::SidePanel::left("conn_favorites")
                     .exact_width(200.0)
                     .show(ctx, |ui| {
-                        connection_panel::show_favorites(
+                        let _ = connection_panel::show_favorites(
                             ui,
                             &self.profiles,
                             &self.selected_profile_idx,
@@ -598,8 +700,15 @@ impl eframe::App for RustqlApp {
                         _ => (None, None),
                     };
 
-                    egui::SidePanel::left("sidebar")
-                        .min_width(180.0)
+                    let server_name = self.selected_profile_idx
+                        .and_then(|i| self.profiles.get(i))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| self.params.host.clone());
+
+                    egui::SidePanel::left("sidebar_v2")
+                        .default_width(200.0)
+                        .min_width(160.0)
+                        .max_width(320.0)
                         .show(ctx, |ui| {
                             sidebar_action = sidebar::show(
                                 ui,
@@ -609,7 +718,10 @@ impl eframe::App for RustqlApp {
                                 sel_db,
                                 sel_table,
                                 &mut self.table_search,
+                                &self.settings.fav_tables,
+                                &mut self.show_only_fav,
                                 &self.params.host,
+                                &server_name,
                             );
                         });
                 }
@@ -622,13 +734,43 @@ impl eframe::App for RustqlApp {
                 let has_table =
                     matches!(&self.selected_node, Some(SelectedNode::Table { .. }));
 
-                egui::TopBottomPanel::top("tab_bar")
-                    .exact_height(34.0)
-                    .show(ctx, |ui| {
-                        ui.add_space(4.0);
-                        tab_clicked =
-                            tab_bar::show(ui, self.active_tab, has_db, has_table);
-                    });
+                {
+                    let server_name_tab = self.selected_profile_idx
+                        .and_then(|i| self.profiles.get(i))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| self.params.host.clone());
+
+                    let db_name_tab = match &self.selected_node {
+                        Some(SelectedNode::Database(d)) => Some(d.clone()),
+                        Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
+                        _ => None,
+                    };
+                    let table_name_tab = match &self.selected_node {
+                        Some(SelectedNode::Table { table, .. }) => Some(table.clone()),
+                        _ => None,
+                    };
+
+                    let sql_tab_count = self.sql_tabs.len();
+                    let pinned_tables = self.pinned_tables.clone();
+
+                    egui::TopBottomPanel::top("tab_bar")
+                        .min_height(30.0)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            ui.add_space(2.0);
+                            tab_bar_result = tab_bar::show(
+                                ui,
+                                self.active_tab,
+                                has_db,
+                                has_table,
+                                &server_name_tab,
+                                db_name_tab.as_deref(),
+                                table_name_tab.as_deref(),
+                                sql_tab_count,
+                                &pinned_tables,
+                            );
+                        });
+                }
 
                 // ── Apply bar (solo en tab Datos con cambios pendientes) ──
                 if self.active_tab == ActiveTab::Datos && !self.pending_edits.is_empty() {
@@ -697,8 +839,12 @@ impl eframe::App for RustqlApp {
                             };
                             if selected_table.is_some() {
                                 let apply_f9 = f9 && self.active_tab == ActiveTab::Datos;
-                                filter_action =
-                                    filter_bar::show(ui, &mut self.filter_text, apply_f9);
+                                filter_action = filter_bar::show(
+                                    ui,
+                                    &mut self.filter_text,
+                                    apply_f9,
+                                    &self.filter_history.clone(),
+                                );
                                 ui.separator();
                             }
                             grid_action = results_grid::show(
@@ -710,17 +856,39 @@ impl eframe::App for RustqlApp {
                                 &self.sort_indices,
                                 &self.pending_edits,
                                 &mut self.editing_cell,
+                                &mut self.selected_cell,
                             );
                         }
 
-                        ActiveTab::Sql => {
-                            let apply_f9 = f9 && self.active_tab == ActiveTab::Sql;
-                            sql_action = sql_editor::show(
-                                ui,
-                                &mut self.sql_editor_text,
-                                &self.sql_editor_result,
-                                apply_f9,
-                            );
+                        ActiveTab::Sql(tab_idx) => {
+                            if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
+                                let apply_f9 = f9 && matches!(self.active_tab, ActiveTab::Sql(_));
+                                let result_clone = tab.result.clone();
+                                let databases_clone = self.databases.clone();
+                                sql_action = sql_editor::show(
+                                    ui,
+                                    &mut tab.sql_text,
+                                    &result_clone,
+                                    apply_f9,
+                                    &mut tab.db_context,
+                                    &databases_clone,
+                                );
+                            }
+                        }
+
+                        ActiveTab::Pinned(idx) => {
+                            if let Some((pin_db, pin_table)) = self.pinned_tables.get(idx).cloned() {
+                                ui.centered_and_justified(|ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.strong(format!("Tabla fijada: {pin_db}.{pin_table}"));
+                                        ui.add_space(8.0);
+                                        if ui.button("Ir a datos").clicked() {
+                                            // Will be handled after render
+                                        }
+                                        ui.label("(Haz doble-click en la tabla del sidebar para cargar datos)");
+                                    });
+                                });
+                            }
                         }
                     }
                 });
@@ -740,18 +908,117 @@ impl eframe::App for RustqlApp {
             self.settings_dirty = true;
         }
 
-        if let Some(t) = tab_clicked {
-            self.active_tab = t;
+        // Persistir visibilidad de paneles cuando cambia
+        if self.show_sidebar != prev_sidebar || self.show_log != prev_log {
+            self.settings.show_sidebar = self.show_sidebar;
+            self.settings.show_log = self.show_log;
+            settings::save(&self.settings);
+        }
+
+        // Handle tab bar result
+        if let Some(t) = tab_bar_result.tab_clicked {
+            match t {
+                ActiveTab::Pinned(idx) => {
+                    if let Some((pin_db, pin_table)) = self.pinned_tables.get(idx).cloned() {
+                        let already_selected = matches!(
+                            &self.selected_node,
+                            Some(SelectedNode::Table { db, table }) if *db == pin_db && *table == pin_table
+                        );
+                        if !already_selected {
+                            self.on_table_selected(pin_db, pin_table);
+                        }
+                        self.active_tab = ActiveTab::Datos;
+                    }
+                }
+                other => self.active_tab = other,
+            }
+        }
+
+        if tab_bar_result.new_sql_tab || ctrl_t {
+            let db_ctx = match &self.selected_node {
+                Some(SelectedNode::Database(d)) => d.clone(),
+                Some(SelectedNode::Table { db, .. }) => db.clone(),
+                _ => String::new(),
+            };
+            let new_idx = self.sql_tabs.len();
+            self.sql_tabs.push(SqlTab {
+                db_context: db_ctx,
+                sql_text: String::new(),
+                result: None,
+            });
+            self.active_tab = ActiveTab::Sql(new_idx);
+            self.save_tabs_state();
+        }
+
+        if let Some(close_idx) = tab_bar_result.close_sql_tab {
+            if close_idx < self.sql_tabs.len() {
+                self.sql_tabs.remove(close_idx);
+                if self.sql_tabs.is_empty() {
+                    self.sql_tabs.push(SqlTab::default());
+                }
+                self.active_tab = match self.active_tab {
+                    ActiveTab::Sql(i) if i >= close_idx => {
+                        let new_i = if i > 0 { i.saturating_sub(1) } else { 0 };
+                        ActiveTab::Sql(new_i.min(self.sql_tabs.len().saturating_sub(1)))
+                    }
+                    other => other,
+                };
+                self.save_tabs_state();
+            }
+        }
+
+        if let Some(close_idx) = tab_bar_result.close_pinned {
+            if close_idx < self.pinned_tables.len() {
+                self.pinned_tables.remove(close_idx);
+                if let ActiveTab::Pinned(i) = self.active_tab {
+                    if i >= close_idx {
+                        self.active_tab = if self.pinned_tables.is_empty() {
+                            ActiveTab::Datos
+                        } else {
+                            ActiveTab::Pinned(i.saturating_sub(1).min(self.pinned_tables.len().saturating_sub(1)))
+                        };
+                    }
+                }
+                self.save_tabs_state();
+            }
         }
 
         // Grid action
         match grid_action {
-            GridAction::SortChanged => self.recompute_sort(),
+            GridAction::SortChanged => {
+                // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
+                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                    let sql = self.build_sql(db, table);
+                    self.run_query(&sql);
+                }
+                self.save_table_state();
+            }
             GridAction::CellEditStarted { row_idx, col_idx, current_value } => {
                 self.editing_cell = Some(EditingCell {
                     row_idx,
                     col_idx,
                     buffer: current_value,
+                    needs_focus: true,
+                });
+            }
+            GridAction::CellSetNull { row_idx, col_idx } => {
+                self.editing_cell = None;
+                let original = self
+                    .table_data
+                    .as_ref()
+                    .and_then(|d| d.rows.get(row_idx))
+                    .and_then(|r| r.get(col_idx))
+                    .cloned()
+                    .unwrap_or_default();
+                // Eliminar edit previo si existía y añadir el SET NULL
+                self.pending_edits
+                    .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
+                self.pending_edits.push(PendingEdit {
+                    row_idx,
+                    col_idx,
+                    original,
+                    new_value: String::new(),
+                    is_null: true,
                 });
             }
             GridAction::CellEditCommitted { row_idx, col_idx, new_value } => {
@@ -773,7 +1040,7 @@ impl eframe::App for RustqlApp {
                     .iter_mut()
                     .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
                 {
-                    if new_value == existing.original {
+                    if new_value == existing.original && !existing.is_null {
                         // Revertido al original
                         let idx = self
                             .pending_edits
@@ -783,6 +1050,7 @@ impl eframe::App for RustqlApp {
                         self.pending_edits.remove(idx);
                     } else {
                         existing.new_value = new_value;
+                        existing.is_null = false;
                     }
                 } else {
                     self.pending_edits.push(PendingEdit {
@@ -790,6 +1058,7 @@ impl eframe::App for RustqlApp {
                         col_idx,
                         original,
                         new_value,
+                        is_null: false,
                     });
                 }
             }
@@ -802,6 +1071,36 @@ impl eframe::App for RustqlApp {
             GridAction::DiscardEdits => {
                 self.pending_edits.clear();
                 self.editing_cell = None;
+            }
+            GridAction::FilterBy { sql_fragment } => {
+                self.filter_text = sql_fragment;
+                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                    let sql = self.build_sql(db, table);
+                    self.run_query(&sql);
+                }
+            }
+            GridAction::FilterByClipboard { col_name } => {
+                match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                    Ok(text) => {
+                        let esc_col = format!("`{}`", col_name.replace('`', "``"));
+                        let esc_val = escape_sql(&text);
+                        self.filter_text = format!("{esc_col} = '{esc_val}'");
+                        if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                            let sql = self.build_sql(db, table);
+                            self.run_query(&sql);
+                        }
+                    }
+                    Err(e) => {
+                        self.table_error = Some(format!("No se pudo leer el portapapeles: {e}"));
+                    }
+                }
+            }
+            GridAction::FilterUserInput { col_name } => {
+                self.modal = ModalState::FilterInput {
+                    col_name,
+                    value: String::new(),
+                    operator: modals::FilterOperator::default(),
+                };
             }
             GridAction::None => {}
         }
@@ -836,15 +1135,7 @@ impl eframe::App for RustqlApp {
                     Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
                 );
                 if !already_selected {
-                    self.selected_node = Some(SelectedNode::Table {
-                        db: db.clone(),
-                        table: table.clone(),
-                    });
-                    self.pending_edits.clear();
-                    self.editing_cell = None;
-                    let sql = self.build_sql(&db, &table);
-                    self.run_query(&sql);
-                    self.load_primary_keys(&db, &table);
+                    self.on_table_selected(db, table);
                 }
                 self.active_tab = ActiveTab::Datos;
             }
@@ -911,15 +1202,78 @@ impl eframe::App for RustqlApp {
             SidebarAction::Disconnect => {
                 should_disconnect = true;
             }
+            SidebarAction::ToggleFav { db, table } => {
+                let key = format!("{}/{}", db, table);
+                if self.settings.fav_tables.contains(&key) {
+                    self.settings.fav_tables.remove(&key);
+                } else {
+                    self.settings.fav_tables.insert(key);
+                }
+                settings::save(&self.settings);
+            }
+            SidebarAction::PinTable { db, table } => {
+                let already_pinned = self.pinned_tables.iter().any(|(d, t)| *d == db && *t == table);
+                if !already_pinned {
+                    self.pinned_tables.push((db, table));
+                    self.save_tabs_state();
+                }
+            }
+            SidebarAction::OpenTableStructure { db, table } => {
+                let already_selected = matches!(
+                    &self.selected_node,
+                    Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
+                );
+                if !already_selected {
+                    self.on_table_selected(db, table);
+                }
+                self.active_tab = ActiveTab::Tabla;
+            }
+            SidebarAction::OpenInSql { db, table } => {
+                let new_idx = self.sql_tabs.len();
+                let sql_text = format!("SELECT * FROM `{}`.`{}` WHERE ", db, table);
+                self.sql_tabs.push(SqlTab {
+                    db_context: db.clone(),
+                    sql_text,
+                    result: None,
+                });
+                self.active_tab = ActiveTab::Sql(new_idx);
+                self.save_tabs_state();
+            }
         }
 
         if should_disconnect {
             self.state = AppState::Disconnected;
         }
 
+        // F5: recargar grid (invalida también caché de estructura de la tabla)
+        if f5 {
+            if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                // Invalidar caché de columnas para reflejar cambios estructurales
+                self.columns_info.remove(&(db.clone(), table.clone()));
+                let sql = self.build_sql(db, table);
+                self.run_query(&sql);
+            }
+        }
+
         // Filter action
         match filter_action {
-            filter_bar::FilterAction::Apply | filter_bar::FilterAction::Clear => {
+            filter_bar::FilterAction::Apply => {
+                if let Some(SelectedNode::Table { db, table }) =
+                    self.selected_node.clone().as_ref()
+                {
+                    // Añadir al historial de la tabla si hay texto
+                    let filter = self.filter_text.trim().to_string();
+                    if !filter.is_empty() {
+                        self.filter_history.retain(|f| f != &filter);
+                        self.filter_history.insert(0, filter);
+                        self.filter_history.truncate(20);
+                    }
+                    let sql = self.build_sql(db, table);
+                    self.run_query(&sql);
+                    self.save_table_state();
+                }
+            }
+            filter_bar::FilterAction::Clear => {
                 if let Some(SelectedNode::Table { db, table }) =
                     self.selected_node.clone().as_ref()
                 {
@@ -938,17 +1292,14 @@ impl eframe::App for RustqlApp {
                 _ => None,
             };
             if let Some(db) = db {
-                self.selected_node = Some(SelectedNode::Table {
-                    db: db.clone(),
-                    table: table.clone(),
-                });
+                self.on_table_selected(db, table);
                 self.active_tab = ActiveTab::Datos;
-                self.pending_edits.clear();
-                self.editing_cell = None;
-                let sql = self.build_sql(&db, &table);
-                self.run_query(&sql);
-                self.load_primary_keys(&db, &table);
             }
+        }
+
+        // Persistir texto de pestañas SQL al ejecutar
+        if matches!(sql_action, SqlEditorAction::Execute(_)) {
+            self.save_tabs_state();
         }
 
         // SQL editor
@@ -959,17 +1310,24 @@ impl eframe::App for RustqlApp {
                 _ => return,
             };
             let duration_ms = start.elapsed().as_millis() as u64;
-            match result {
+            let query_result = match result {
                 Ok(data) => {
                     let rows = data.rows.len();
                     self.push_log(LogEntry::ok(&sql, duration_ms, rows));
-                    self.sql_editor_result = Some(Ok(data));
+                    Some(Ok(data))
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err(&sql, duration_ms, &e));
-                    self.sql_editor_result = Some(Err(e));
+                    Some(Err(e))
+                }
+            };
+            // Store result in active SQL tab
+            if let ActiveTab::Sql(tab_idx) = self.active_tab {
+                if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
+                    tab.result = query_result.clone();
                 }
             }
+            self.sql_editor_result = query_result.map(|r| r.map_err(|e| e));
         }
 
         // Modal action
@@ -1062,6 +1420,14 @@ impl eframe::App for RustqlApp {
                 }
                 self.invalidate_after_write(Some(&db), None);
             }
+            ModalAction::ApplyFilter { sql_fragment } => {
+                self.modal = ModalState::None;
+                self.filter_text = sql_fragment;
+                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                    let sql = self.build_sql(db, table);
+                    self.run_query(&sql);
+                }
+            }
         }
 
         // Profile selection & management
@@ -1139,3 +1505,4 @@ impl eframe::App for RustqlApp {
         }
     }
 }
+

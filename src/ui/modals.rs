@@ -21,6 +21,36 @@ impl NewColumnDef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum FilterOperator {
+    #[default]
+    Equals,
+    NotEquals,
+    Contains,
+    StartsWith,
+    EndsWith,
+    GreaterThan,
+    LessThan,
+    GreaterOrEqual,
+    LessOrEqual,
+}
+
+impl FilterOperator {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Equals       => "= igual a",
+            Self::NotEquals    => "≠ distinto de",
+            Self::Contains     => "LIKE '%…%' contiene",
+            Self::StartsWith   => "LIKE '…%' empieza por",
+            Self::EndsWith     => "LIKE '%…' termina en",
+            Self::GreaterThan  => "> mayor que",
+            Self::LessThan     => "< menor que",
+            Self::GreaterOrEqual => ">= mayor o igual",
+            Self::LessOrEqual  => "<= menor o igual",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DropKind {
     Database,
@@ -62,6 +92,11 @@ pub enum ModalState {
         db: Option<String>,
         table: Option<String>,
     },
+    FilterInput {
+        col_name: String,
+        value: String,
+        operator: FilterOperator,
+    },
 }
 
 // ── Acciones devueltas al caller ──────────────────────────────────────────────
@@ -74,6 +109,7 @@ pub enum ModalAction {
     DropTable { db: String, table: String },
     TruncateTable { db: String, table: String },
     TruncateAllTables(String),
+    ApplyFilter { sql_fragment: String },
     Cancel,
 }
 
@@ -114,6 +150,9 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
         }
         ModalState::ConfirmTruncate { kind, target, db, table } => {
             show_confirm_truncate(ctx, kind, target, db, table)
+        }
+        ModalState::FilterInput { col_name, value, operator } => {
+            show_filter_input(ctx, col_name, value, operator)
         }
     }
 }
@@ -449,6 +488,99 @@ fn show_confirm_truncate(
     }
 
     action
+}
+
+// ── Filtro por texto ──────────────────────────────────────────────────────────
+
+const FILTER_OPERATORS: &[FilterOperator] = &[
+    FilterOperator::Equals,
+    FilterOperator::NotEquals,
+    FilterOperator::Contains,
+    FilterOperator::StartsWith,
+    FilterOperator::EndsWith,
+    FilterOperator::GreaterThan,
+    FilterOperator::LessThan,
+    FilterOperator::GreaterOrEqual,
+    FilterOperator::LessOrEqual,
+];
+
+fn show_filter_input(
+    ctx: &egui::Context,
+    col_name: &mut String,
+    value: &mut String,
+    operator: &mut FilterOperator,
+) -> ModalAction {
+    let mut action = ModalAction::None;
+    let mut open = true;
+
+    egui::Window::new(format!("Filtrar por {col_name}"))
+        .collapsible(false)
+        .resizable(false)
+        .min_width(320.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            egui::Grid::new("filter_input_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Operador:");
+                    egui::ComboBox::from_id_salt("filter_op_combo")
+                        .selected_text(operator.label())
+                        .width(200.0)
+                        .show_ui(ui, |ui| {
+                            for op in FILTER_OPERATORS {
+                                ui.selectable_value(operator, op.clone(), op.label());
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Valor:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(value)
+                            .desired_width(200.0)
+                            .hint_text("valor a filtrar"),
+                    );
+                    // Auto-foco en el campo de texto
+                    resp.request_focus();
+                    ui.end_row();
+                });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                let apply_clicked = ui.button("Aplicar").clicked();
+                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if apply_clicked || enter_pressed {
+                    let frag = build_filter_fragment(col_name, operator, value);
+                    action = ModalAction::ApplyFilter { sql_fragment: frag };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    if !open {
+        action = ModalAction::Cancel;
+    }
+
+    action
+}
+
+fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str) -> String {
+    let esc_col = format!("`{}`", col_name.replace('`', "``"));
+    let esc_val = value.replace('\\', "\\\\").replace('\'', "\\'");
+    match operator {
+        FilterOperator::Equals       => format!("{esc_col} = '{esc_val}'"),
+        FilterOperator::NotEquals    => format!("{esc_col} != '{esc_val}'"),
+        FilterOperator::Contains     => format!("{esc_col} LIKE '%{esc_val}%'"),
+        FilterOperator::StartsWith   => format!("{esc_col} LIKE '{esc_val}%'"),
+        FilterOperator::EndsWith     => format!("{esc_col} LIKE '%{esc_val}'"),
+        FilterOperator::GreaterThan  => format!("{esc_col} > '{esc_val}'"),
+        FilterOperator::LessThan     => format!("{esc_col} < '{esc_val}'"),
+        FilterOperator::GreaterOrEqual => format!("{esc_col} >= '{esc_val}'"),
+        FilterOperator::LessOrEqual  => format!("{esc_col} <= '{esc_val}'"),
+    }
 }
 
 // ── Helpers para construir CREATE TABLE SQL ───────────────────────────────────

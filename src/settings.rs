@@ -3,6 +3,13 @@ use std::path::PathBuf;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+/// Pestaña SQL guardada (sin resultado, solo texto y contexto de BD).
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct SavedSqlTab {
+    pub db_context: String,
+    pub sql_text: String,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub enum Theme {
     System,
@@ -10,10 +17,24 @@ pub enum Theme {
     Dark,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub theme: Theme,
     pub font_size: f32,
+    #[serde(default = "default_true")]
+    pub show_sidebar: bool,
+    #[serde(default = "default_true")]
+    pub show_log: bool,
+    #[serde(default)]
+    pub fav_tables: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub pinned_tables: Vec<(String, String)>,
+    #[serde(default)]
+    pub sql_tabs: Vec<SavedSqlTab>,
 }
 
 impl Default for AppSettings {
@@ -21,6 +42,11 @@ impl Default for AppSettings {
         Self {
             theme: Theme::System,
             font_size: 13.0,
+            show_sidebar: true,
+            show_log: true,
+            fav_tables: std::collections::HashSet::new(),
+            pinned_tables: Vec::new(),
+            sql_tabs: Vec::new(),
         }
     }
 }

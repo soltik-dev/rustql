@@ -7,12 +7,57 @@ pub enum FilterAction {
 }
 
 /// Barra de filtro WHERE encima del grid.
+/// `filter_history` contiene los últimos filtros aplicados (más reciente primero).
 /// Retorna la acción que el usuario tomó este frame.
-/// F9 se detecta en app.rs y se pasa como `f9_pressed`.
-pub fn show(ui: &mut egui::Ui, filter_text: &mut String, f9_pressed: bool) -> FilterAction {
+pub fn show(
+    ui: &mut egui::Ui,
+    filter_text: &mut String,
+    f9_pressed: bool,
+    filter_history: &[String],
+) -> FilterAction {
     let mut action = FilterAction::None;
 
     ui.horizontal(|ui| {
+        // ── Botón historial ──────────────────────────────────────────────
+        let hist_btn = ui
+            .button("▾")
+            .on_hover_text("Historial de filtros recientes");
+        let popup_id = ui.make_persistent_id("filter_history_popup");
+
+        if hist_btn.clicked() {
+            egui::Popup::toggle_id(ui.ctx(), popup_id);
+        }
+
+        let selected = egui::Popup::from_response(&hist_btn)
+            .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .open_memory(None::<egui::SetOpenCommand>)
+            .show(|ui| {
+                ui.set_min_width(280.0);
+                let mut picked: Option<String> = None;
+                if filter_history.is_empty() {
+                    ui.label("Sin historial");
+                } else {
+                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        for entry in filter_history {
+                            if ui.selectable_label(false, entry).clicked() {
+                                picked = Some(entry.clone());
+                                egui::Popup::close_id(ui.ctx(), popup_id);
+                            }
+                        }
+                    });
+                }
+                picked
+            });
+
+        if let Some(inner) = selected {
+            if let Some(entry) = inner.inner {
+                *filter_text = entry;
+                action = FilterAction::Apply;
+            }
+        }
+
+        // ── Etiqueta + campo de texto ────────────────────────────────────
         ui.label("WHERE");
 
         let resp = ui.add(

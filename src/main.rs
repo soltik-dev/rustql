@@ -5,6 +5,7 @@ mod db;
 mod log;
 mod profiles;
 mod settings;
+mod table_state;
 mod ui;
 
 use app::RustqlApp;
@@ -57,7 +58,7 @@ fn setup_fonts(ctx: &egui::Context) {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "system_fallback".to_owned(),
-                egui::FontData::from_owned(data),
+                egui::FontData::from_owned(data).into(),
             );
             // Añadir al final de la lista proporcional: se usa solo como fallback
             // para glifos que Ubuntu-Light no tiene (flechas, símbolos, etc.)

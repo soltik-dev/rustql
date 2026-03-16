@@ -12,13 +12,14 @@ pub struct FormResult {
 }
 
 /// Panel izquierdo: lista de favoritos guardados.
-/// Retorna el índice del perfil seleccionado si el usuario hace click en uno.
+/// Retorna (índice del perfil seleccionado, true si fue doble-click para conectar).
 pub fn show_favorites(
     ui: &mut egui::Ui,
     profiles: &[ConnectionProfile],
     selected_idx: &Option<usize>,
-) -> Option<usize> {
+) -> (Option<usize>, bool) {
     let mut clicked = None;
+    let mut connect_now = false;
 
     ui.add_space(8.0);
     ui.heading("Favoritos");
@@ -33,14 +34,19 @@ pub fn show_favorites(
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, profile) in profiles.iter().enumerate() {
                 let is_selected = selected_idx.is_some_and(|s| s == i);
-                if ui.selectable_label(is_selected, &profile.name).clicked() {
+                let resp = ui.selectable_label(is_selected, &profile.name);
+                if resp.clicked() {
                     clicked = Some(i);
+                }
+                if resp.double_clicked() {
+                    clicked = Some(i);
+                    connect_now = true;
                 }
             }
         });
     }
 
-    clicked
+    (clicked, connect_now)
 }
 
 /// Panel derecho: formulario de conexión + botones de gestión.

@@ -2,6 +2,13 @@ use eframe::egui;
 
 use crate::db::QueryResult;
 
+#[derive(Default, Clone)]
+pub struct SqlTab {
+    pub db_context: String,
+    pub sql_text: String,
+    pub result: Option<Result<QueryResult, String>>,
+}
+
 pub enum SqlEditorAction {
     None,
     Execute(String),
@@ -13,16 +20,39 @@ pub fn show(
     sql_text: &mut String,
     last_result: &Option<Result<QueryResult, String>>,
     f9_pressed: bool,
+    db_context: &mut String,
+    databases: &[String],
 ) -> SqlEditorAction {
     let mut action = SqlEditorAction::None;
 
     // Barra de controles
     ui.horizontal(|ui| {
+        ui.label("BD:");
+        egui::ComboBox::from_id_salt("sql_db_context")
+            .selected_text(if db_context.is_empty() { "(ninguna)" } else { db_context.as_str() })
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(db_context.is_empty(), "(ninguna)").clicked() {
+                    db_context.clear();
+                }
+                for db in databases {
+                    if ui.selectable_label(db_context == db, db).clicked() {
+                        *db_context = db.clone();
+                    }
+                }
+            });
+
+        ui.separator();
         ui.label("SQL libre:");
         if ui.button("▶ Ejecutar  F9").clicked() || f9_pressed {
             let sql = sql_text.trim().to_string();
             if !sql.is_empty() {
-                action = SqlEditorAction::Execute(sql);
+                let full_sql = if db_context.is_empty() {
+                    sql
+                } else {
+                    format!("USE `{}`;\n{}", db_context, sql)
+                };
+                action = SqlEditorAction::Execute(full_sql);
             }
         }
         if ui.button("Limpiar").clicked() {
