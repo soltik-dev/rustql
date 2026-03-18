@@ -116,11 +116,10 @@ pub fn show(
             .default_open(true)
             .show(ui, |ui| {
                 for db in &dbs {
-                    if filtering && !tables_cache.contains_key(db) {
-                        if let Ok(tables) = backend.list_tables(db) {
+                    if filtering && !tables_cache.contains_key(db)
+                        && let Ok(tables) = backend.list_tables(db) {
                             tables_cache.insert(db.clone(), tables);
                         }
-                    }
 
                     let matching: Vec<String> = if filtering {
                         tables_cache
@@ -137,7 +136,7 @@ pub fn show(
                     };
 
                     if *show_only_fav {
-                        let has_fav = tables_cache.get(db).map_or(false, |ts| {
+                        let has_fav = tables_cache.get(db).is_some_and(|ts| {
                             ts.iter().any(|t| fav_tables.contains(&format!("{}/{}", db, t)))
                         });
                         if !has_fav {

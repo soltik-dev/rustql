@@ -50,21 +50,22 @@ pub fn show(
                 picked
             });
 
-        if let Some(inner) = selected {
-            if let Some(entry) = inner.inner {
+        if let Some(inner) = selected
+            && let Some(entry) = inner.inner {
                 *filter_text = entry;
                 action = FilterAction::Apply;
             }
-        }
 
         // ── Etiqueta + campo de texto ────────────────────────────────────
         ui.label("WHERE");
 
-        let resp = ui.add(
-            egui::TextEdit::singleline(filter_text)
-                .hint_text("id = 1 AND nombre LIKE 'foo%'")
-                .desired_width(ui.available_width() - 160.0),
-        );
+        let resp = ui
+            .add(
+                egui::TextEdit::singleline(filter_text)
+                    .hint_text("id = 1 AND nombre LIKE 'foo%'")
+                    .desired_width(ui.available_width() - 160.0),
+            )
+            .on_hover_text("SQL directo — se inyecta como cláusula WHERE en la consulta");
 
         // Enter en el campo también aplica
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -75,12 +76,11 @@ pub fn show(
             action = FilterAction::Apply;
         }
 
-        if !filter_text.is_empty() {
-            if ui.button("[x]").on_hover_text("Limpiar filtro").clicked() {
+        if !filter_text.is_empty()
+            && ui.button("[x]").on_hover_text("Limpiar filtro").clicked() {
                 filter_text.clear();
                 action = FilterAction::Clear;
             }
-        }
     });
 
     action

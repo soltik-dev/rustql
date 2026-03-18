@@ -1,8 +1,10 @@
+use std::collections::VecDeque;
+
 use eframe::egui;
 
 use crate::log::LogEntry;
 
-pub fn show(ui: &mut egui::Ui, log: &[LogEntry]) {
+pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) {
     ui.horizontal(|ui| {
         ui.strong("Log de consultas");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

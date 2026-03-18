@@ -2,7 +2,7 @@ use mysql::{Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Valu
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, TableInfo,
-    escape_sql,
+    escape_sql, validate_charset,
 };
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -220,6 +220,7 @@ impl DbBackend for MysqlBackend {
     }
 
     fn create_database(&mut self, name: &str, charset: &str) -> DbResult<()> {
+        validate_charset(charset)?;
         let sql = format!(
             "CREATE DATABASE `{}` CHARACTER SET {}",
             name.replace('`', "``"),
@@ -249,5 +250,19 @@ impl DbBackend for MysqlBackend {
             table.replace('`', "``")
         );
         self.execute_write(&sql).map(|_| ())
+    }
+
+    fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()> {
+        let mut conn = self.conn()?;
+        conn.query_drop("START TRANSACTION")
+            .map_err(|e| format!("Error iniciando transacción: {e}"))?;
+        for sql in stmts {
+            if let Err(e) = conn.query_drop(sql.as_str()) {
+                let _ = conn.query_drop("ROLLBACK");
+                return Err(format!("Error en transacción (ROLLBACK): {e}"));
+            }
+        }
+        conn.query_drop("COMMIT")
+            .map_err(|e| format!("Error en COMMIT: {e}"))
     }
 }

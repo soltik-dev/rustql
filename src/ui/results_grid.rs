@@ -1,10 +1,11 @@
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::db::QueryResult;
+use crate::db::{ColumnInfo, QueryResult};
 
 // ── Tipos de ordenación ───────────────────────────────────────────────────────
 
@@ -35,14 +36,27 @@ pub struct PendingEdit {
     pub is_null: bool,
 }
 
+/// Sentinel: row_idx values >= this mean "pending insert row at index (row_idx - INSERT_ROW_BASE)"
+pub const INSERT_ROW_BASE: usize = usize::MAX / 2;
+
+/// A pending insert row at the bottom of the grid.
+#[derive(Debug, Clone)]
+pub struct PendingInsert {
+    /// Values per column. None = use DEFAULT/AUTO (displayed as "(AUTO)" for auto_increment, "" otherwise)
+    pub values: Vec<Option<String>>,
+    /// Which columns are auto_increment (shown as "(AUTO)", excluded from INSERT SQL)
+    pub auto_cols: Vec<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EditingCell {
-    pub row_idx: usize,
+    pub row_idx: usize,    // >= INSERT_ROW_BASE if editing an insert row
     pub col_idx: usize,
     /// Buffer de edición mutable mientras el usuario escribe.
     pub buffer: String,
     /// Solicitar foco al TextEdit en el primer frame de edición.
     pub needs_focus: bool,
+    pub is_insert: bool,   // true when editing a pending insert row
 }
 
 #[derive(Debug)]
@@ -53,24 +67,35 @@ pub enum GridAction {
     CellEditCommitted { row_idx: usize, col_idx: usize, new_value: String },
     CellSetNull { row_idx: usize, col_idx: usize },
     CellEditCancelled,
+    CellEditTabNext { row_idx: usize, col_idx: usize, new_value: String },
     ApplyEdits,
     DiscardEdits,
     // Filtrado desde menú contextual
     FilterBy { sql_fragment: String },
     FilterByClipboard { col_name: String },
     FilterUserInput { col_name: String },
-    // Filas
-    DeleteRow { row_idx: usize },
+    // Inline delete/insert/clone
+    MarkDeleteRow { row_idx: usize },
     InsertRow,
+    CloneRow { row_idx: usize },
+    RemoveInsertRow { insert_idx: usize },
+    // Row selection
+    RowSelected { row_idx: usize, shift: bool, ctrl: bool },
+    CopySelectedRows,
+    // Cell selection via plain click
+    CellSelected { row_idx: usize, col_idx: usize },
+    // Mark multiple rows for delete (used when selected_rows is non-empty)
+    MarkDeleteRows { row_indices: Vec<usize> },
 }
 
 // ── Barra de apply ────────────────────────────────────────────────────────────
 
 /// Renderiza la barra inferior de cambios pendientes.
-/// Retorna `GridAction::ApplyEdits` o `GridAction::DiscardEdits` si se pulsó.
 pub fn show_apply_bar(
     ui: &mut egui::Ui,
     pending_edits: &[PendingEdit],
+    pending_deletes: usize,
+    pending_inserts: usize,
     ctrl_enter: bool,
     pk_missing: bool,
 ) -> GridAction {
@@ -83,10 +108,24 @@ pub fn show_apply_bar(
                 "⚠ Sin clave primaria — no se puede guardar",
             );
         } else {
-            ui.colored_label(
-                egui::Color32::from_rgb(200, 150, 0),
-                format!("● {} cambio(s) sin guardar", pending_edits.len()),
-            );
+            if !pending_edits.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 150, 0),
+                    format!("● {} edición(es)", pending_edits.len()),
+                );
+            }
+            if pending_deletes > 0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 80, 80),
+                    format!("🗑 {} eliminación(es)", pending_deletes),
+                );
+            }
+            if pending_inserts > 0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(80, 180, 80),
+                    format!("➕ {} inserción(es)", pending_inserts),
+                );
+            }
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -118,47 +157,9 @@ fn looks_like_datetime(s: &str) -> bool {
         && b[8..10].iter().all(|c| c.is_ascii_digit())
 }
 
-/// Devuelve la fecha/hora actual formateada como "YYYY-MM-DD HH:MM:SS".
+/// Devuelve la fecha/hora local actual formateada como "YYYY-MM-DD HH:MM:SS".
 fn current_datetime() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Desglose manual de timestamp Unix en componentes de fecha/hora UTC
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400; // días desde 1970-01-01
-
-    // Calcular año, mes, día a partir de días
-    let mut year = 1970u32;
-    let mut remaining = days as u32;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        year += 1;
-    }
-    let months = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1u32;
-    for &days_in_month in &months {
-        if remaining < days_in_month {
-            break;
-        }
-        remaining -= days_in_month;
-        month += 1;
-    }
-    let day = remaining + 1;
-
-    format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}")
-}
-
-fn is_leap(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 // ── Helpers para filtros ──────────────────────────────────────────────────────
@@ -209,16 +210,10 @@ fn trunc_display(s: &str, max: usize) -> String {
 
 // ── Ancho inteligente de columnas ────────────────────────────────────────────
 
-/// Calcula el ancho inicial de cada columna en base al nombre de la cabecera
-/// y al contenido de las primeras 200 filas. Siempre reserva espacio para el
-/// indicador de ordenación ("↑1") para que no se trunque al ordenar.
 fn compute_col_widths(ui: &egui::Ui, data: &QueryResult) -> Vec<f32> {
     let font_size = ui.text_style_height(&egui::TextStyle::Body);
-    // Ancho estimado por carácter para fuente proporcional
     let char_w = font_size * 0.60;
-    // Espacio extra siempre reservado para " ↑1" (peor caso de indicador de orden)
     let sort_reserve = font_size * 1.8;
-    // Padding horizontal de celda (botón de cabecera) + scroll margin
     let padding = 8.0;
 
     let sample = data.rows.len().min(200);
@@ -241,10 +236,49 @@ fn compute_col_widths(ui: &egui::Ui, data: &QueryResult) -> Vec<f32> {
         .collect()
 }
 
+// ── Format rows for copy ──────────────────────────────────────────────────────
+
+pub fn format_rows_for_copy(
+    columns: &[String],
+    rows: &[&Vec<Option<String>>],
+    fmt: &crate::settings::CopyFormat,
+) -> String {
+    match fmt {
+        crate::settings::CopyFormat::Csv => {
+            let header = columns.iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(",");
+            let data_rows: Vec<String> = rows.iter().map(|row| {
+                row.iter().map(|cell| match cell {
+                    None => "NULL".to_string(),
+                    Some(v) => format!("\"{}\"", v.replace('"', "\"\"")),
+                }).collect::<Vec<_>>().join(",")
+            }).collect();
+            std::iter::once(header).chain(data_rows).collect::<Vec<_>>().join("\n")
+        }
+        crate::settings::CopyFormat::Tsv => {
+            rows.iter().map(|row| {
+                row.iter().map(|cell| cell.as_deref().unwrap_or("")).collect::<Vec<_>>().join("\t")
+            }).collect::<Vec<_>>().join("\n")
+        }
+        crate::settings::CopyFormat::SqlInserts => {
+            rows.iter().map(|row| {
+                let vals: Vec<String> = row.iter().map(|cell| match cell {
+                    None => "NULL".to_string(),
+                    Some(v) => format!("'{}'", crate::db::escape_sql(v)),
+                }).collect();
+                format!("-- INSERT VALUES ({})", vals.join(", "))
+            }).collect::<Vec<_>>().join("\n")
+        }
+    }
+}
+
 // ── Grid principal ────────────────────────────────────────────────────────────
 
 /// Muestra el grid de datos con soporte de edición de celdas.
 /// Retorna la acción del usuario este frame.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     selected_table: &Option<(String, String)>,
@@ -253,8 +287,16 @@ pub fn show(
     sorts: &mut Vec<SortSpec>,
     sort_indices: &[usize],
     pending_edits: &[PendingEdit],
+    pending_deletes: &BTreeSet<usize>,
+    pending_inserts: &[PendingInsert],
     editing_cell: &mut Option<EditingCell>,
     selected_cell: &mut Option<(usize, usize)>,
+    selected_rows: &mut BTreeSet<usize>,
+    _last_selected_row: &mut Option<usize>,
+    drag_select_from: &mut Option<usize>,
+    _primary_keys: &[String],
+    column_info: &[ColumnInfo],
+    query_loading: bool,
 ) -> GridAction {
     match (selected_table, result, error) {
         (None, _, _) => {
@@ -271,11 +313,27 @@ pub fn show(
         }
         (Some(_), None, None) => {
             ui.centered_and_justified(|ui| {
-                ui.label("Cargando…");
+                if query_loading {
+                    ui.spinner();
+                    ui.label("Ejecutando consulta…");
+                } else {
+                    ui.label("Cargando…");
+                }
             });
             return GridAction::None;
         }
         _ => {}
+    }
+
+    // Show spinner overlay if loading but we have stale data
+    if query_loading {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.spinner();
+                ui.label("Ejecutando consulta…");
+            });
+        });
+        return GridAction::None;
     }
 
     let (db, table) = selected_table.as_ref().unwrap();
@@ -334,11 +392,12 @@ pub fn show(
     }
 
     let col_count = data.columns.len();
-    let row_count = if sort_indices.is_empty() {
+    let real_row_count = if sort_indices.is_empty() {
         data.rows.len()
     } else {
         sort_indices.len()
     };
+    let total_row_count = real_row_count + pending_inserts.len();
 
     // Señales fuera de closures para evitar conflictos de borrow
     let mut clicked_col: Option<usize> = None;
@@ -346,19 +405,20 @@ pub fn show(
     // Usamos RefCell para mutabilidad interior en closures anidados de egui
     let edit_cell_rc: RefCell<Option<EditingCell>> = RefCell::new(editing_cell.take());
     let grid_action_rc: RefCell<GridAction> = RefCell::new(GridAction::None);
+    // Track drag state
+    let drag_current_row_rc: RefCell<Option<usize>> = RefCell::new(None);
 
     // Altura de fila fija para evitar salto de layout al comenzar a editar
     let row_h = 22.0;
 
     // Anchos inteligentes por columna basados en cabecera + muestra de contenido
     let col_widths = compute_col_widths(ui, data);
-    let total_width: f32 = col_widths.iter().sum::<f32>() + 24.0; // margen para scrollbar
+    let total_width: f32 = col_widths.iter().sum::<f32>() + 24.0;
 
     // Atajos de teclado para la celda seleccionada
     let mut keyboard_action = GridAction::None;
     let no_widget_focused = ui.memory(|m| m.focused().is_none());
     if no_widget_focused && editing_cell.is_none() {
-        // Navegación con flechas
         let arrow_up    = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
         let arrow_down  = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
         let arrow_left  = ui.input(|i| i.key_pressed(egui::Key::ArrowLeft));
@@ -366,7 +426,7 @@ pub fn show(
         if arrow_up || arrow_down || arrow_left || arrow_right {
             let (r, c) = selected_cell.unwrap_or((0, 0));
             let new_r = if arrow_up   { r.saturating_sub(1) }
-                        else if arrow_down  { (r + 1).min(row_count.saturating_sub(1)) }
+                        else if arrow_down  { (r + 1).min(real_row_count.saturating_sub(1)) }
                         else { r };
             let new_c = if arrow_left  { c.saturating_sub(1) }
                         else if arrow_right { (c + 1).min(col_count.saturating_sub(1)) }
@@ -374,33 +434,52 @@ pub fn show(
             *selected_cell = Some((new_r, new_c));
         }
 
-        if let Some((sel_row, sel_col)) = *selected_cell {
-            if sel_row < data.rows.len() {
-                if data.rows[sel_row].get(sel_col).is_some() {
+        if let Some((sel_row, sel_col)) = *selected_cell
+            && sel_row < data.rows.len()
+                && data.rows[sel_row].get(sel_col).is_some() {
                     let cell_str = data.rows[sel_row][sel_col].as_deref().unwrap_or("").to_string();
                     let ctrl = ui.input(|i| i.modifiers.ctrl);
 
-                    // Ctrl+C: copiar
+                    // Ctrl+C: copy single cell or selected rows
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::C)) {
-                        ui.ctx().copy_text(cell_str.clone());
+                        if selected_rows.is_empty() {
+                            ui.ctx().copy_text(cell_str.clone());
+                        } else {
+                            keyboard_action = GridAction::CopySelectedRows;
+                        }
                     }
                     // Ctrl+N: NULL
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::N)) {
                         keyboard_action = GridAction::CellSetNull { row_idx: sel_row, col_idx: sel_col };
                     }
-                    // Ctrl+Supr: eliminar fila
+                    // Ctrl+Del: mark/toggle delete row(s)
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
-                        keyboard_action = GridAction::DeleteRow { row_idx: sel_row };
+                        if selected_rows.is_empty() {
+                            keyboard_action = GridAction::MarkDeleteRow { row_idx: sel_row };
+                        } else {
+                            keyboard_action = GridAction::MarkDeleteRows {
+                                row_indices: selected_rows.iter().cloned().collect(),
+                            };
+                        }
                     }
-                    // Ctrl+Ins: insertar fila
+                    // Ctrl+Ins: insert row
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::Insert)) {
                         keyboard_action = GridAction::InsertRow;
                     }
-                    // Delete: vacío
+                    // Ctrl+D: clone row
+                    if ctrl && ui.input(|i| i.key_pressed(egui::Key::D)) {
+                        keyboard_action = GridAction::CloneRow { row_idx: sel_row };
+                    }
+                    // Delete: set NULL if nullable, else ""
                     if !ctrl && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
-                        keyboard_action = GridAction::CellEditCommitted {
-                            row_idx: sel_row, col_idx: sel_col, new_value: String::new(),
-                        };
+                        let is_nullable = column_info.get(sel_col).map(|c| c.is_nullable).unwrap_or(false);
+                        if is_nullable {
+                            keyboard_action = GridAction::CellSetNull { row_idx: sel_row, col_idx: sel_col };
+                        } else {
+                            keyboard_action = GridAction::CellEditCommitted {
+                                row_idx: sel_row, col_idx: sel_col, new_value: String::new(),
+                            };
+                        }
                     }
                     // F2 o Enter: editar
                     if ui.input(|i| i.key_pressed(egui::Key::F2)) {
@@ -422,14 +501,11 @@ pub fn show(
                     // Escape: deseleccionar
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         *selected_cell = None;
+                        selected_rows.clear();
                     }
                 }
-            }
-        }
     }
 
-    // El id incluye el sort actual para que egui recalcule anchos al ordenar
-    // (columnas anchas de IDs ordenados DESC necesitan más espacio)
     let sort_hash: u64 = sorts.iter().fold(0u64, |acc, s| {
         acc.wrapping_add(s.col_idx as u64)
             .wrapping_mul(31)
@@ -437,12 +513,10 @@ pub fn show(
     });
     let table_id = format!("{}/{}/{}", db, table, sort_hash);
 
-    // ScrollArea horizontal externa — TableBuilder maneja el scroll vertical interno
     egui::ScrollArea::horizontal()
         .id_salt(format!("{}_hscroll", table_id))
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // Forzar ancho mínimo para que el scrollbar aparezca si es necesario
             ui.set_min_width(total_width);
 
     let mut builder = TableBuilder::new(ui)
@@ -458,7 +532,19 @@ pub fn show(
                 header.col(|ui| {
                     let sort_pos = sorts.iter().position(|s| s.col_idx == col_i);
 
-                    let mut label = col_name.clone();
+                    // Build header label with icons
+                    let icon = if let Some(ci) = column_info.get(col_i) {
+                        match ci.column_key.as_str() {
+                            "PRI" => "🔑 ",
+                            "UNI" => "U ",
+                            "MUL" => "I ",
+                            _ => "",
+                        }
+                    } else {
+                        ""
+                    };
+
+                    let mut label = format!("{}{}", icon, col_name);
                     if let Some(pos) = sort_pos {
                         let arrow =
                             if sorts[pos].dir == SortDir::Asc { " ↑" } else { " ↓" };
@@ -488,279 +574,495 @@ pub fn show(
             }
         })
         .body(|body| {
-            body.rows(row_h, row_count, |mut row| {
-                let real_idx = if sort_indices.is_empty() {
-                    row.index()
-                } else {
-                    sort_indices[row.index()]
-                };
-                let row_data = &data.rows[real_idx];
+            body.rows(row_h, total_row_count, |mut row| {
+                let row_display_idx = row.index();
 
-                // ¿Esta fila tiene algún cambio pendiente?
-                let row_modified = pending_edits.iter().any(|e| e.row_idx == real_idx);
+                if row_display_idx < real_row_count {
+                    // ── Real data row ─────────────────────────────────────
+                    let real_idx = if sort_indices.is_empty() {
+                        row_display_idx
+                    } else {
+                        sort_indices[row_display_idx]
+                    };
+                    let row_data = &data.rows[real_idx];
 
-                for col_i in 0..col_count {
-                    row.col(|ui| {
-                        let is_editing = edit_cell_rc
-                            .borrow()
-                            .as_ref()
-                            .map_or(false, |e| e.row_idx == real_idx && e.col_idx == col_i);
+                    let is_pending_delete = pending_deletes.contains(&real_idx);
+                    let is_selected_row = selected_rows.contains(&real_idx) && !is_pending_delete;
+                    let row_modified = pending_edits.iter().any(|e| e.row_idx == real_idx);
 
-                        let pending = pending_edits
-                            .iter()
-                            .find(|e| e.row_idx == real_idx && e.col_idx == col_i);
+                    for col_i in 0..col_count {
+                        row.col(|ui| {
+                            let is_editing = edit_cell_rc
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|e| e.row_idx == real_idx && e.col_idx == col_i && !e.is_insert);
 
-                        if is_editing {
-                            // ── Celda en edición ──────────────────────────
-                            let mut ec = edit_cell_rc.borrow_mut();
-                            let edit = ec.as_mut().unwrap();
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut edit.buffer)
-                                    .desired_width(f32::INFINITY),
-                            );
+                            let pending = pending_edits
+                                .iter()
+                                .find(|e| e.row_idx == real_idx && e.col_idx == col_i);
 
-                            // Auto-foco en el primer frame de edición
-                            if edit.needs_focus {
-                                resp.request_focus();
-                                edit.needs_focus = false;
-                            }
-
-                            let enter_pressed = resp.has_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let committed = resp.lost_focus() || enter_pressed;
-                            let cancelled =
-                                ui.input(|i| i.key_pressed(egui::Key::Escape));
-
-                            if cancelled {
-                                *grid_action_rc.borrow_mut() = GridAction::CellEditCancelled;
-                            } else if committed {
-                                *grid_action_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                    row_idx: real_idx,
-                                    col_idx: col_i,
-                                    new_value: edit.buffer.clone(),
-                                };
-                            }
-                        } else if let Some(edit) = pending {
-                            // ── Celda con cambio pendiente ────────────────
-                            let cell_rect = ui.available_rect_before_wrap();
-                            // Fondo amarillo (toda la celda)
-                            ui.painter().rect_filled(
-                                cell_rect,
-                                0.0,
-                                egui::Color32::from_rgb(255, 235, 100),
-                            );
-                            // Triángulo naranja en la esquina superior derecha
-                            let pts = vec![
-                                cell_rect.right_top(),
-                                cell_rect.right_top() - egui::vec2(8.0, 0.0),
-                                cell_rect.right_top() + egui::vec2(0.0, 8.0),
-                            ];
-                            ui.painter().add(egui::Shape::convex_polygon(
-                                pts,
-                                egui::Color32::from_rgb(220, 120, 0),
-                                egui::Stroke::NONE,
-                            ));
-                            // Toda la celda es clicable (doble click para editar)
-                            let resp = ui.allocate_rect(cell_rect, egui::Sense::click());
-                            // Texto del nuevo valor
-                            if ui.is_rect_visible(cell_rect) {
-                                let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
-                                let painter = ui.painter().with_clip_rect(text_clip);
-                                let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
-                                if edit.is_null {
-                                    paint_text_truncated(ui, &painter, pos, "NULL", egui::Color32::from_rgb(120, 80, 0), text_clip.width());
-                                } else {
-                                    paint_text_truncated(ui, &painter, pos, &edit.new_value, egui::Color32::from_rgb(80, 50, 0), text_clip.width());
-                                }
-                            }
-
-                            if resp.double_clicked() {
-                                let start_value = if edit.is_null {
-                                    String::new()
-                                } else {
-                                    edit.new_value.clone()
-                                };
-                                *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
-                                    row_idx: real_idx,
-                                    col_idx: col_i,
-                                    current_value: start_value,
-                                };
-                            }
-                        } else {
-                            // ── Celda normal ──────────────────────────────
-                            let cell_opt = &row_data[col_i];
-                            let is_null_cell = cell_opt.is_none();
-                            let cell_text = cell_opt.as_deref().unwrap_or("").to_string();
                             let cell_rect = ui.available_rect_before_wrap();
 
-                            // Fondo tenue si la fila tiene cambios en otras celdas
-                            if row_modified {
-                                ui.painter().rect_filled(
-                                    cell_rect,
-                                    0.0,
-                                    egui::Color32::from_rgba_unmultiplied(255, 235, 100, 60),
-                                );
-                            }
-
-                            // Fondo de celda seleccionada
-                            let is_selected_cell = selected_cell.as_ref()
-                                .map_or(false, |&(r, c)| r == real_idx && c == col_i);
-                            if is_selected_cell {
+                            // Row background colors
+                            if is_pending_delete {
                                 ui.painter().rect_filled(
                                     cell_rect, 0.0,
-                                    ui.visuals().selection.bg_fill,
+                                    egui::Color32::from_rgba_unmultiplied(180, 50, 50, 80),
                                 );
+                            } else if is_selected_row {
+                                let sel_color = ui.visuals().selection.bg_fill;
+                                let sel_color_alpha = egui::Color32::from_rgba_unmultiplied(
+                                    sel_color.r(), sel_color.g(), sel_color.b(), 120,
+                                );
+                                ui.painter().rect_filled(cell_rect, 0.0, sel_color_alpha);
                             }
 
-                            // Toda la celda es interactiva (click, doble click, botón derecho)
-                            let resp = ui.allocate_rect(cell_rect, egui::Sense::click());
-                            // Pintar texto con clip para que no desborde la columna
-                            if ui.is_rect_visible(cell_rect) {
-                                let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
-                                let painter = ui.painter().with_clip_rect(text_clip);
-                                let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
-                                if is_null_cell {
-                                    let null_color = if ui.visuals().dark_mode {
-                                        egui::Color32::from_rgb(120, 120, 140)
-                                    } else {
-                                        egui::Color32::from_rgb(160, 160, 180)
+                            if is_editing {
+                                // ── Celda en edición ──────────────────────────
+                                let mut ec = edit_cell_rc.borrow_mut();
+                                let edit = ec.as_mut().unwrap();
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut edit.buffer)
+                                        .desired_width(f32::INFINITY),
+                                );
+
+                                if edit.needs_focus {
+                                    resp.request_focus();
+                                    edit.needs_focus = false;
+                                }
+
+                                let tab_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                                let enter_pressed = resp.has_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                let committed = resp.lost_focus() || enter_pressed;
+                                let cancelled =
+                                    ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                                if tab_pressed && resp.has_focus() {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditTabNext {
+                                        row_idx: real_idx,
+                                        col_idx: col_i,
+                                        new_value: edit.buffer.clone(),
                                     };
-                                    paint_text_truncated(ui, &painter, pos, "NULL", null_color, text_clip.width());
-                                } else {
-                                    let text_color = ui.visuals().text_color();
-                                    paint_text_truncated(ui, &painter, pos, &cell_text, text_color, text_clip.width());
+                                } else if cancelled {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditCancelled;
+                                } else if committed {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditCommitted {
+                                        row_idx: real_idx,
+                                        col_idx: col_i,
+                                        new_value: edit.buffer.clone(),
+                                    };
                                 }
-                            }
-
-                            if resp.clicked() {
-                                *selected_cell = Some((real_idx, col_i));
-                            }
-                            if resp.double_clicked() {
-                                *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
-                                    row_idx: real_idx,
-                                    col_idx: col_i,
-                                    current_value: cell_text.clone(),
-                                };
-                            }
-
-                            // Menú contextual (botón derecho) — estándar en todos los
-                            // clientes SQL: HeidiSQL, DataGrip, TablePlus, etc.
-                            let is_dt = looks_like_datetime(&cell_text);
-                            let ctx = ui.ctx().clone();
-                            let ga_rc = &grid_action_rc;
-                            let col_name = data.columns[col_i].clone();
-                            resp.context_menu(|ui| {
-                                if ui.button("📋  Copiar valor").clicked() {
-                                    ctx.copy_text(cell_text.clone());
-                                    ui.close();
+                            } else if let Some(edit) = pending {
+                                // ── Celda con cambio pendiente ────────────────
+                                if !is_pending_delete {
+                                    ui.painter().rect_filled(
+                                        cell_rect,
+                                        0.0,
+                                        egui::Color32::from_rgb(255, 235, 100),
+                                    );
+                                    let pts = vec![
+                                        cell_rect.right_top(),
+                                        cell_rect.right_top() - egui::vec2(8.0, 0.0),
+                                        cell_rect.right_top() + egui::vec2(0.0, 8.0),
+                                    ];
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        pts,
+                                        egui::Color32::from_rgb(220, 120, 0),
+                                        egui::Stroke::NONE,
+                                    ));
                                 }
-                                ui.separator();
-                                if ui.button("✏  Editar celda").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::CellEditStarted {
-                                        row_idx: real_idx, col_idx: col_i,
+                                let resp = ui.allocate_rect(cell_rect, egui::Sense::click());
+                                if ui.is_rect_visible(cell_rect) {
+                                    let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
+                                    let painter = ui.painter().with_clip_rect(text_clip);
+                                    let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
+                                    if is_pending_delete {
+                                        let muted = egui::Color32::from_rgb(160, 80, 80);
+                                        let display = if edit.is_null { "NULL".to_string() } else { edit.new_value.clone() };
+                                        paint_text_truncated(ui, &painter, pos, &display, muted, text_clip.width());
+                                    } else if edit.is_null {
+                                        paint_text_truncated(ui, &painter, pos, "NULL", egui::Color32::from_rgb(120, 80, 0), text_clip.width());
+                                    } else {
+                                        paint_text_truncated(ui, &painter, pos, &edit.new_value, egui::Color32::from_rgb(80, 50, 0), text_clip.width());
+                                    }
+                                }
+
+                                if !is_pending_delete && resp.double_clicked() {
+                                    let start_value = if edit.is_null {
+                                        String::new()
+                                    } else {
+                                        edit.new_value.clone()
+                                    };
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
+                                        row_idx: real_idx,
+                                        col_idx: col_i,
+                                        current_value: start_value,
+                                    };
+                                }
+
+                                // Handle click for row selection
+                                if resp.clicked() {
+                                    let shift = ui.input(|i| i.modifiers.shift);
+                                    let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                    if shift || ctrl {
+                                        *grid_action_rc.borrow_mut() = GridAction::RowSelected { row_idx: real_idx, shift, ctrl };
+                                    } else {
+                                        *grid_action_rc.borrow_mut() = GridAction::CellSelected { row_idx: real_idx, col_idx: col_i };
+                                    }
+                                }
+                            } else {
+                                // ── Celda normal ──────────────────────────────
+                                let cell_opt = &row_data[col_i];
+                                let is_null_cell = cell_opt.is_none();
+                                let cell_text = cell_opt.as_deref().unwrap_or("").to_string();
+
+                                // Fondo tenue si la fila tiene cambios en otras celdas (no delete)
+                                if row_modified && !is_pending_delete {
+                                    ui.painter().rect_filled(
+                                        cell_rect,
+                                        0.0,
+                                        egui::Color32::from_rgba_unmultiplied(255, 235, 100, 60),
+                                    );
+                                }
+
+                                // Fondo de celda seleccionada
+                                let is_selected_cell = selected_cell.as_ref()
+                                    .is_some_and(|&(r, c)| r == real_idx && c == col_i);
+                                if is_selected_cell && !is_pending_delete && !is_selected_row {
+                                    ui.painter().rect_filled(
+                                        cell_rect, 0.0,
+                                        ui.visuals().selection.bg_fill,
+                                    );
+                                }
+
+                                let resp = ui.allocate_rect(cell_rect, egui::Sense::click_and_drag());
+
+                                if ui.is_rect_visible(cell_rect) {
+                                    let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
+                                    let painter = ui.painter().with_clip_rect(text_clip);
+                                    let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
+                                    if is_pending_delete {
+                                        let muted = egui::Color32::from_rgb(160, 80, 80);
+                                        let display_text = if is_null_cell { "NULL".to_string() } else { cell_text.clone() };
+                                        paint_text_truncated(ui, &painter, pos, &display_text, muted, text_clip.width());
+                                    } else if is_null_cell {
+                                        let null_color = if ui.visuals().dark_mode {
+                                            egui::Color32::from_rgb(120, 120, 140)
+                                        } else {
+                                            egui::Color32::from_rgb(160, 160, 180)
+                                        };
+                                        paint_text_truncated(ui, &painter, pos, "NULL", null_color, text_clip.width());
+                                    } else {
+                                        let text_color = if is_pending_delete {
+                                            egui::Color32::from_rgb(160, 80, 80)
+                                        } else {
+                                            ui.visuals().text_color()
+                                        };
+                                        paint_text_truncated(ui, &painter, pos, &cell_text, text_color, text_clip.width());
+                                    }
+                                }
+
+                                // Drag selection
+                                if resp.drag_started() {
+                                    *drag_current_row_rc.borrow_mut() = Some(real_idx);
+                                    *grid_action_rc.borrow_mut() = GridAction::RowSelected {
+                                        row_idx: real_idx, shift: false, ctrl: false,
+                                    };
+                                }
+
+                                // While dragging, track current row by pointer position
+                                if ui.ctx().input(|i| i.pointer.is_decidedly_dragging())
+                                    && let Some(pointer_pos) = ui.ctx().input(|i| i.pointer.hover_pos())
+                                        && pointer_pos.y >= cell_rect.min.y && pointer_pos.y <= cell_rect.max.y {
+                                            *drag_current_row_rc.borrow_mut() = Some(real_idx);
+                                        }
+
+                                if resp.clicked() {
+                                    let shift = ui.input(|i| i.modifiers.shift);
+                                    let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                    if shift || ctrl {
+                                        *grid_action_rc.borrow_mut() = GridAction::RowSelected { row_idx: real_idx, shift, ctrl };
+                                    } else {
+                                        *grid_action_rc.borrow_mut() = GridAction::CellSelected { row_idx: real_idx, col_idx: col_i };
+                                    }
+                                }
+
+                                if resp.double_clicked() && !is_pending_delete {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
+                                        row_idx: real_idx,
+                                        col_idx: col_i,
                                         current_value: cell_text.clone(),
                                     };
-                                    ui.close();
-                                }
-                                if ui.button("∅  Establecer NULL").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::CellSetNull {
-                                        row_idx: real_idx, col_idx: col_i,
-                                    };
-                                    ui.close();
-                                }
-                                if ui.button("\"\"  Establecer vacío").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                        row_idx: real_idx, col_idx: col_i,
-                                        new_value: String::new(),
-                                    };
-                                    ui.close();
-                                }
-                                if is_dt && ui.button("🕐  Fecha/hora actual").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                        row_idx: real_idx, col_idx: col_i,
-                                        new_value: current_datetime(),
-                                    };
-                                    ui.close();
                                 }
 
-                                // ── Filtrar ──────────────────────────────
-                                ui.separator();
-                                let esc_col = esc_ident(&col_name);
-                                let val_display = trunc_display(&cell_text, 22);
-                                let val_escaped = esc_sql_val(&cell_text);
+                                // Context menu
+                                let is_dt = looks_like_datetime(&cell_text);
+                                let ctx = ui.ctx().clone();
+                                let ga_rc = &grid_action_rc;
+                                let col_name = data.columns[col_i].clone();
+                                resp.context_menu(|ui| {
+                                    if ui.button("📋  Copiar valor").clicked() {
+                                        ctx.copy_text(cell_text.clone());
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if !is_pending_delete {
+                                        if ui.button("✏  Editar celda").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CellEditStarted {
+                                                row_idx: real_idx, col_idx: col_i,
+                                                current_value: cell_text.clone(),
+                                            };
+                                            ui.close();
+                                        }
+                                        if ui.button("∅  Establecer NULL").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CellSetNull {
+                                                row_idx: real_idx, col_idx: col_i,
+                                            };
+                                            ui.close();
+                                        }
+                                        if ui.button("\"\"  Establecer vacío").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CellEditCommitted {
+                                                row_idx: real_idx, col_idx: col_i,
+                                                new_value: String::new(),
+                                            };
+                                            ui.close();
+                                        }
+                                        if is_dt && ui.button("🕐  Fecha/hora actual").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CellEditCommitted {
+                                                row_idx: real_idx, col_idx: col_i,
+                                                new_value: current_datetime(),
+                                            };
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                    }
 
-                                if ui.button(format!("🔍  = '{val_display}'")).clicked() {
-                                    let frag = format!("{esc_col} = '{val_escaped}'");
-                                    *ga_rc.borrow_mut() = GridAction::FilterBy {
-                                        sql_fragment: frag,
+                                    // Filtrar
+                                    let esc_col = esc_ident(&col_name);
+                                    let val_display = trunc_display(&cell_text, 22);
+                                    let val_escaped = esc_sql_val(&cell_text);
+
+                                    if ui.button(format!("🔍  = '{val_display}'")).clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterBy {
+                                            sql_fragment: format!("{esc_col} = '{val_escaped}'"),
+                                        };
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("🔍  ≠ '{val_display}'")).clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterBy {
+                                            sql_fragment: format!("{esc_col} != '{val_escaped}'"),
+                                        };
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("🔍  LIKE '%{val_display}%'")).clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterBy {
+                                            sql_fragment: format!("{esc_col} LIKE '%{val_escaped}%'"),
+                                        };
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("🔍  IS NULL ({col_name})")).clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterBy {
+                                            sql_fragment: format!("{esc_col} IS NULL"),
+                                        };
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("🔍  IS NOT NULL ({col_name})")).clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterBy {
+                                            sql_fragment: format!("{esc_col} IS NOT NULL"),
+                                        };
+                                        ui.close();
+                                    }
+                                    if ui.button("🔍  Por portapapeles").clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterByClipboard {
+                                            col_name: col_name.clone(),
+                                        };
+                                        ui.close();
+                                    }
+                                    if ui.button("🔍  Por texto...").clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::FilterUserInput {
+                                            col_name: col_name.clone(),
+                                        };
+                                        ui.close();
+                                    }
+
+                                    // Fila
+                                    ui.separator();
+                                    if ui.button("➕  Insertar fila  Ctrl+Ins").clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::InsertRow;
+                                        ui.close();
+                                    }
+                                    if ui.button("📋  Clonar fila  Ctrl+D").clicked() {
+                                        *ga_rc.borrow_mut() = GridAction::CloneRow { row_idx: real_idx };
+                                        ui.close();
+                                    }
+                                    let del_label = if pending_deletes.contains(&real_idx) {
+                                        "↩  Desmarcar eliminación"
+                                    } else {
+                                        "🗑  Eliminar fila  Ctrl+Supr"
                                     };
-                                    ui.close();
+                                    if ui.add(egui::Button::new(del_label)
+                                        .fill(egui::Color32::from_rgb(180, 40, 40)))
+                                        .clicked()
+                                    {
+                                        *ga_rc.borrow_mut() = GridAction::MarkDeleteRow { row_idx: real_idx };
+                                        ui.close();
+                                    }
+                                });
+
+                            }
+                        });
+                    }
+                } else {
+                    // ── Pending insert row ────────────────────────────────
+                    let insert_idx = row_display_idx - real_row_count;
+                    let ins = match pending_inserts.get(insert_idx) {
+                        Some(i) => i,
+                        None => return,
+                    };
+
+                    for col_i in 0..col_count {
+                        row.col(|ui| {
+                            let cell_rect = ui.available_rect_before_wrap();
+
+                            // Green background for insert row
+                            let insert_bg = if ui.visuals().dark_mode {
+                                egui::Color32::from_rgb(40, 100, 60)
+                            } else {
+                                egui::Color32::from_rgb(200, 240, 210)
+                            };
+                            ui.painter().rect_filled(cell_rect, 0.0, insert_bg);
+
+                            let is_auto = ins.auto_cols.get(col_i).copied().unwrap_or(false);
+                            let row_idx_for_edit = INSERT_ROW_BASE + insert_idx;
+
+                            let is_editing = edit_cell_rc
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|e| e.row_idx == row_idx_for_edit && e.col_idx == col_i && e.is_insert);
+
+                            if is_auto {
+                                // Show "(AUTO)" in muted color, no editing
+                                if ui.is_rect_visible(cell_rect) {
+                                    let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
+                                    let painter = ui.painter().with_clip_rect(text_clip);
+                                    let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
+                                    let muted = if ui.visuals().dark_mode {
+                                        egui::Color32::from_rgb(100, 140, 110)
+                                    } else {
+                                        egui::Color32::from_rgb(120, 160, 130)
+                                    };
+                                    paint_text_truncated(ui, &painter, pos, "(AUTO)", muted, text_clip.width());
                                 }
-                                if ui.button(format!("🔍  ≠ '{val_display}'")).clicked() {
-                                    let frag = format!("{esc_col} != '{val_escaped}'");
-                                    *ga_rc.borrow_mut() = GridAction::FilterBy {
-                                        sql_fragment: frag,
-                                    };
-                                    ui.close();
-                                }
-                                if ui.button(format!("🔍  LIKE '%{val_display}%'")).clicked() {
-                                    let frag = format!("{esc_col} LIKE '%{val_escaped}%'");
-                                    *ga_rc.borrow_mut() = GridAction::FilterBy {
-                                        sql_fragment: frag,
-                                    };
-                                    ui.close();
-                                }
-                                if ui.button(format!("🔍  IS NULL ({col_name})")).clicked() {
-                                    let frag = format!("{esc_col} IS NULL");
-                                    *ga_rc.borrow_mut() = GridAction::FilterBy {
-                                        sql_fragment: frag,
-                                    };
-                                    ui.close();
-                                }
-                                if ui.button(format!("🔍  IS NOT NULL ({col_name})")).clicked() {
-                                    let frag = format!("{esc_col} IS NOT NULL");
-                                    *ga_rc.borrow_mut() = GridAction::FilterBy {
-                                        sql_fragment: frag,
-                                    };
-                                    ui.close();
-                                }
-                                if ui.button("🔍  Por portapapeles").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::FilterByClipboard {
-                                        col_name: col_name.clone(),
-                                    };
-                                    ui.close();
-                                }
-                                if ui.button("🔍  Por texto...").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::FilterUserInput {
-                                        col_name: col_name.clone(),
-                                    };
-                                    ui.close();
+                                ui.allocate_rect(cell_rect, egui::Sense::hover());
+                            } else if is_editing {
+                                // Editing an insert cell
+                                let mut ec = edit_cell_rc.borrow_mut();
+                                let edit = ec.as_mut().unwrap();
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut edit.buffer)
+                                        .desired_width(f32::INFINITY),
+                                );
+
+                                if edit.needs_focus {
+                                    resp.request_focus();
+                                    edit.needs_focus = false;
                                 }
 
-                                // ── Fila ─────────────────────────────────
-                                ui.separator();
-                                if ui.button("➕  Insertar fila  Ctrl+Ins").clicked() {
-                                    *ga_rc.borrow_mut() = GridAction::InsertRow;
-                                    ui.close();
+                                let tab_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                                let enter_pressed = resp.has_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                let committed = resp.lost_focus() || enter_pressed;
+                                let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                                if tab_pressed && resp.has_focus() {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditTabNext {
+                                        row_idx: row_idx_for_edit,
+                                        col_idx: col_i,
+                                        new_value: edit.buffer.clone(),
+                                    };
+                                } else if cancelled {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditCancelled;
+                                } else if committed {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditCommitted {
+                                        row_idx: row_idx_for_edit,
+                                        col_idx: col_i,
+                                        new_value: edit.buffer.clone(),
+                                    };
                                 }
-                                if ui.add(egui::Button::new("🗑  Eliminar fila  Ctrl+Supr")
-                                    .fill(egui::Color32::from_rgb(180, 40, 40)))
-                                    .clicked()
-                                {
-                                    *ga_rc.borrow_mut() = GridAction::DeleteRow { row_idx: real_idx };
-                                    ui.close();
+                            } else {
+                                // Show insert value, double-click to edit
+                                let val = ins.values.get(col_i).and_then(|v| v.as_deref()).unwrap_or("");
+                                let resp = ui.allocate_rect(cell_rect, egui::Sense::click());
+
+                                if ui.is_rect_visible(cell_rect) {
+                                    let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
+                                    let painter = ui.painter().with_clip_rect(text_clip);
+                                    let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
+                                    let text_color = if ui.visuals().dark_mode {
+                                        egui::Color32::from_rgb(220, 255, 230)
+                                    } else {
+                                        egui::Color32::from_rgb(20, 80, 30)
+                                    };
+                                    paint_text_truncated(ui, &painter, pos, val, text_color, text_clip.width());
                                 }
-                            });
-                        }
-                    });
+
+                                if resp.double_clicked() {
+                                    *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
+                                        row_idx: row_idx_for_edit,
+                                        col_idx: col_i,
+                                        current_value: val.to_string(),
+                                    };
+                                }
+
+                                // Show × button in the last column
+                                if col_i == col_count - 1 {
+                                    let btn_size = egui::vec2(16.0, 16.0);
+                                    let btn_pos = egui::pos2(
+                                        cell_rect.max.x - btn_size.x - 2.0,
+                                        cell_rect.center().y - btn_size.y * 0.5,
+                                    );
+                                    let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
+                                    let btn_resp = ui.allocate_rect(btn_rect, egui::Sense::click());
+                                    if btn_resp.hovered() {
+                                        ui.painter().rect_filled(btn_rect, 3.0, egui::Color32::from_rgb(180, 50, 50));
+                                    }
+                                    ui.painter().text(
+                                        btn_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "×",
+                                        egui::FontId::proportional(12.0),
+                                        if btn_resp.hovered() { egui::Color32::WHITE } else { egui::Color32::from_rgb(200, 80, 80) },
+                                    );
+                                    if btn_resp.clicked() {
+                                        *grid_action_rc.borrow_mut() = GridAction::RemoveInsertRow { insert_idx };
+                                    }
+                                }
+                            }
+                        });
+                    }
                 }
             });
         });
 
     }); // cierra ScrollArea::horizontal
 
-    // Restaurar el editing_cell (puede haber sido modificado por el TextEdit)
+    // Restaurar el editing_cell
     *editing_cell = edit_cell_rc.into_inner();
+
+    // Handle drag selection update
+    let drag_row = drag_current_row_rc.into_inner();
+    if ui.ctx().input(|i| i.pointer.is_decidedly_dragging()) {
+        if let (Some(start), Some(current)) = (*drag_select_from, drag_row) {
+            let (lo, hi) = (start.min(current), start.max(current));
+            *selected_rows = (lo..=hi).collect();
+        }
+    } else {
+        // Drag ended
+        if drag_select_from.is_some() && !ui.ctx().input(|i| i.pointer.any_down()) {
+            *drag_select_from = None;
+        }
+    }
 
     // Aplicar cambio de ordenación tras los closures
     if let Some(col_i) = clicked_col {

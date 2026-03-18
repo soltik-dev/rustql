@@ -66,6 +66,7 @@ pub enum TruncateKind {
 // ── Estado de modal ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub enum ModalState {
     #[default]
     None,

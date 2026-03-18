@@ -57,17 +57,31 @@ pub struct ColumnInfo {
 }
 
 /// Escapa un valor para uso dentro de comillas simples en SQL.
+/// Cubre todas las secuencias de escape requeridas por MySQL.
 pub fn escape_sql(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
+    s.replace('\\', "\\\\")
+        .replace('\0', "\\0")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\x1a', "\\Z")
+        .replace('\'', "\\'")
 }
 
 /// Escapa un identificador para uso dentro de backticks en SQL.
-#[allow(dead_code)]
 pub fn escape_ident(s: &str) -> String {
     s.replace('`', "``")
 }
 
-#[allow(dead_code)]
+/// Valida que un nombre de charset MySQL solo contenga caracteres seguros.
+/// Los charsets MySQL son siempre alfanuméricos con guiones bajos (ej. utf8mb4, latin1).
+pub fn validate_charset(s: &str) -> DbResult<()> {
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Charset inválido: '{s}'. Solo se permiten caracteres alfanuméricos y '_'."))
+    }
+}
+
 pub trait DbBackend: Send {
     fn list_databases(&mut self) -> DbResult<Vec<String>>;
     fn list_tables(&mut self, database: &str) -> DbResult<Vec<String>>;
@@ -88,11 +102,21 @@ pub trait DbBackend: Send {
     fn drop_table(&mut self, db: &str, table: &str) -> DbResult<()>;
     fn truncate_table(&mut self, db: &str, table: &str) -> DbResult<()>;
 
+    /// Ejecuta una lista de sentencias dentro de una transacción.
+    /// Si alguna falla se hace ROLLBACK y se devuelve el error.
+    fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()>;
+
     /// SELECT * con LIMIT opcional WHERE.
+    #[allow(dead_code)]
     fn query_table(&mut self, db: &str, table: &str, limit: usize) -> DbResult<QueryResult> {
-        self.execute_query(&format!("SELECT * FROM `{db}`.`{table}` LIMIT {limit}"))
+        self.execute_query(&format!(
+            "SELECT * FROM `{}`.`{}` LIMIT {limit}",
+            escape_ident(db),
+            escape_ident(table)
+        ))
     }
 
+    #[allow(dead_code)]
     fn query_filtered(
         &mut self,
         db: &str,
@@ -101,7 +125,9 @@ pub trait DbBackend: Send {
         limit: usize,
     ) -> DbResult<QueryResult> {
         self.execute_query(&format!(
-            "SELECT * FROM `{db}`.`{table}` WHERE {filter} LIMIT {limit}"
+            "SELECT * FROM `{}`.`{}` WHERE {filter} LIMIT {limit}",
+            escape_ident(db),
+            escape_ident(table)
         ))
     }
 }
@@ -109,6 +135,13 @@ pub trait DbBackend: Send {
 pub enum ConnectEvent {
     Status(String),
     Done(DbResult<Box<dyn DbBackend>>),
+}
+
+pub enum QueryEvent {
+    Done {
+        result: DbResult<QueryResult>,
+        backend: Box<dyn DbBackend>,
+    },
 }
 
 pub fn connect_mysql_progress(

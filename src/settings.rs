@@ -17,8 +17,20 @@ pub enum Theme {
     Dark,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum CopyFormat {
+    #[default]
+    Csv,
+    Tsv,
+    SqlInserts,
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn default_query_limit() -> usize {
+    500
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,6 +47,10 @@ pub struct AppSettings {
     pub pinned_tables: Vec<(String, String)>,
     #[serde(default)]
     pub sql_tabs: Vec<SavedSqlTab>,
+    #[serde(default)]
+    pub copy_format: CopyFormat,
+    #[serde(default = "default_query_limit")]
+    pub query_limit: usize,
 }
 
 impl Default for AppSettings {
@@ -47,6 +63,8 @@ impl Default for AppSettings {
             fav_tables: std::collections::HashSet::new(),
             pinned_tables: Vec::new(),
             sql_tabs: Vec::new(),
+            copy_format: CopyFormat::Csv,
+            query_limit: 500,
         }
     }
 }
@@ -86,7 +104,6 @@ fn dark_visuals() -> egui::Visuals {
 
     // Texto casi blanco (frente a los grises tenues por defecto)
     let text_bright = egui::Color32::from_rgb(220, 220, 220);
-    let text_dim = egui::Color32::from_rgb(160, 160, 160);
 
     // Widgets no interactivos (etiquetas, separadores…)
     v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_bright);
@@ -124,7 +141,6 @@ fn dark_visuals() -> egui::Visuals {
     // Stripe de tabla: fondo alterno más visible
     v.faint_bg_color = egui::Color32::from_rgb(28, 28, 32);
 
-    let _ = text_dim; // por si se usa en el futuro
     v
 }
 

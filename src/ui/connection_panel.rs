@@ -105,7 +105,15 @@ pub fn show_form(
             ui.end_row();
 
             ui.label("");
-            ui.checkbox(save_password, "Guardar contraseña");
+            ui.vertical(|ui| {
+                ui.checkbox(save_password, "Guardar contraseña");
+                if *save_password {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(200, 140, 0),
+                        "⚠ Se guarda sin cifrar en ~/.config/rustql/connections.json",
+                    );
+                }
+            });
             ui.end_row();
         });
 
