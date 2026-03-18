@@ -11,7 +11,7 @@ pub struct SqlTab {
 
 pub enum SqlEditorAction {
     None,
-    Execute(String),
+    Execute { sql: String, db_context: String },
 }
 
 /// Panel "SQL": editor de consultas libre.
@@ -47,12 +47,10 @@ pub fn show(
         if ui.button("▶ Ejecutar  F9").clicked() || f9_pressed {
             let sql = sql_text.trim().to_string();
             if !sql.is_empty() {
-                let full_sql = if db_context.is_empty() {
-                    sql
-                } else {
-                    format!("USE `{}`;\n{}", db_context, sql)
+                action = SqlEditorAction::Execute {
+                    sql,
+                    db_context: db_context.clone(),
                 };
-                action = SqlEditorAction::Execute(full_sql);
             }
         }
         if ui.button("Limpiar").clicked() {
@@ -111,7 +109,7 @@ pub fn show(
                             let row_data = &data.rows[row.index()];
                             for cell in row_data {
                                 row.col(|ui| {
-                                    ui.add(egui::Label::new(cell).truncate());
+                                    ui.add(egui::Label::new(cell.as_deref().unwrap_or("")).truncate());
                                 });
                             }
                         });

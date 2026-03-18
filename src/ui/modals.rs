@@ -97,6 +97,35 @@ pub enum ModalState {
         value: String,
         operator: FilterOperator,
     },
+    /// Hay cambios sin guardar en la tabla actual y el usuario intenta cambiar a otra.
+    ConfirmSwitchTable {
+        new_db: String,
+        new_table: String,
+        pending_count: usize,
+        current_table: String,
+    },
+    ConfirmDeleteRow {
+        db: String,
+        table: String,
+        row_idx: usize,
+        /// Descripción corta de la fila (valores PK) para mostrar al usuario.
+        pk_desc: String,
+    },
+    CloneTable {
+        db: String,
+        table: String,
+        new_name: String,
+        copy_data: bool,
+        error: Option<String>,
+    },
+    InsertRow {
+        db: String,
+        table: String,
+        col_names: Vec<String>,
+        values: Vec<String>,
+        nulls: Vec<bool>,
+        error: Option<String>,
+    },
 }
 
 // ── Acciones devueltas al caller ──────────────────────────────────────────────
@@ -111,6 +140,13 @@ pub enum ModalAction {
     TruncateAllTables(String),
     ApplyFilter { sql_fragment: String },
     Cancel,
+    /// Guardar cambios y luego cambiar a la nueva tabla.
+    ApplyAndSwitch { new_db: String, new_table: String },
+    /// Descartar cambios y cambiar a la nueva tabla.
+    DiscardAndSwitch { new_db: String, new_table: String },
+    DeleteRow { db: String, table: String, row_idx: usize },
+    InsertRow { db: String, table: String, col_names: Vec<String>, values: Vec<String>, nulls: Vec<bool> },
+    CloneTable { db: String, src_table: String, new_name: String, copy_data: bool },
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -153,6 +189,18 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
         }
         ModalState::FilterInput { col_name, value, operator } => {
             show_filter_input(ctx, col_name, value, operator)
+        }
+        ModalState::ConfirmSwitchTable { new_db, new_table, pending_count, current_table } => {
+            show_confirm_switch_table(ctx, new_db, new_table, *pending_count, current_table)
+        }
+        ModalState::ConfirmDeleteRow { db, table, row_idx, pk_desc } => {
+            show_confirm_delete_row(ctx, db, table, *row_idx, pk_desc)
+        }
+        ModalState::InsertRow { db, table, col_names, values, nulls, error } => {
+            show_insert_row(ctx, db, table, col_names, values, nulls, error)
+        }
+        ModalState::CloneTable { db, table, new_name, copy_data, error } => {
+            show_clone_table(ctx, db, table, new_name, copy_data, error)
         }
     }
 }
@@ -624,4 +672,234 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
         name.replace('`', "``"),
         parts.join(",\n")
     )
+}
+
+// ── Confirmación: cambiar tabla con cambios pendientes ────────────────────────
+
+fn show_confirm_switch_table(
+    ctx: &egui::Context,
+    new_db: &str,
+    new_table: &str,
+    pending_count: usize,
+    current_table: &str,
+) -> ModalAction {
+    let mut action = ModalAction::None;
+
+    egui::Window::new("Cambios sin guardar")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Tienes {} cambio(s) sin guardar en «{}».",
+                pending_count, current_table
+            ));
+            ui.add_space(4.0);
+            ui.label(format!("¿Qué quieres hacer antes de abrir «{}.{}»?", new_db, new_table));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("💾  Guardar y cambiar").clicked() {
+                    action = ModalAction::ApplyAndSwitch {
+                        new_db: new_db.to_string(),
+                        new_table: new_table.to_string(),
+                    };
+                }
+                if ui
+                    .add(egui::Button::new("🗑  Descartar y cambiar")
+                        .fill(egui::Color32::from_rgb(180, 120, 40)))
+                    .clicked()
+                {
+                    action = ModalAction::DiscardAndSwitch {
+                        new_db: new_db.to_string(),
+                        new_table: new_table.to_string(),
+                    };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    action
+}
+
+// ── Confirmar eliminación de fila ─────────────────────────────────────────────
+
+fn show_confirm_delete_row(
+    ctx: &egui::Context,
+    db: &str,
+    table: &str,
+    row_idx: usize,
+    pk_desc: &str,
+) -> ModalAction {
+    let mut action = ModalAction::None;
+    let mut open = true;
+
+    egui::Window::new("Eliminar fila")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(format!("¿Eliminar esta fila de {db}.{table}?"));
+            if !pk_desc.is_empty() {
+                ui.monospace(pk_desc);
+            }
+            ui.label("Esta acción no se puede deshacer.");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if red_btn(ui, "🗑  Eliminar") {
+                    action = ModalAction::DeleteRow {
+                        db: db.to_string(),
+                        table: table.to_string(),
+                        row_idx,
+                    };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    if !open {
+        action = ModalAction::Cancel;
+    }
+    action
+}
+
+// ── Insertar fila ─────────────────────────────────────────────────────────────
+
+fn show_insert_row(
+    ctx: &egui::Context,
+    db: &str,
+    table: &str,
+    col_names: &[String],
+    values: &mut Vec<String>,
+    nulls: &mut Vec<bool>,
+    error: &mut Option<String>,
+) -> ModalAction {
+    while values.len() < col_names.len() { values.push(String::new()); }
+    while nulls.len() < col_names.len() { nulls.push(false); }
+
+    let mut action = ModalAction::None;
+    let mut open = true;
+
+    egui::Window::new(format!("Insertar fila — {db}.{table}"))
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                egui::Grid::new("insert_row_grid")
+                    .num_columns(3)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.strong("Columna");
+                        ui.strong("Valor");
+                        ui.strong("NULL");
+                        ui.end_row();
+
+                        for i in 0..col_names.len() {
+                            ui.label(&col_names[i]);
+                            ui.add_enabled(
+                                !nulls[i],
+                                egui::TextEdit::singleline(&mut values[i]).desired_width(220.0),
+                            );
+                            ui.checkbox(&mut nulls[i], "");
+                            if nulls[i] {
+                                values[i].clear();
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+
+            if let Some(err) = error {
+                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("➕  Insertar").clicked() {
+                    action = ModalAction::InsertRow {
+                        db: db.to_string(),
+                        table: table.to_string(),
+                        col_names: col_names.to_vec(),
+                        values: values.clone(),
+                        nulls: nulls.clone(),
+                    };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    if !open {
+        action = ModalAction::Cancel;
+    }
+    action
+}
+
+
+// ── Clonar tabla ─────────────────────────────────────────────────────────────
+
+fn show_clone_table(
+    ctx: &egui::Context,
+    db: &str,
+    table: &str,
+    new_name: &mut String,
+    copy_data: &mut bool,
+    error: &mut Option<String>,
+) -> ModalAction {
+    let mut action = ModalAction::None;
+    let mut open = true;
+
+    egui::Window::new(format!("Clonar tabla — {db}.{table}"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            egui::Grid::new("clone_table_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Nuevo nombre:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(new_name)
+                            .desired_width(220.0)
+                            .hint_text(format!("{table}_copia")),
+                    );
+                    ui.end_row();
+                    ui.label("Copiar datos:");
+                    ui.checkbox(copy_data, "INSERT INTO … SELECT *");
+                    ui.end_row();
+                    let _ = resp;
+                });
+
+            if let Some(err) = error {
+                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let ok = ui.add_enabled(!new_name.is_empty(), egui::Button::new("🗒  Clonar")).clicked();
+                if ok {
+                    action = ModalAction::CloneTable {
+                        db: db.to_string(),
+                        src_table: table.to_string(),
+                        new_name: new_name.clone(),
+                        copy_data: *copy_data,
+                    };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    if !open {
+        action = ModalAction::Cancel;
+    }
+    action
 }

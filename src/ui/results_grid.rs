@@ -29,7 +29,7 @@ pub struct PendingEdit {
     /// Índice real en `QueryResult.rows` (no el índice de visualización con sort).
     pub row_idx: usize,
     pub col_idx: usize,
-    pub original: String,
+    pub original: Option<String>,
     pub new_value: String,
     /// Si true, el UPDATE usa `= NULL` en lugar de `= 'valor'`.
     pub is_null: bool,
@@ -59,6 +59,9 @@ pub enum GridAction {
     FilterBy { sql_fragment: String },
     FilterByClipboard { col_name: String },
     FilterUserInput { col_name: String },
+    // Filas
+    DeleteRow { row_idx: usize },
+    InsertRow,
 }
 
 // ── Barra de apply ────────────────────────────────────────────────────────────
@@ -160,6 +163,33 @@ fn is_leap(year: u32) -> bool {
 
 // ── Helpers para filtros ──────────────────────────────────────────────────────
 
+/// Pinta texto en `painter` dentro de `clip_rect` truncando con "…" si no cabe.
+fn paint_text_truncated(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: &str,
+    color: egui::Color32,
+    clip_width: f32,
+) {
+    use egui::text::{LayoutJob, TextFormat};
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = LayoutJob::default();
+    job.wrap = egui::text::TextWrapping {
+        max_width: clip_width,
+        max_rows: 1,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    job.append(text, 0.0, TextFormat {
+        font_id,
+        color,
+        ..Default::default()
+    });
+    let galley = painter.layout_job(job);
+    painter.galley(pos, galley, color);
+}
+
 /// Escapa un valor para usarlo en una literal de string SQL ('…').
 fn esc_sql_val(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
@@ -201,7 +231,7 @@ fn compute_col_widths(ui: &egui::Ui, data: &QueryResult) -> Vec<f32> {
 
             let max_content = data.rows[..sample]
                 .iter()
-                .map(|row| row.get(col_i).map_or(0, |v| v.len()))
+                .map(|row| row.get(col_i).and_then(|v| v.as_deref()).map_or(0, str::len))
                 .max()
                 .unwrap_or(0);
             let content_w = max_content as f32 * char_w + 8.0;
@@ -317,8 +347,8 @@ pub fn show(
     let edit_cell_rc: RefCell<Option<EditingCell>> = RefCell::new(editing_cell.take());
     let grid_action_rc: RefCell<GridAction> = RefCell::new(GridAction::None);
 
-    // Altura de fila ligeramente mayor cuando hay edición activa
-    let row_h = if edit_cell_rc.borrow().is_some() { 22.0 } else { 20.0 };
+    // Altura de fila fija para evitar salto de layout al comenzar a editar
+    let row_h = 22.0;
 
     // Anchos inteligentes por columna basados en cabecera + muestra de contenido
     let col_widths = compute_col_widths(ui, data);
@@ -328,21 +358,46 @@ pub fn show(
     let mut keyboard_action = GridAction::None;
     let no_widget_focused = ui.memory(|m| m.focused().is_none());
     if no_widget_focused && editing_cell.is_none() {
+        // Navegación con flechas
+        let arrow_up    = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
+        let arrow_down  = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+        let arrow_left  = ui.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+        let arrow_right = ui.input(|i| i.key_pressed(egui::Key::ArrowRight));
+        if arrow_up || arrow_down || arrow_left || arrow_right {
+            let (r, c) = selected_cell.unwrap_or((0, 0));
+            let new_r = if arrow_up   { r.saturating_sub(1) }
+                        else if arrow_down  { (r + 1).min(row_count.saturating_sub(1)) }
+                        else { r };
+            let new_c = if arrow_left  { c.saturating_sub(1) }
+                        else if arrow_right { (c + 1).min(col_count.saturating_sub(1)) }
+                        else { c };
+            *selected_cell = Some((new_r, new_c));
+        }
+
         if let Some((sel_row, sel_col)) = *selected_cell {
             if sel_row < data.rows.len() {
-                if let Some(cell_val) = data.rows[sel_row].get(sel_col).cloned() {
+                if data.rows[sel_row].get(sel_col).is_some() {
+                    let cell_str = data.rows[sel_row][sel_col].as_deref().unwrap_or("").to_string();
                     let ctrl = ui.input(|i| i.modifiers.ctrl);
 
                     // Ctrl+C: copiar
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::C)) {
-                        ui.ctx().copy_text(cell_val.clone());
+                        ui.ctx().copy_text(cell_str.clone());
                     }
                     // Ctrl+N: NULL
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::N)) {
                         keyboard_action = GridAction::CellSetNull { row_idx: sel_row, col_idx: sel_col };
                     }
+                    // Ctrl+Supr: eliminar fila
+                    if ctrl && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                        keyboard_action = GridAction::DeleteRow { row_idx: sel_row };
+                    }
+                    // Ctrl+Ins: insertar fila
+                    if ctrl && ui.input(|i| i.key_pressed(egui::Key::Insert)) {
+                        keyboard_action = GridAction::InsertRow;
+                    }
                     // Delete: vacío
-                    if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                    if !ctrl && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                         keyboard_action = GridAction::CellEditCommitted {
                             row_idx: sel_row, col_idx: sel_col, new_value: String::new(),
                         };
@@ -350,7 +405,7 @@ pub fn show(
                     // F2 o Enter: editar
                     if ui.input(|i| i.key_pressed(egui::Key::F2)) {
                         keyboard_action = GridAction::CellEditStarted {
-                            row_idx: sel_row, col_idx: sel_col, current_value: cell_val.clone(),
+                            row_idx: sel_row, col_idx: sel_col, current_value: cell_str.clone(),
                         };
                     }
                     // Ctrl+V: pegar
@@ -373,9 +428,14 @@ pub fn show(
         }
     }
 
-    // Usar un id por tabla para que egui recuerde anchos ajustados por el usuario
-    // y los recalcule al cambiar de tabla
-    let table_id = format!("{}/{}", db, table);
+    // El id incluye el sort actual para que egui recalcule anchos al ordenar
+    // (columnas anchas de IDs ordenados DESC necesitan más espacio)
+    let sort_hash: u64 = sorts.iter().fold(0u64, |acc, s| {
+        acc.wrapping_add(s.col_idx as u64)
+            .wrapping_mul(31)
+            .wrapping_add(if s.dir == SortDir::Asc { 0 } else { 1 })
+    });
+    let table_id = format!("{}/{}/{}", db, table, sort_hash);
 
     // ScrollArea horizontal externa — TableBuilder maneja el scroll vertical interno
     egui::ScrollArea::horizontal()
@@ -482,37 +542,37 @@ pub fn show(
                             }
                         } else if let Some(edit) = pending {
                             // ── Celda con cambio pendiente ────────────────
-                            let bg_rect = ui.available_rect_before_wrap();
-                            // Fondo amarillo
+                            let cell_rect = ui.available_rect_before_wrap();
+                            // Fondo amarillo (toda la celda)
                             ui.painter().rect_filled(
-                                bg_rect,
+                                cell_rect,
                                 0.0,
                                 egui::Color32::from_rgb(255, 235, 100),
                             );
-                            // Texto del nuevo valor (o "(NULL)" si es un SET NULL)
-                            let display_text = if edit.is_null {
-                                egui::RichText::new("(NULL)").italics().color(
-                                    egui::Color32::from_rgb(120, 80, 0),
-                                )
-                            } else {
-                                egui::RichText::new(&edit.new_value)
-                            };
-                            let resp = ui.add(
-                                egui::Label::new(display_text)
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                            );
                             // Triángulo naranja en la esquina superior derecha
                             let pts = vec![
-                                bg_rect.right_top(),
-                                bg_rect.right_top() - egui::vec2(8.0, 0.0),
-                                bg_rect.right_top() + egui::vec2(0.0, 8.0),
+                                cell_rect.right_top(),
+                                cell_rect.right_top() - egui::vec2(8.0, 0.0),
+                                cell_rect.right_top() + egui::vec2(0.0, 8.0),
                             ];
                             ui.painter().add(egui::Shape::convex_polygon(
                                 pts,
                                 egui::Color32::from_rgb(220, 120, 0),
                                 egui::Stroke::NONE,
                             ));
+                            // Toda la celda es clicable (doble click para editar)
+                            let resp = ui.allocate_rect(cell_rect, egui::Sense::click());
+                            // Texto del nuevo valor
+                            if ui.is_rect_visible(cell_rect) {
+                                let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
+                                let painter = ui.painter().with_clip_rect(text_clip);
+                                let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
+                                if edit.is_null {
+                                    paint_text_truncated(ui, &painter, pos, "NULL", egui::Color32::from_rgb(120, 80, 0), text_clip.width());
+                                } else {
+                                    paint_text_truncated(ui, &painter, pos, &edit.new_value, egui::Color32::from_rgb(80, 50, 0), text_clip.width());
+                                }
+                            }
 
                             if resp.double_clicked() {
                                 let start_value = if edit.is_null {
@@ -528,7 +588,9 @@ pub fn show(
                             }
                         } else {
                             // ── Celda normal ──────────────────────────────
-                            let cell_text = row_data[col_i].clone();
+                            let cell_opt = &row_data[col_i];
+                            let is_null_cell = cell_opt.is_none();
+                            let cell_text = cell_opt.as_deref().unwrap_or("").to_string();
                             let cell_rect = ui.available_rect_before_wrap();
 
                             // Fondo tenue si la fila tiene cambios en otras celdas
@@ -550,12 +612,26 @@ pub fn show(
                                 );
                             }
 
-                            // Texto siempre izquierda — el layout nunca cambia en hover
-                            let resp = ui.add(
-                                egui::Label::new(&cell_text)
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                            );
+                            // Toda la celda es interactiva (click, doble click, botón derecho)
+                            let resp = ui.allocate_rect(cell_rect, egui::Sense::click());
+                            // Pintar texto con clip para que no desborde la columna
+                            if ui.is_rect_visible(cell_rect) {
+                                let text_clip = cell_rect.shrink2(egui::vec2(4.0, 0.0));
+                                let painter = ui.painter().with_clip_rect(text_clip);
+                                let pos = egui::pos2(text_clip.min.x, text_clip.center().y - ui.text_style_height(&egui::TextStyle::Body) * 0.5);
+                                if is_null_cell {
+                                    let null_color = if ui.visuals().dark_mode {
+                                        egui::Color32::from_rgb(120, 120, 140)
+                                    } else {
+                                        egui::Color32::from_rgb(160, 160, 180)
+                                    };
+                                    paint_text_truncated(ui, &painter, pos, "NULL", null_color, text_clip.width());
+                                } else {
+                                    let text_color = ui.visuals().text_color();
+                                    paint_text_truncated(ui, &painter, pos, &cell_text, text_color, text_clip.width());
+                                }
+                            }
+
                             if resp.clicked() {
                                 *selected_cell = Some((real_idx, col_i));
                             }
@@ -658,6 +734,20 @@ pub fn show(
                                     *ga_rc.borrow_mut() = GridAction::FilterUserInput {
                                         col_name: col_name.clone(),
                                     };
+                                    ui.close();
+                                }
+
+                                // ── Fila ─────────────────────────────────
+                                ui.separator();
+                                if ui.button("➕  Insertar fila  Ctrl+Ins").clicked() {
+                                    *ga_rc.borrow_mut() = GridAction::InsertRow;
+                                    ui.close();
+                                }
+                                if ui.add(egui::Button::new("🗑  Eliminar fila  Ctrl+Supr")
+                                    .fill(egui::Color32::from_rgb(180, 40, 40)))
+                                    .clicked()
+                                {
+                                    *ga_rc.borrow_mut() = GridAction::DeleteRow { row_idx: real_idx };
                                     ui.close();
                                 }
                             });

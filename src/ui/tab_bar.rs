@@ -39,6 +39,7 @@ pub fn show(
     table_name: Option<&str>,
     sql_tab_count: usize,
     pinned_tables: &[(String, String)],
+    pinned_pending_counts: &[usize],
 ) -> TabBarResult {
     let mut result = TabBarResult::default();
 
@@ -104,8 +105,13 @@ pub fn show(
             ui.label("📌");
             for (i, (_db, table)) in pinned_tables.iter().enumerate() {
                 let is_active = active == ActiveTab::Pinned(i);
-                let label = clip_text(table, 18);
-                if tab_btn(ui, &label, is_active, true) {
+                let has_changes = pinned_pending_counts.get(i).copied().unwrap_or(0) > 0;
+                let label = if has_changes {
+                    format!("● {}", clip_text(table, 16))
+                } else {
+                    clip_text(table, 18)
+                };
+                if tab_btn_pinned(ui, &label, is_active, true, has_changes) {
                     result.tab_clicked = Some(ActiveTab::Pinned(i));
                 }
                 let close_resp = ui
@@ -142,6 +148,49 @@ fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool 
     };
 
     let fill = if active {
+        ui.visuals().widgets.active.bg_fill
+    } else {
+        ui.visuals().widgets.inactive.bg_fill
+    };
+
+    let resp = ui.add(
+        egui::Button::new(text)
+            .fill(fill)
+            .frame(true)
+            .selected(active),
+    );
+    resp.clicked()
+}
+
+/// Variante para tabs fijados: muestra un color cálido cuando tiene cambios pendientes.
+fn tab_btn_pinned(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    enabled: bool,
+    has_changes: bool,
+) -> bool {
+    if !enabled {
+        let text = egui::RichText::new(label)
+            .color(ui.visuals().noninteractive().text_color());
+        ui.add_enabled(false, egui::Button::new(text).frame(true));
+        return false;
+    }
+
+    let text = if active {
+        egui::RichText::new(label).strong()
+    } else {
+        egui::RichText::new(label)
+    };
+
+    let fill = if has_changes {
+        // Tono ámbar para indicar cambios pendientes
+        if ui.visuals().dark_mode {
+            egui::Color32::from_rgb(100, 70, 10)
+        } else {
+            egui::Color32::from_rgb(255, 220, 100)
+        }
+    } else if active {
         ui.visuals().widgets.active.bg_fill
     } else {
         ui.visuals().widgets.inactive.bg_fill

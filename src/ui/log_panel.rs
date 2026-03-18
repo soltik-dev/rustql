@@ -37,9 +37,8 @@ pub fn show(ui: &mut egui::Ui, log: &[LogEntry]) {
                     ui.label(format!("{}ms", entry.duration_ms));
                     ui.separator();
 
-                    // Query (truncada, tooltip con texto completo)
-                    ui.add(egui::Label::new(&entry.query).truncate())
-                        .on_hover_text(&entry.query);
+                    // Query (truncada; egui ya muestra el tooltip automáticamente cuando se trunca)
+                    ui.add(egui::Label::new(&entry.query).truncate());
                 });
 
                 // Error expandido

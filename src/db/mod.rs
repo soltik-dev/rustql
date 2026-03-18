@@ -24,7 +24,8 @@ pub type DbResult<T> = Result<T, String>;
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    /// Cada celda es `None` si el valor es NULL en la base de datos.
+    pub rows: Vec<Vec<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]

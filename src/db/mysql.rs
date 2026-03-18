@@ -5,20 +5,20 @@ use super::{
     escape_sql,
 };
 
-fn value_to_string(v: Value) -> String {
+fn value_to_string(v: Value) -> Option<String> {
     match v {
-        Value::NULL => String::new(),
-        Value::Bytes(b) => String::from_utf8_lossy(&b).into_owned(),
-        Value::Int(i) => i.to_string(),
-        Value::UInt(u) => u.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Double(d) => d.to_string(),
+        Value::NULL => None,
+        Value::Bytes(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        Value::Int(i) => Some(i.to_string()),
+        Value::UInt(u) => Some(u.to_string()),
+        Value::Float(f) => Some(f.to_string()),
+        Value::Double(d) => Some(d.to_string()),
         Value::Date(y, m, d, h, min, s, _) => {
-            format!("{y}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")
+            Some(format!("{y}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}"))
         }
         Value::Time(neg, days, h, m, s, _) => {
             let sign = if neg { "-" } else { "" };
-            format!("{sign}{days}d {h:02}:{m:02}:{s:02}")
+            Some(format!("{sign}{days}d {h:02}:{m:02}:{s:02}"))
         }
     }
 }
@@ -50,8 +50,8 @@ fn rows_to_result(raw_rows: Vec<mysql::Row>) -> QueryResult {
     QueryResult { columns, rows }
 }
 
-fn col(row: &[String], i: usize) -> String {
-    row.get(i).cloned().unwrap_or_default()
+fn col(row: &[Option<String>], i: usize) -> String {
+    row.get(i).and_then(|v| v.as_deref()).unwrap_or("").to_string()
 }
 
 /// Almacena el Pool en lugar de una PooledConn individual.

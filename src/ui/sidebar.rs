@@ -35,6 +35,7 @@ pub enum SidebarAction {
     PinTable { db: String, table: String },
     OpenTableStructure { db: String, table: String },
     OpenInSql { db: String, table: String },
+    CloneTable { db: String, table: String },
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
@@ -55,12 +56,18 @@ pub fn show(
 
     ui.heading("Esquema");
 
+    let ctrl_f = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
+
     ui.horizontal(|ui| {
-        ui.add(
+        let search_resp = ui.add(
             egui::TextEdit::singleline(table_search)
-                .hint_text("Buscar tabla...")
+                .id(egui::Id::new("sidebar_table_search"))
+                .hint_text("Buscar tabla…  Ctrl+F")
                 .desired_width(ui.available_width() - 50.0),
         );
+        if ctrl_f {
+            search_resp.request_focus();
+        }
         let fav_btn = ui.add(
             egui::Button::new("⭐")
                 .selected(*show_only_fav)
@@ -141,7 +148,9 @@ pub fn show(
                         continue;
                     }
 
-                    let open = if filtering { Some(true) } else { None };
+                    // Al buscar, NO forzamos abrir: dejamos el estado que el usuario tenía.
+                    // Las BBDD sin coincidencias se ocultan igualmente (continue más abajo).
+                    let open: Option<bool> = None;
                     let is_db_selected = selected_db == Some(db.as_str());
                     let db_label = clip_text(db, 24);
 
@@ -255,6 +264,13 @@ pub fn show(
                                 if ui.button("📋 Copiar nombre").clicked() {
                                     *action.borrow_mut() =
                                         SidebarAction::CopyTableName(table_clone.clone());
+                                    ui.close();
+                                }
+                                if ui.button("🗒 Clonar tabla").clicked() {
+                                    *action.borrow_mut() = SidebarAction::CloneTable {
+                                        db: db_clone.clone(),
+                                        table: table_clone.clone(),
+                                    };
                                     ui.close();
                                 }
                                 ui.separator();
