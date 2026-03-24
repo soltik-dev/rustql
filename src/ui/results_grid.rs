@@ -330,17 +330,6 @@ pub fn show(
         _ => {}
     }
 
-    // Show spinner overlay if loading but we have stale data
-    if query_loading {
-        ui.centered_and_justified(|ui| {
-            ui.vertical_centered(|ui| {
-                ui.spinner();
-                ui.label("Ejecutando consulta…");
-            });
-        });
-        return GridAction::None;
-    }
-
     let (db, table) = selected_table.as_ref().unwrap();
     let data = result.as_ref().unwrap();
 
@@ -351,6 +340,11 @@ pub fn show(
     ui.horizontal_wrapped(|ui| {
         ui.strong(format!("{db}.{table}"));
         ui.label(format!("— {} filas", data.rows.len()));
+        if query_loading {
+            ui.separator();
+            ui.spinner();
+            ui.label("Cargando…");
+        }
 
         if !sorts.is_empty() {
             ui.separator();

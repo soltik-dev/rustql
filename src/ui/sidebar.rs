@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 use eframe::egui;
 
+use crate::db::DbBackend;
+
 fn clip_text(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
@@ -34,18 +36,12 @@ pub enum SidebarAction {
     OpenTableStructure { db: String, table: String },
     OpenInSql { db: String, table: String },
     CloneTable { db: String, table: String },
-    /// El sidebar necesita la lista de BDs (aún vacía).
-    NeedDatabases,
-    /// El sidebar necesita la lista de tablas para la BD indicada.
-    NeedTables(String),
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
-///
-/// No accede al backend directamente — señaliza mediante `SidebarAction::NeedDatabases`
-/// y `SidebarAction::NeedTables` cuando necesita datos que aún no están en caché.
 pub fn show(
     ui: &mut egui::Ui,
+    backend: &dyn DbBackend,
     databases: &mut Vec<String>,
     tables_cache: &mut HashMap<String, Vec<String>>,
     selected_db: Option<&str>,
@@ -94,8 +90,13 @@ pub fn show(
     ui.separator();
 
     if databases.is_empty() {
-        // Solicitar carga al app — se renderizará vacío este frame y rellenado el siguiente.
-        return SidebarAction::NeedDatabases;
+        match backend.list_databases() {
+            Ok(dbs) => *databases = dbs,
+            Err(e) => {
+                ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+                return SidebarAction::None;
+            }
+        }
     }
 
     let filter = table_search.to_lowercase();
@@ -116,7 +117,9 @@ pub fn show(
             .show(ui, |ui| {
                 for db in &dbs {
                     if filtering && !tables_cache.contains_key(db) {
-                        *action.borrow_mut() = SidebarAction::NeedTables(db.clone());
+                        if let Ok(tables) = backend.list_tables(db) {
+                            tables_cache.insert(db.clone(), tables);
+                        }
                     }
 
                     let matching: Vec<String> = if filtering {
@@ -159,8 +162,13 @@ pub fn show(
                     .open(open)
                     .show(ui, |ui: &mut egui::Ui| {
                         if !filtering && !tables_cache.contains_key(db) {
-                            // Solicitar carga al app para el próximo frame.
-                            *action.borrow_mut() = SidebarAction::NeedTables(db.clone());
+                            match backend.list_tables(db) {
+                                Ok(tables) => { tables_cache.insert(db.clone(), tables); }
+                                Err(e) => {
+                                    ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+                                    return;
+                                }
+                            }
                         }
 
                         let tables: Vec<String> = {

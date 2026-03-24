@@ -34,6 +34,9 @@ pub enum AppState {
         start: Instant,
     },
     Connected(Box<dyn DbBackend>),
+    /// Backend cedido temporalmente a un hilo de query; la UI sigue mostrando
+    /// la pantalla connected (con spinner en el grid).
+    QueryRunning,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +166,7 @@ impl Default for RustqlApp {
 
 impl RustqlApp {
     fn run_query_async(&mut self, sql: String) {
-        let backend = match std::mem::replace(&mut self.state, AppState::Disconnected) {
+        let backend = match std::mem::replace(&mut self.state, AppState::QueryRunning) {
             AppState::Connected(b) => b,
             other => { self.state = other; return; }
         };
@@ -171,8 +174,10 @@ impl RustqlApp {
         self.table_view.query_receiver = Some(rx);
         self.table_view.query_loading = true;
         std::thread::spawn(move || {
+            let start = std::time::Instant::now();
             let result = backend.execute_query(&sql);
-            let _ = tx.send(crate::db::QueryEvent::Done { result, backend });
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let _ = tx.send(crate::db::QueryEvent::Done { result, backend, sql, elapsed_ms });
         });
     }
 
@@ -357,7 +362,10 @@ impl RustqlApp {
         // 1. Apply deletes (en transacción para garantizar atomicidad)
         if !self.table_view.pending_deletes.is_empty() {
             if self.table_view.primary_keys.is_empty() {
-                self.table_view.table_error = Some("No se puede eliminar: tabla sin clave primaria".into());
+                self.ui.modal = modals::ModalState::Error {
+                    title: "Error al eliminar".into(),
+                    message: "No se puede eliminar: tabla sin clave primaria".into(),
+                };
                 return;
             }
             let data = match &self.table_view.table_data { Some(d) => d.clone(), None => return };
@@ -386,7 +394,10 @@ impl RustqlApp {
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("DELETE (transacción)", 0, &e));
-                    self.table_view.table_error = Some(e);
+                    self.ui.modal = modals::ModalState::Error {
+                        title: "Error al eliminar".into(),
+                        message: e,
+                    };
                 }
             }
         }
@@ -394,7 +405,10 @@ impl RustqlApp {
         // 2. Apply edits (en transacción para garantizar atomicidad)
         if !self.table_view.pending_edits.is_empty() {
             if self.table_view.primary_keys.is_empty() {
-                self.table_view.table_error = Some("No se puede editar: la tabla no tiene clave primaria".into());
+                self.ui.modal = modals::ModalState::Error {
+                    title: "Error al editar".into(),
+                    message: "No se puede editar: la tabla no tiene clave primaria".into(),
+                };
                 return;
             }
             let data = match &self.table_view.table_data {
@@ -440,7 +454,10 @@ impl RustqlApp {
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("UPDATE (transacción)", 0, &e));
-                    self.table_view.table_error = Some(e);
+                    self.ui.modal = modals::ModalState::Error {
+                        title: "Error al guardar".into(),
+                        message: e,
+                    };
                 }
             }
         }
@@ -479,7 +496,10 @@ impl RustqlApp {
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("INSERT (transacción)", 0, &e));
-                    self.table_view.table_error = Some(e);
+                    self.ui.modal = modals::ModalState::Error {
+                        title: "Error al insertar".into(),
+                        message: e,
+                    };
                 }
             }
         }
@@ -586,13 +606,17 @@ impl RustqlApp {
         // 6. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
         self.table_view.sort_specs = ts.sort_specs.clone();
 
-        // 7. Ejecutar query (server-side sort + filter restaurados)
+        // 7. Cargar claves primarias e info de columnas (antes de run_query_async, que cambia el estado a QueryRunning)
+        self.load_primary_keys(&db, &table);
+        let col_key = (db.clone(), table.clone());
+        if !self.schema.columns_info.contains_key(&col_key) {
+            self.load_columns_info(&db, &table);
+        }
+
+        // 8. Ejecutar query (server-side sort + filter restaurados)
         let sql = self.build_sql(&db, &table);
         self.run_query_async(sql);
         // sort_indices es identidad tras run_query (datos ya ordenados por servidor)
-
-        // 8. Cargar claves primarias
-        self.load_primary_keys(&db, &table);
     }
 
     fn save_tabs_state(&mut self) {
@@ -702,20 +726,20 @@ impl RustqlApp {
                 }
             }
         }
-        if let Some(crate::db::QueryEvent::Done { result, backend }) = query_done {
+        if let Some(crate::db::QueryEvent::Done { result, backend, sql, elapsed_ms }) = query_done {
             self.table_view.query_receiver = None;
             self.table_view.query_loading = false;
             self.state = AppState::Connected(backend);
             match result {
                 Ok(data) => {
                     let rows = data.rows.len();
-                    self.push_log(LogEntry::ok("(query async)", 0, rows));
+                    self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
                     self.table_view.sort_indices = (0..rows).collect();
                     self.table_view.table_data = Some(data);
                     self.table_view.table_error = None;
                 }
                 Err(e) => {
-                    self.push_log(LogEntry::err("(query async)", 0, &e));
+                    self.push_log(LogEntry::err(sql, elapsed_ms, &e));
                     self.table_view.table_data = None;
                     self.table_view.table_error = Some(e);
                     self.table_view.sort_indices.clear();
@@ -1013,6 +1037,7 @@ impl eframe::App for RustqlApp {
                     Some(format!("Conectando a {}…", host))
                 }
                 AppState::Disconnected => None,
+                AppState::QueryRunning => Some(format!("{}:{}", self.params.host, self.params.port)),
             };
             let sb_db = match &self.schema.selected_node {
                 Some(SelectedNode::Database(d)) => Some(d.clone()),
@@ -1032,7 +1057,7 @@ impl eframe::App for RustqlApp {
                     );
                 });
         }
-        if matches!(self.state, AppState::Connected(_))
+        if matches!(self.state, AppState::Connected(_) | AppState::QueryRunning)
 
             && self.ui.show_log {
                 egui::TopBottomPanel::bottom("log_panel")
@@ -1118,7 +1143,7 @@ impl eframe::App for RustqlApp {
                 });
             }
 
-            AppState::Connected(_) => {
+            AppState::Connected(backend) => {
                 // ── Sidebar ───────────────────────────────────────────────
                 if self.ui.show_sidebar {
                     let (sel_db, sel_table) = match &self.schema.selected_node {
@@ -1141,6 +1166,7 @@ impl eframe::App for RustqlApp {
                         .show(ctx, |ui| {
                             sidebar_action = sidebar::show(
                                 ui,
+                                backend.as_ref(),
                                 &mut self.schema.databases,
                                 &mut self.schema.tables_cache,
                                 sel_db,
@@ -1360,6 +1386,18 @@ impl eframe::App for RustqlApp {
                             }
                         }
                     }
+                });
+            }
+
+            AppState::QueryRunning => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.spinner();
+                            ui.add_space(8.0);
+                            ui.label("Ejecutando consulta…");
+                        });
+                    });
                 });
             }
         }
@@ -1881,24 +1919,6 @@ impl eframe::App for RustqlApp {
                 self.schema.tables_cache.clear();
                 self.schema.databases_info = None;
                 self.schema.tables_info.clear();
-            }
-            SidebarAction::NeedDatabases => {
-                if let AppState::Connected(b) = &mut self.state {
-                    match b.list_databases() {
-                        Ok(dbs) => self.schema.databases = dbs,
-                        Err(e) => self.table_view.table_error = Some(e),
-                    }
-                }
-                ctx.request_repaint();
-            }
-            SidebarAction::NeedTables(db) => {
-                if let AppState::Connected(b) = &mut self.state {
-                    match b.list_tables(&db) {
-                        Ok(tables) => { self.schema.tables_cache.insert(db, tables); }
-                        Err(e) => self.table_view.table_error = Some(e),
-                    }
-                }
-                ctx.request_repaint();
             }
             SidebarAction::Disconnect => {
                 should_disconnect = true;

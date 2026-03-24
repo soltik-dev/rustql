@@ -127,6 +127,10 @@ pub enum ModalState {
         nulls: Vec<bool>,
         error: Option<String>,
     },
+    Error {
+        title: String,
+        message: String,
+    },
 }
 
 // ── Acciones devueltas al caller ──────────────────────────────────────────────
@@ -202,6 +206,9 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
         }
         ModalState::CloneTable { db, table, new_name, copy_data, error } => {
             show_clone_table(ctx, db, table, new_name, copy_data, error)
+        }
+        ModalState::Error { title, message } => {
+            show_error(ctx, title, message)
         }
     }
 }
@@ -903,4 +910,30 @@ fn show_clone_table(
         action = ModalAction::Cancel;
     }
     action
+}
+
+// ── Error genérico ────────────────────────────────────────────────────────────
+
+fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
+    let mut open = true;
+    let mut close = false;
+
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.colored_label(egui::Color32::RED, message);
+            ui.separator();
+            if ui.button("Cerrar").clicked() {
+                close = true;
+            }
+        });
+
+    if !open || close {
+        ModalAction::Cancel
+    } else {
+        ModalAction::None
+    }
 }

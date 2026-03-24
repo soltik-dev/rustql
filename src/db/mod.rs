@@ -147,6 +147,8 @@ pub enum QueryEvent {
     Done {
         result: DbResult<QueryResult>,
         backend: Box<dyn DbBackend>,
+        sql: String,
+        elapsed_ms: u64,
     },
 }
 
