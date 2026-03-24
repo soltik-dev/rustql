@@ -1913,6 +1913,17 @@ impl eframe::App for RustqlApp {
                     }
                 }
             }
+            GridAction::CopyRowsAs { fmt } => {
+                if let Some(data) = &self.table_view.table_data {
+                    let rows: Vec<&Vec<Option<String>>> = self.table_view.selected_rows.iter()
+                        .filter_map(|&i| data.rows.get(i))
+                        .collect();
+                    if !rows.is_empty() {
+                        let text = results_grid::format_rows_for_copy(&data.columns, &rows, &fmt);
+                        ctx.copy_text(text);
+                    }
+                }
+            }
             GridAction::CellSelected { row_idx, col_idx } => {
                 self.table_view.selected_cell = Some((row_idx, col_idx));
                 self.table_view.selected_rows.clear();

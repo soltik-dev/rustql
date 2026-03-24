@@ -17,7 +17,7 @@ pub enum Theme {
     Dark,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum CopyFormat {
     #[default]
     Csv,
@@ -275,20 +275,20 @@ fn dark_visuals() -> egui::Visuals {
 
     // Hover
     v.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
-    v.widgets.hovered.bg_fill = egui::Color32::from_rgb(55, 55, 75);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 120, 200));
+    v.widgets.hovered.bg_fill = egui::Color32::from_rgb(50, 52, 60);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 90, 110));
 
-    // Active (pulsado)
-    v.widgets.active.fg_stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
-    v.widgets.active.bg_fill = egui::Color32::from_rgb(45, 70, 130);
+    // Active (pulsado / toggle activado)
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
+    v.widgets.active.bg_fill = egui::Color32::from_rgb(42, 48, 64);
 
     // Open (desplegables abiertos)
     v.widgets.open.fg_stroke = egui::Stroke::new(1.0, text_bright);
-    v.widgets.open.bg_fill = egui::Color32::from_rgb(35, 35, 50);
+    v.widgets.open.bg_fill = egui::Color32::from_rgb(35, 37, 48);
 
-    // Selección (texto seleccionado)
-    v.selection.bg_fill = egui::Color32::from_rgb(40, 80, 160);
-    v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255));
+    // Selección (item seleccionado en sidebar, texto seleccionado)
+    v.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(60, 90, 160, 120);
+    v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 160, 220));
 
     // Texto hyperlink
     v.hyperlink_color = egui::Color32::from_rgb(100, 160, 255);

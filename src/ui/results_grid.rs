@@ -87,6 +87,7 @@ pub enum GridAction {
     // Row selection
     RowSelected { row_idx: usize, shift: bool, ctrl: bool },
     CopySelectedRows,
+    CopyRowsAs { fmt: crate::settings::CopyFormat },
     // Cell selection via plain click
     CellSelected { row_idx: usize, col_idx: usize },
     // Mark multiple rows for delete (used when selected_rows is non-empty)
@@ -417,6 +418,23 @@ pub fn show(
     // Atajos de teclado para la celda seleccionada
     let mut keyboard_action = GridAction::None;
     let no_widget_focused = ui.memory(|m| m.focused().is_none());
+
+    // Ctrl+C: siempre activo (no requiere ausencia de foco), solo requiere no estar editando
+    if editing_cell.is_none() {
+        let ctrl = ui.input(|i| i.modifiers.ctrl);
+        if ctrl && ui.input(|i| i.key_pressed(egui::Key::C)) {
+            if !selected_rows.is_empty() {
+                keyboard_action = GridAction::CopySelectedRows;
+            } else if let Some((sel_row, sel_col)) = *selected_cell
+                && sel_row < data.rows.len()
+                && data.rows[sel_row].get(sel_col).is_some()
+            {
+                let cell_str = data.rows[sel_row][sel_col].as_deref().unwrap_or("").to_string();
+                ui.ctx().copy_text(cell_str);
+            }
+        }
+    }
+
     if no_widget_focused && editing_cell.is_none() {
         let arrow_up    = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
         let arrow_down  = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
@@ -433,20 +451,14 @@ pub fn show(
             *selected_cell = Some((new_r, new_c));
         }
 
+        let ctrl = ui.input(|i| i.modifiers.ctrl);
+
         if let Some((sel_row, sel_col)) = *selected_cell
             && sel_row < data.rows.len()
                 && data.rows[sel_row].get(sel_col).is_some() {
                     let cell_str = data.rows[sel_row][sel_col].as_deref().unwrap_or("").to_string();
-                    let ctrl = ui.input(|i| i.modifiers.ctrl);
 
-                    // Ctrl+C: copy single cell or selected rows
-                    if ctrl && ui.input(|i| i.key_pressed(egui::Key::C)) {
-                        if selected_rows.is_empty() {
-                            ui.ctx().copy_text(cell_str.clone());
-                        } else {
-                            keyboard_action = GridAction::CopySelectedRows;
-                        }
-                    }
+                    // Ctrl+C handled above
                     // Ctrl+N: NULL
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::N)) {
                         keyboard_action = GridAction::CellSetNull { row: RowRef::Existing(sel_row), col_idx: sel_col };
@@ -800,10 +812,32 @@ pub fn show(
                                 let ctx = ui.ctx().clone();
                                 let ga_rc = &grid_action_rc;
                                 let col_name = data.columns[col_i].clone();
+                                let has_multi_selection = !selected_rows.is_empty();
                                 resp.context_menu(|ui| {
-                                    if ui.button("📋  Copiar valor").clicked() {
-                                        ctx.copy_text(cell_text.clone());
-                                        ui.close();
+                                    if has_multi_selection {
+                                        if ui.button("📋  Copiar en CSV").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CopyRowsAs {
+                                                fmt: crate::settings::CopyFormat::Csv,
+                                            };
+                                            ui.close();
+                                        }
+                                        if ui.button("📋  Copiar en TSV").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CopyRowsAs {
+                                                fmt: crate::settings::CopyFormat::Tsv,
+                                            };
+                                            ui.close();
+                                        }
+                                        if ui.button("📋  Copiar SQL Insert").clicked() {
+                                            *ga_rc.borrow_mut() = GridAction::CopyRowsAs {
+                                                fmt: crate::settings::CopyFormat::SqlInserts,
+                                            };
+                                            ui.close();
+                                        }
+                                    } else {
+                                        if ui.button("📋  Copiar valor").clicked() {
+                                            ctx.copy_text(cell_text.clone());
+                                            ui.close();
+                                        }
                                     }
                                     ui.separator();
                                     if !is_pending_delete {
