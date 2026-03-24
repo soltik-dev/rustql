@@ -83,19 +83,23 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
 }
 
 pub trait DbBackend: Send {
-    fn list_databases(&mut self) -> DbResult<Vec<String>>;
-    fn list_tables(&mut self, database: &str) -> DbResult<Vec<String>>;
+    // ── Lectura (no modifican el estado del backend) ───────────────────────────
+
+    fn list_databases(&self) -> DbResult<Vec<String>>;
+    fn list_tables(&self, database: &str) -> DbResult<Vec<String>>;
 
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
-    fn execute_query(&mut self, sql: &str) -> DbResult<QueryResult>;
+    fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
+
+    fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
+    fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
+    fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;
+    fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>>;
+
+    // ── Escritura (modifican datos en el servidor) ─────────────────────────────
 
     /// Ejecuta SQL de escritura (INSERT/UPDATE/DELETE/DDL). Devuelve filas afectadas.
     fn execute_write(&mut self, sql: &str) -> DbResult<u64>;
-
-    fn get_databases_info(&mut self) -> DbResult<Vec<DatabaseInfo>>;
-    fn get_tables_info(&mut self, db: &str) -> DbResult<Vec<TableInfo>>;
-    fn get_columns_info(&mut self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;
-    fn get_primary_keys(&mut self, db: &str, table: &str) -> DbResult<Vec<String>>;
 
     fn create_database(&mut self, name: &str, charset: &str) -> DbResult<()>;
     fn drop_database(&mut self, name: &str) -> DbResult<()>;
@@ -106,9 +110,11 @@ pub trait DbBackend: Send {
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
     fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()>;
 
+    // ── Helpers con implementación por defecto ─────────────────────────────────
+
     /// SELECT * con LIMIT opcional WHERE.
     #[allow(dead_code)]
-    fn query_table(&mut self, db: &str, table: &str, limit: usize) -> DbResult<QueryResult> {
+    fn query_table(&self, db: &str, table: &str, limit: usize) -> DbResult<QueryResult> {
         self.execute_query(&format!(
             "SELECT * FROM `{}`.`{}` LIMIT {limit}",
             escape_ident(db),
@@ -118,7 +124,7 @@ pub trait DbBackend: Send {
 
     #[allow(dead_code)]
     fn query_filtered(
-        &mut self,
+        &self,
         db: &str,
         table: &str,
         filter: &str,

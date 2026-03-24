@@ -36,8 +36,14 @@ pub struct PendingEdit {
     pub is_null: bool,
 }
 
-/// Sentinel: row_idx values >= this mean "pending insert row at index (row_idx - INSERT_ROW_BASE)"
-pub const INSERT_ROW_BASE: usize = usize::MAX / 2;
+/// Identifies a row unambiguously: either an existing data row or a pending insert row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowRef {
+    /// Index into `QueryResult.rows`.
+    Existing(usize),
+    /// Index into `pending_inserts`.
+    Insert(usize),
+}
 
 /// A pending insert row at the bottom of the grid.
 #[derive(Debug, Clone)]
@@ -50,24 +56,23 @@ pub struct PendingInsert {
 
 #[derive(Debug, Clone)]
 pub struct EditingCell {
-    pub row_idx: usize,    // >= INSERT_ROW_BASE if editing an insert row
+    pub row: RowRef,
     pub col_idx: usize,
     /// Buffer de edición mutable mientras el usuario escribe.
     pub buffer: String,
     /// Solicitar foco al TextEdit en el primer frame de edición.
     pub needs_focus: bool,
-    pub is_insert: bool,   // true when editing a pending insert row
 }
 
 #[derive(Debug)]
 pub enum GridAction {
     None,
     SortChanged,
-    CellEditStarted { row_idx: usize, col_idx: usize, current_value: String },
-    CellEditCommitted { row_idx: usize, col_idx: usize, new_value: String },
-    CellSetNull { row_idx: usize, col_idx: usize },
+    CellEditStarted { row: RowRef, col_idx: usize, current_value: String },
+    CellEditCommitted { row: RowRef, col_idx: usize, new_value: String },
+    CellSetNull { row: RowRef, col_idx: usize },
     CellEditCancelled,
-    CellEditTabNext { row_idx: usize, col_idx: usize, new_value: String },
+    CellEditTabNext { row: RowRef, col_idx: usize, new_value: String },
     ApplyEdits,
     DiscardEdits,
     // Filtrado desde menú contextual
@@ -450,7 +455,7 @@ pub fn show(
                     }
                     // Ctrl+N: NULL
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::N)) {
-                        keyboard_action = GridAction::CellSetNull { row_idx: sel_row, col_idx: sel_col };
+                        keyboard_action = GridAction::CellSetNull { row: RowRef::Existing(sel_row), col_idx: sel_col };
                     }
                     // Ctrl+Del: mark/toggle delete row(s)
                     if ctrl && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
@@ -474,17 +479,17 @@ pub fn show(
                     if !ctrl && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                         let is_nullable = column_info.get(sel_col).map(|c| c.is_nullable).unwrap_or(false);
                         if is_nullable {
-                            keyboard_action = GridAction::CellSetNull { row_idx: sel_row, col_idx: sel_col };
+                            keyboard_action = GridAction::CellSetNull { row: RowRef::Existing(sel_row), col_idx: sel_col };
                         } else {
                             keyboard_action = GridAction::CellEditCommitted {
-                                row_idx: sel_row, col_idx: sel_col, new_value: String::new(),
+                                row: RowRef::Existing(sel_row), col_idx: sel_col, new_value: String::new(),
                             };
                         }
                     }
                     // F2 o Enter: editar
                     if ui.input(|i| i.key_pressed(egui::Key::F2)) {
                         keyboard_action = GridAction::CellEditStarted {
-                            row_idx: sel_row, col_idx: sel_col, current_value: cell_str.clone(),
+                            row: RowRef::Existing(sel_row), col_idx: sel_col, current_value: cell_str.clone(),
                         };
                     }
                     // Ctrl+V: pegar
@@ -495,7 +500,7 @@ pub fn show(
                     });
                     if let Some(text) = paste {
                         keyboard_action = GridAction::CellEditCommitted {
-                            row_idx: sel_row, col_idx: sel_col, new_value: text,
+                            row: RowRef::Existing(sel_row), col_idx: sel_col, new_value: text,
                         };
                     }
                     // Escape: deseleccionar
@@ -595,7 +600,7 @@ pub fn show(
                             let is_editing = edit_cell_rc
                                 .borrow()
                                 .as_ref()
-                                .is_some_and(|e| e.row_idx == real_idx && e.col_idx == col_i && !e.is_insert);
+                                .is_some_and(|e| e.row == RowRef::Existing(real_idx) && e.col_idx == col_i);
 
                             let pending = pending_edits
                                 .iter()
@@ -640,7 +645,7 @@ pub fn show(
 
                                 if tab_pressed && resp.has_focus() {
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditTabNext {
-                                        row_idx: real_idx,
+                                        row: RowRef::Existing(real_idx),
                                         col_idx: col_i,
                                         new_value: edit.buffer.clone(),
                                     };
@@ -648,7 +653,7 @@ pub fn show(
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditCancelled;
                                 } else if committed {
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                        row_idx: real_idx,
+                                        row: RowRef::Existing(real_idx),
                                         col_idx: col_i,
                                         new_value: edit.buffer.clone(),
                                     };
@@ -695,7 +700,7 @@ pub fn show(
                                         edit.new_value.clone()
                                     };
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
-                                        row_idx: real_idx,
+                                        row: RowRef::Existing(real_idx),
                                         col_idx: col_i,
                                         current_value: start_value,
                                     };
@@ -790,7 +795,7 @@ pub fn show(
 
                                 if resp.double_clicked() && !is_pending_delete {
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
-                                        row_idx: real_idx,
+                                        row: RowRef::Existing(real_idx),
                                         col_idx: col_i,
                                         current_value: cell_text.clone(),
                                     };
@@ -810,27 +815,27 @@ pub fn show(
                                     if !is_pending_delete {
                                         if ui.button("✏  Editar celda").clicked() {
                                             *ga_rc.borrow_mut() = GridAction::CellEditStarted {
-                                                row_idx: real_idx, col_idx: col_i,
+                                                row: RowRef::Existing(real_idx), col_idx: col_i,
                                                 current_value: cell_text.clone(),
                                             };
                                             ui.close();
                                         }
                                         if ui.button("∅  Establecer NULL").clicked() {
                                             *ga_rc.borrow_mut() = GridAction::CellSetNull {
-                                                row_idx: real_idx, col_idx: col_i,
+                                                row: RowRef::Existing(real_idx), col_idx: col_i,
                                             };
                                             ui.close();
                                         }
                                         if ui.button("\"\"  Establecer vacío").clicked() {
                                             *ga_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                                row_idx: real_idx, col_idx: col_i,
+                                                row: RowRef::Existing(real_idx), col_idx: col_i,
                                                 new_value: String::new(),
                                             };
                                             ui.close();
                                         }
                                         if is_dt && ui.button("🕐  Fecha/hora actual").clicked() {
                                             *ga_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                                row_idx: real_idx, col_idx: col_i,
+                                                row: RowRef::Existing(real_idx), col_idx: col_i,
                                                 new_value: current_datetime(),
                                             };
                                             ui.close();
@@ -934,12 +939,11 @@ pub fn show(
                             ui.painter().rect_filled(cell_rect, 0.0, insert_bg);
 
                             let is_auto = ins.auto_cols.get(col_i).copied().unwrap_or(false);
-                            let row_idx_for_edit = INSERT_ROW_BASE + insert_idx;
 
                             let is_editing = edit_cell_rc
                                 .borrow()
                                 .as_ref()
-                                .is_some_and(|e| e.row_idx == row_idx_for_edit && e.col_idx == col_i && e.is_insert);
+                                .is_some_and(|e| e.row == RowRef::Insert(insert_idx) && e.col_idx == col_i);
 
                             if is_auto {
                                 // Show "(AUTO)" in muted color, no editing
@@ -977,7 +981,7 @@ pub fn show(
 
                                 if tab_pressed && resp.has_focus() {
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditTabNext {
-                                        row_idx: row_idx_for_edit,
+                                        row: RowRef::Insert(insert_idx),
                                         col_idx: col_i,
                                         new_value: edit.buffer.clone(),
                                     };
@@ -985,7 +989,7 @@ pub fn show(
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditCancelled;
                                 } else if committed {
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditCommitted {
-                                        row_idx: row_idx_for_edit,
+                                        row: RowRef::Insert(insert_idx),
                                         col_idx: col_i,
                                         new_value: edit.buffer.clone(),
                                     };
@@ -1009,7 +1013,7 @@ pub fn show(
 
                                 if resp.double_clicked() {
                                     *grid_action_rc.borrow_mut() = GridAction::CellEditStarted {
-                                        row_idx: row_idx_for_edit,
+                                        row: RowRef::Insert(insert_idx),
                                         col_idx: col_i,
                                         current_value: val.to_string(),
                                     };

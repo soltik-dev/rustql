@@ -99,20 +99,20 @@ impl MysqlBackend {
 }
 
 impl DbBackend for MysqlBackend {
-    fn list_databases(&mut self) -> DbResult<Vec<String>> {
+    fn list_databases(&self) -> DbResult<Vec<String>> {
         self.conn()?
             .query("SHOW DATABASES")
             .map_err(|e| format!("Error en query: {e}"))
     }
 
-    fn list_tables(&mut self, database: &str) -> DbResult<Vec<String>> {
+    fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
         let query = format!("SHOW TABLES FROM `{}`", escape_sql(database));
         self.conn()?
             .query(query)
             .map_err(|e| format!("Error en query: {e}"))
     }
 
-    fn execute_query(&mut self, sql: &str) -> DbResult<QueryResult> {
+    fn execute_query(&self, sql: &str) -> DbResult<QueryResult> {
         let raw_rows: Vec<mysql::Row> = self
             .conn()?
             .query(sql)
@@ -128,7 +128,7 @@ impl DbBackend for MysqlBackend {
         Ok(conn.affected_rows())
     }
 
-    fn get_databases_info(&mut self) -> DbResult<Vec<DatabaseInfo>> {
+    fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
         let sql = "SELECT s.SCHEMA_NAME, \
                           s.DEFAULT_CHARACTER_SET_NAME, \
                           s.DEFAULT_COLLATION_NAME, \
@@ -151,7 +151,7 @@ impl DbBackend for MysqlBackend {
             .collect())
     }
 
-    fn get_tables_info(&mut self, db: &str) -> DbResult<Vec<TableInfo>> {
+    fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>> {
         let sql = format!(
             "SELECT TABLE_NAME, \
                     COALESCE(ENGINE,''), \
@@ -176,7 +176,7 @@ impl DbBackend for MysqlBackend {
             .collect())
     }
 
-    fn get_columns_info(&mut self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>> {
+    fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>> {
         let sql = format!(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA \
              FROM information_schema.COLUMNS \
@@ -206,7 +206,7 @@ impl DbBackend for MysqlBackend {
             .collect())
     }
 
-    fn get_primary_keys(&mut self, db: &str, table: &str) -> DbResult<Vec<String>> {
+    fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>> {
         let sql = format!(
             "SELECT COLUMN_NAME \
              FROM information_schema.COLUMNS \

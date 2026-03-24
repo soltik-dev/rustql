@@ -14,7 +14,7 @@ use crate::settings::{self, AppSettings, SavedSqlTab};
 use crate::table_state::{self, TableStates};
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::modals::{self, DropKind, ModalAction, ModalState, NewColumnDef, TruncateKind};
-use crate::ui::results_grid::{EditingCell, GridAction, PendingEdit, PendingInsert, SortDir, SortSpec};
+use crate::ui::results_grid::{EditingCell, GridAction, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec};
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
@@ -43,6 +43,54 @@ pub enum SelectedNode {
     Table { db: String, table: String },
 }
 
+// ── Sub-structs de estado ─────────────────────────────────────────────────────
+
+/// Árbol de esquema visible en el sidebar + cachés de info de servidor.
+#[derive(Default)]
+pub struct SchemaCache {
+    pub databases: Vec<String>,
+    pub tables_cache: HashMap<String, Vec<String>>,
+    pub table_search: String,
+    pub selected_node: Option<SelectedNode>,
+    pub databases_info: Option<Vec<DatabaseInfo>>,
+    pub tables_info: HashMap<String, Vec<TableInfo>>,
+    pub columns_info: HashMap<(String, String), Vec<ColumnInfo>>,
+}
+
+/// Datos de la tabla activa: resultado de query, edición inline, selección de filas.
+#[derive(Default)]
+pub struct TableViewState {
+    pub table_data: Option<QueryResult>,
+    pub table_error: Option<String>,
+    pub sort_specs: Vec<SortSpec>,
+    pub sort_indices: Vec<usize>,
+    pub filter_text: String,
+    pub filter_history: Vec<String>,
+    pub pending_edits: Vec<PendingEdit>,
+    pub editing_cell: Option<EditingCell>,
+    pub primary_keys: Vec<String>,
+    pub pending_deletes: std::collections::BTreeSet<usize>,
+    pub pending_inserts: Vec<PendingInsert>,
+    pub selected_cell: Option<(usize, usize)>,
+    pub selected_rows: std::collections::BTreeSet<usize>,
+    pub last_selected_row: Option<usize>,
+    pub drag_select_from: Option<usize>,
+    pub query_loading: bool,
+    pub query_receiver: Option<std::sync::mpsc::Receiver<crate::db::QueryEvent>>,
+}
+
+/// Estado de los paneles UI: visibilidad, modal, settings, log.
+pub struct UiPanelState {
+    pub show_sidebar: bool,
+    pub show_log: bool,
+    pub show_settings: bool,
+    pub show_only_fav: bool,
+    pub settings: AppSettings,
+    pub settings_dirty: bool,
+    pub modal: ModalState,
+    pub query_log: std::collections::VecDeque<LogEntry>,
+}
+
 // ── Estado principal ─────────────────────────────────────────────────────────
 
 pub struct RustqlApp {
@@ -51,76 +99,27 @@ pub struct RustqlApp {
     pub port_str: String,
     pub error_message: Option<String>,
 
-    // Árbol de esquema
-    pub databases: Vec<String>,
-    pub tables_cache: HashMap<String, Vec<String>>,
-    pub table_search: String,
-    pub selected_node: Option<SelectedNode>,
-
-    // Datos de la tabla activa (pestaña Datos)
-    pub table_data: Option<QueryResult>,
-    pub table_error: Option<String>,
-    pub sort_specs: Vec<SortSpec>,
-    pub sort_indices: Vec<usize>,
-    pub filter_text: String,
-
-    // Edición de celdas
-    pub pending_edits: Vec<PendingEdit>,
-    pub editing_cell: Option<EditingCell>,
-    pub primary_keys: Vec<String>,
+    pub schema: SchemaCache,
+    pub table_view: TableViewState,
+    pub ui: UiPanelState,
 
     // Pestañas
     pub active_tab: ActiveTab,
-
-    // Cachés para paneles de info
-    pub databases_info: Option<Vec<DatabaseInfo>>,
-    pub tables_info: HashMap<String, Vec<TableInfo>>,
-    pub columns_info: HashMap<(String, String), Vec<ColumnInfo>>,
-
-    // Multi-tab SQL editor
     pub sql_tabs: Vec<SqlTab>,
     pub pinned_tables: Vec<(String, String)>,
 
-    // Modal activo
-    pub modal: ModalState,
-
-    // Log y sesión
-    pub query_log: std::collections::VecDeque<LogEntry>,
+    // Sesión / perfiles
     pub profiles: Vec<ConnectionProfile>,
     pub selected_profile_idx: Option<usize>,
     pub profile_name: String,
     pub save_password: bool,
 
-    // Visibilidad de paneles
-    pub show_sidebar: bool,
-    pub show_log: bool,
-    pub show_settings: bool,
-    pub settings: AppSettings,
-    pub settings_dirty: bool,
-
     // Estado persistido por tabla (sort, filtro, historial)
     pub table_states: TableStates,
-    pub filter_history: Vec<String>,
-
-    pub selected_cell: Option<(usize, usize)>,
-    pub show_only_fav: bool,
 
     /// Cambios pendientes guardados por tabla fijada (clave: "db/tabla").
-    /// Persisten aunque el usuario cambie de tabla, a diferencia de la pestaña Datos normal.
+    /// Persisten aunque el usuario cambie de tabla.
     pub pinned_pending_edits: HashMap<String, Vec<PendingEdit>>,
-
-    // Inline delete/insert state
-    pub pending_deletes: std::collections::BTreeSet<usize>,
-    pub pending_inserts: Vec<PendingInsert>,
-
-    // Row selection
-    pub selected_rows: std::collections::BTreeSet<usize>,
-    pub last_selected_row: Option<usize>,
-    pub drag_select_from: Option<usize>,
-
-    // Async query state
-    pub query_loading: bool,
-    pub query_receiver: Option<std::sync::mpsc::Receiver<crate::db::QueryEvent>>,
 }
 
 impl Default for RustqlApp {
@@ -135,47 +134,27 @@ impl Default for RustqlApp {
             port_str,
             params,
             error_message: None,
-            databases: Vec::new(),
-            tables_cache: HashMap::new(),
-            table_search: String::new(),
-            selected_node: None,
-            table_data: None,
-            table_error: None,
-            sort_specs: Vec::new(),
-            sort_indices: Vec::new(),
-            filter_text: String::new(),
-            pending_edits: Vec::new(),
-            editing_cell: None,
-            primary_keys: Vec::new(),
+            schema: SchemaCache::default(),
+            table_view: TableViewState::default(),
+            ui: UiPanelState {
+                show_sidebar,
+                show_log,
+                show_settings: false,
+                show_only_fav: false,
+                settings,
+                settings_dirty: false,
+                modal: ModalState::None,
+                query_log: std::collections::VecDeque::new(),
+            },
             active_tab: ActiveTab::default(),
-            databases_info: None,
-            tables_info: HashMap::new(),
-            columns_info: HashMap::new(),
             sql_tabs: vec![SqlTab::default()],
             pinned_tables: Vec::new(),
-            modal: ModalState::None,
-            query_log: std::collections::VecDeque::new(),
             profiles: profiles::load(),
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
-            show_sidebar,
-            show_log,
-            show_settings: false,
-            settings,
-            settings_dirty: false,
             table_states: table_state::load(),
-            filter_history: Vec::new(),
-            selected_cell: None,
-            show_only_fav: false,
             pinned_pending_edits: HashMap::new(),
-            pending_deletes: std::collections::BTreeSet::new(),
-            pending_inserts: Vec::new(),
-            selected_rows: std::collections::BTreeSet::new(),
-            last_selected_row: None,
-            drag_select_from: None,
-            query_loading: false,
-            query_receiver: None,
         }
     }
 }
@@ -184,13 +163,13 @@ impl Default for RustqlApp {
 
 impl RustqlApp {
     fn run_query_async(&mut self, sql: String) {
-        let mut backend = match std::mem::replace(&mut self.state, AppState::Disconnected) {
+        let backend = match std::mem::replace(&mut self.state, AppState::Disconnected) {
             AppState::Connected(b) => b,
             other => { self.state = other; return; }
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        self.query_receiver = Some(rx);
-        self.query_loading = true;
+        self.table_view.query_receiver = Some(rx);
+        self.table_view.query_loading = true;
         std::thread::spawn(move || {
             let result = backend.execute_query(&sql);
             let _ = tx.send(crate::db::QueryEvent::Done { result, backend });
@@ -212,26 +191,26 @@ impl RustqlApp {
     }
 
     fn push_log(&mut self, entry: LogEntry) {
-        if self.query_log.len() >= 500 {
-            self.query_log.pop_front();
+        if self.ui.query_log.len() >= 500 {
+            self.ui.query_log.pop_front();
         }
-        self.query_log.push_back(entry);
+        self.ui.query_log.push_back(entry);
     }
 
     fn build_sql(&self, db: &str, table: &str) -> String {
-        let filter = self.filter_text.trim();
+        let filter = self.table_view.filter_text.trim();
 
-        let order_by = if self.sort_specs.is_empty() {
+        let order_by = if self.table_view.sort_specs.is_empty() {
             String::new()
         } else {
-            let parts: Vec<String> = self.sort_specs.iter().map(|s| {
+            let parts: Vec<String> = self.table_view.sort_specs.iter().map(|s| {
                 let dir = if s.dir == SortDir::Desc { "DESC" } else { "ASC" };
                 format!("`{}` {}", s.col_name.replace('`', "``"), dir)
             }).collect();
             format!(" ORDER BY {}", parts.join(", "))
         };
 
-        let limit = self.settings.query_limit;
+        let limit = self.ui.settings.query_limit;
         if filter.is_empty() {
             format!("SELECT * FROM `{}`.`{}`{} LIMIT {limit}", escape_ident(db), escape_ident(table), order_by)
         } else {
@@ -249,7 +228,7 @@ impl RustqlApp {
             AppState::Connected(b) => b.get_primary_keys(db, table),
             _ => return,
         };
-        self.primary_keys = result.unwrap_or_default();
+        self.table_view.primary_keys = result.unwrap_or_default();
     }
 
     fn load_databases_info(&mut self) {
@@ -257,7 +236,7 @@ impl RustqlApp {
             AppState::Connected(b) => b.get_databases_info(),
             _ => return,
         };
-        self.databases_info = result.ok();
+        self.schema.databases_info = result.ok();
     }
 
     fn load_tables_info(&mut self, db: &str) {
@@ -266,7 +245,7 @@ impl RustqlApp {
             _ => return,
         };
         if let Ok(info) = result {
-            self.tables_info.insert(db.to_string(), info);
+            self.schema.tables_info.insert(db.to_string(), info);
         }
     }
 
@@ -276,30 +255,30 @@ impl RustqlApp {
             _ => return,
         };
         if let Ok(cols) = result {
-            self.columns_info.insert((db.to_string(), table.to_string()), cols);
+            self.schema.columns_info.insert((db.to_string(), table.to_string()), cols);
         }
     }
 
     fn maybe_load_tab_data(&mut self) {
         match self.active_tab {
             ActiveTab::Servidor => {
-                if self.databases_info.is_none() {
+                if self.schema.databases_info.is_none() {
                     self.load_databases_info();
                 }
             }
             ActiveTab::Bbdd => {
-                let db = match &self.selected_node {
+                let db = match &self.schema.selected_node {
                     Some(SelectedNode::Database(d)) => Some(d.clone()),
                     Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
                     _ => None,
                 };
                 if let Some(db) = db
-                    && !self.tables_info.contains_key(&db) {
+                    && !self.schema.tables_info.contains_key(&db) {
                         self.load_tables_info(&db);
                     }
             }
             ActiveTab::Tabla => {
-                let key = match &self.selected_node {
+                let key = match &self.schema.selected_node {
                     Some(SelectedNode::Table { db, table }) => {
                         Some((db.clone(), table.clone()))
                     }
@@ -307,7 +286,7 @@ impl RustqlApp {
                 };
                 if let Some((db, table)) = key {
                     let k = (db.clone(), table.clone());
-                    if !self.columns_info.contains_key(&k) {
+                    if !self.schema.columns_info.contains_key(&k) {
                         self.load_columns_info(&db, &table);
                     }
                 }
@@ -318,48 +297,48 @@ impl RustqlApp {
 
     fn invalidate_after_write(&mut self, db: Option<&str>, table: Option<&str>) {
         // Invalidar bases de datos info
-        self.databases_info = None;
+        self.schema.databases_info = None;
 
         if let Some(db) = db {
             // Invalidar caché de tablas de esa BD
-            self.tables_cache.remove(db);
-            self.tables_info.remove(db);
+            self.schema.tables_cache.remove(db);
+            self.schema.tables_info.remove(db);
             // Recargar lista de bases de datos del sidebar
-            self.databases.clear();
+            self.schema.databases.clear();
 
             if let Some(table) = table {
                 let key = (db.to_string(), table.to_string());
-                self.columns_info.remove(&key);
+                self.schema.columns_info.remove(&key);
 
                 // Si la tabla eliminada era la seleccionada, limpiar
                 if matches!(
-                    &self.selected_node,
+                    &self.schema.selected_node,
                     Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
                 ) {
-                    self.selected_node = Some(SelectedNode::Database(db.to_string()));
-                    self.table_data = None;
-                    self.table_error = None;
-                    self.pending_edits.clear();
-                    self.pending_deletes.clear();
-                    self.pending_inserts.clear();
-                    self.editing_cell = None;
-                    self.primary_keys.clear();
+                    self.schema.selected_node = Some(SelectedNode::Database(db.to_string()));
+                    self.table_view.table_data = None;
+                    self.table_view.table_error = None;
+                    self.table_view.pending_edits.clear();
+                    self.table_view.pending_deletes.clear();
+                    self.table_view.pending_inserts.clear();
+                    self.table_view.editing_cell = None;
+                    self.table_view.primary_keys.clear();
                 }
             } else {
                 // BD entera eliminada
                 if matches!(
-                    &self.selected_node,
+                    &self.schema.selected_node,
                     Some(SelectedNode::Database(d) | SelectedNode::Table { db: d, .. }) if d == db
                 ) {
-                    self.selected_node = Some(SelectedNode::Server);
+                    self.schema.selected_node = Some(SelectedNode::Server);
                     self.active_tab = ActiveTab::Servidor;
-                    self.table_data = None;
-                    self.table_error = None;
-                    self.pending_edits.clear();
-                    self.pending_deletes.clear();
-                    self.pending_inserts.clear();
-                    self.editing_cell = None;
-                    self.primary_keys.clear();
+                    self.table_view.table_data = None;
+                    self.table_view.table_error = None;
+                    self.table_view.pending_edits.clear();
+                    self.table_view.pending_deletes.clear();
+                    self.table_view.pending_inserts.clear();
+                    self.table_view.editing_cell = None;
+                    self.table_view.primary_keys.clear();
                 }
             }
         }
@@ -370,20 +349,20 @@ impl RustqlApp {
     }
 
     fn apply_pending_changes(&mut self) {
-        let (db, table) = match &self.selected_node {
+        let (db, table) = match &self.schema.selected_node {
             Some(SelectedNode::Table { db, table }) => (db.clone(), table.clone()),
             _ => return,
         };
 
         // 1. Apply deletes (en transacción para garantizar atomicidad)
-        if !self.pending_deletes.is_empty() {
-            if self.primary_keys.is_empty() {
-                self.table_error = Some("No se puede eliminar: tabla sin clave primaria".into());
+        if !self.table_view.pending_deletes.is_empty() {
+            if self.table_view.primary_keys.is_empty() {
+                self.table_view.table_error = Some("No se puede eliminar: tabla sin clave primaria".into());
                 return;
             }
-            let data = match &self.table_data { Some(d) => d.clone(), None => return };
-            let pks = self.primary_keys.clone();
-            let deletes: Vec<usize> = self.pending_deletes.iter().cloned().collect();
+            let data = match &self.table_view.table_data { Some(d) => d.clone(), None => return };
+            let pks = self.table_view.primary_keys.clone();
+            let deletes: Vec<usize> = self.table_view.pending_deletes.iter().cloned().collect();
             let mut stmts: Vec<String> = Vec::new();
             for row_idx in &deletes {
                 let where_parts: Vec<String> = pks.iter().filter_map(|pk| {
@@ -403,27 +382,27 @@ impl RustqlApp {
                 Ok(()) => {
                     let n = stmts.len();
                     self.push_log(LogEntry::ok(format!("DELETE x{n} (transacción)"), 0, n));
-                    self.pending_deletes.clear();
+                    self.table_view.pending_deletes.clear();
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("DELETE (transacción)", 0, &e));
-                    self.table_error = Some(e);
+                    self.table_view.table_error = Some(e);
                 }
             }
         }
 
         // 2. Apply edits (en transacción para garantizar atomicidad)
-        if !self.pending_edits.is_empty() {
-            if self.primary_keys.is_empty() {
-                self.table_error = Some("No se puede editar: la tabla no tiene clave primaria".into());
+        if !self.table_view.pending_edits.is_empty() {
+            if self.table_view.primary_keys.is_empty() {
+                self.table_view.table_error = Some("No se puede editar: la tabla no tiene clave primaria".into());
                 return;
             }
-            let data = match &self.table_data {
+            let data = match &self.table_view.table_data {
                 Some(d) => d.clone(),
                 None => return,
             };
-            let edits = self.pending_edits.clone();
-            let pks = self.primary_keys.clone();
+            let edits = self.table_view.pending_edits.clone();
+            let pks = self.table_view.primary_keys.clone();
             let mut stmts: Vec<String> = Vec::new();
 
             for edit in &edits {
@@ -454,22 +433,22 @@ impl RustqlApp {
                 Ok(()) => {
                     let n = stmts.len();
                     self.push_log(LogEntry::ok(format!("UPDATE x{n} (transacción)"), 0, n));
-                    self.pending_edits.clear();
-                    self.editing_cell = None;
+                    self.table_view.pending_edits.clear();
+                    self.table_view.editing_cell = None;
                     let key = Self::pinned_table_key(&db, &table);
                     self.pinned_pending_edits.remove(&key);
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("UPDATE (transacción)", 0, &e));
-                    self.table_error = Some(e);
+                    self.table_view.table_error = Some(e);
                 }
             }
         }
 
         // 3. Apply inserts (en transacción para garantizar atomicidad)
-        if !self.pending_inserts.is_empty() {
-            let col_names = self.table_data.as_ref().map(|d| d.columns.clone()).unwrap_or_default();
-            let inserts = self.pending_inserts.clone();
+        if !self.table_view.pending_inserts.is_empty() {
+            let col_names = self.table_view.table_data.as_ref().map(|d| d.columns.clone()).unwrap_or_default();
+            let inserts = self.table_view.pending_inserts.clone();
             let mut stmts: Vec<String> = Vec::new();
             for ins in &inserts {
                 let (cols, vals): (Vec<_>, Vec<_>) = col_names.iter().enumerate()
@@ -496,17 +475,17 @@ impl RustqlApp {
                 Ok(()) => {
                     let n = stmts.len();
                     self.push_log(LogEntry::ok(format!("INSERT x{n} (transacción)"), 0, n));
-                    self.pending_inserts.clear();
+                    self.table_view.pending_inserts.clear();
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("INSERT (transacción)", 0, &e));
-                    self.table_error = Some(e);
+                    self.table_view.table_error = Some(e);
                 }
             }
         }
 
         // 4. Reload if all clear
-        if self.pending_deletes.is_empty() && self.pending_inserts.is_empty() && self.pending_edits.is_empty() {
+        if self.table_view.pending_deletes.is_empty() && self.table_view.pending_inserts.is_empty() && self.table_view.pending_edits.is_empty() {
             let sql = self.build_sql(&db, &table);
             self.run_query_async(sql);
         }
@@ -514,11 +493,11 @@ impl RustqlApp {
 
     /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
     fn save_table_state(&mut self) {
-        if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+        if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
             let mut ts = table_state::get(&self.table_states, db, table);
-            ts.sort_specs = self.sort_specs.clone();
-            ts.filter_text = self.filter_text.clone();
-            ts.filter_history = self.filter_history.clone();
+            ts.sort_specs = self.table_view.sort_specs.clone();
+            ts.filter_text = self.table_view.filter_text.clone();
+            ts.filter_history = self.table_view.filter_history.clone();
             table_state::set(&mut self.table_states, db, table, ts);
             table_state::save(&self.table_states);
         }
@@ -535,13 +514,13 @@ impl RustqlApp {
     /// Devuelve true si hay cambios pendientes en la tabla actual que NO está fijada,
     /// lo que requiere confirmación antes de cambiar de tabla.
     fn needs_confirm_before_switch(&self) -> bool {
-        let has_pending = !self.pending_edits.is_empty()
-            || !self.pending_deletes.is_empty()
-            || !self.pending_inserts.is_empty();
+        let has_pending = !self.table_view.pending_edits.is_empty()
+            || !self.table_view.pending_deletes.is_empty()
+            || !self.table_view.pending_inserts.is_empty();
         if !has_pending {
             return false;
         }
-        match &self.selected_node {
+        match &self.schema.selected_node {
             Some(SelectedNode::Table { db, table }) => !self.is_table_pinned(db, table),
             _ => false,
         }
@@ -549,13 +528,13 @@ impl RustqlApp {
 
     /// Si la tabla actual está fijada, guarda sus pending_edits en pinned_pending_edits.
     fn save_pinned_edits_if_needed(&mut self) {
-        if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone()
+        if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
             && self.is_table_pinned(db, table) {
                 let key = Self::pinned_table_key(db, table);
-                if self.pending_edits.is_empty() {
+                if self.table_view.pending_edits.is_empty() {
                     self.pinned_pending_edits.remove(&key);
                 } else {
-                    self.pinned_pending_edits.insert(key, self.pending_edits.clone());
+                    self.pinned_pending_edits.insert(key, self.table_view.pending_edits.clone());
                 }
             }
     }
@@ -565,12 +544,12 @@ impl RustqlApp {
     fn restore_pinned_edits_for(&mut self, db: &str, table: &str) {
         if self.is_table_pinned(db, table) {
             let key = Self::pinned_table_key(db, table);
-            self.pending_edits = self.pinned_pending_edits
+            self.table_view.pending_edits = self.pinned_pending_edits
                 .get(&key)
                 .cloned()
                 .unwrap_or_default();
         } else {
-            self.pending_edits.clear();
+            self.table_view.pending_edits.clear();
         }
     }
 
@@ -578,12 +557,12 @@ impl RustqlApp {
     /// de la nueva tabla, ejecuta la query con el filtro guardado y reaplica
     /// la ordenación guardada.
     fn on_table_selected(&mut self, db: String, table: String) {
-        self.selected_cell = None;
-        self.selected_rows.clear();
-        self.last_selected_row = None;
-        self.drag_select_from = None;
-        self.pending_deletes.clear();
-        self.pending_inserts.clear();
+        self.table_view.selected_cell = None;
+        self.table_view.selected_rows.clear();
+        self.table_view.last_selected_row = None;
+        self.table_view.drag_select_from = None;
+        self.table_view.pending_deletes.clear();
+        self.table_view.pending_inserts.clear();
 
         // 1. Si la tabla actual está fijada, preservar sus cambios pendientes
         self.save_pinned_edits_if_needed();
@@ -593,19 +572,19 @@ impl RustqlApp {
 
         // 3. Cargar estado de la nueva tabla
         let ts = table_state::get(&self.table_states, &db, &table);
-        self.filter_text = ts.filter_text.clone();
-        self.filter_history = ts.filter_history.clone();
+        self.table_view.filter_text = ts.filter_text.clone();
+        self.table_view.filter_history = ts.filter_history.clone();
 
         // 4. Actualizar selección
-        self.selected_node =
+        self.schema.selected_node =
             Some(SelectedNode::Table { db: db.clone(), table: table.clone() });
 
         // 5. Restaurar pending_edits para la nueva tabla (solo si está fijada)
         self.restore_pinned_edits_for(&db, &table);
-        self.editing_cell = None;
+        self.table_view.editing_cell = None;
 
         // 6. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
-        self.sort_specs = ts.sort_specs.clone();
+        self.table_view.sort_specs = ts.sort_specs.clone();
 
         // 7. Ejecutar query (server-side sort + filter restaurados)
         let sql = self.build_sql(&db, &table);
@@ -617,79 +596,62 @@ impl RustqlApp {
     }
 
     fn save_tabs_state(&mut self) {
-        self.settings.pinned_tables = self.pinned_tables.clone();
-        self.settings.sql_tabs = self.sql_tabs.iter().map(|t| SavedSqlTab {
+        self.ui.settings.pinned_tables = self.pinned_tables.clone();
+        self.ui.settings.sql_tabs = self.sql_tabs.iter().map(|t| SavedSqlTab {
             db_context: t.db_context.clone(),
             sql_text: t.sql_text.clone(),
         }).collect();
-        settings::save(&self.settings);
+        settings::save(&self.ui.settings);
     }
 
     fn on_connected(&mut self, backend: Box<dyn DbBackend>) {
         self.state = AppState::Connected(backend);
         self.error_message = None;
-        self.databases.clear();
-        self.tables_cache.clear();
-        self.table_search.clear();
-        self.selected_node = None;
+        self.schema.databases.clear();
+        self.schema.tables_cache.clear();
+        self.schema.table_search.clear();
+        self.schema.selected_node = None;
         self.active_tab = ActiveTab::default();
-        self.table_data = None;
-        self.pending_deletes.clear();
-        self.pending_inserts.clear();
-        self.selected_rows.clear();
-        self.last_selected_row = None;
-        self.drag_select_from = None;
-        self.query_loading = false;
-        self.query_receiver = None;
-        self.table_error = None;
-        self.sort_specs.clear();
-        self.sort_indices.clear();
-        self.filter_text.clear();
-        self.pending_edits.clear();
-        self.editing_cell = None;
-        self.primary_keys.clear();
-        self.modal = ModalState::None;
-        self.databases_info = None;
-        self.tables_info.clear();
-        self.columns_info.clear();
+        self.table_view.table_data = None;
+        self.table_view.pending_deletes.clear();
+        self.table_view.pending_inserts.clear();
+        self.table_view.selected_rows.clear();
+        self.table_view.last_selected_row = None;
+        self.table_view.drag_select_from = None;
+        self.table_view.query_loading = false;
+        self.table_view.query_receiver = None;
+        self.table_view.table_error = None;
+        self.table_view.sort_specs.clear();
+        self.table_view.sort_indices.clear();
+        self.table_view.filter_text.clear();
+        self.table_view.pending_edits.clear();
+        self.table_view.editing_cell = None;
+        self.table_view.primary_keys.clear();
+        self.ui.modal = ModalState::None;
+        self.schema.databases_info = None;
+        self.schema.tables_info.clear();
+        self.schema.columns_info.clear();
         // Restaurar pestañas guardadas desde settings
-        self.pinned_tables = self.settings.pinned_tables.clone();
-        self.sql_tabs = if self.settings.sql_tabs.is_empty() {
+        self.pinned_tables = self.ui.settings.pinned_tables.clone();
+        self.sql_tabs = if self.ui.settings.sql_tabs.is_empty() {
             vec![SqlTab::default()]
         } else {
-            self.settings.sql_tabs.iter().map(|t| SqlTab {
+            self.ui.settings.sql_tabs.iter().map(|t| SqlTab {
                 db_context: t.db_context.clone(),
                 sql_text: t.sql_text.clone(),
                 result: None,
             }).collect()
         };
-        self.query_log.clear();
+        self.ui.query_log.clear();
         self.pinned_pending_edits.clear();
     }
 }
 
 // ── Loop principal ────────────────────────────────────────────────────────────
 
-impl eframe::App for RustqlApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Aplicar ajustes si cambiaron
-        if self.settings_dirty {
-            settings::apply(ctx, &self.settings);
-            settings::save(&self.settings);
-            self.settings_dirty = false;
-        }
-
-        let f9 = ctx.input(|i| i.key_pressed(egui::Key::F9));
-        let f5 = ctx.input(|i| i.key_pressed(egui::Key::F5));
-        let ctrl_enter =
-            ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
-
-        // ── Proactive data loading for current tab ────────────────────────
-        if matches!(&self.state, AppState::Connected(_)) {
-            self.maybe_load_tab_data();
-        }
-
-        // ── Polling del hilo de conexión ─────────────────────────────────
+impl RustqlApp {
+    /// Sondea el canal del hilo de conexión y actualiza el estado si terminó.
+    fn poll_connection(&mut self, ctx: &egui::Context) {
         let mut connect_result: Option<Result<Box<dyn DbBackend>, String>> = None;
         if let AppState::Connecting { receiver, status, .. } = &mut self.state {
             loop {
@@ -723,44 +685,305 @@ impl eframe::App for RustqlApp {
                 }
             }
         }
+    }
 
-        // ── Polling del receptor de query async ──────────────────────────
+    /// Sondea el canal de query asíncrona y actualiza la vista si terminó.
+    fn poll_query_receiver(&mut self, ctx: &egui::Context) {
         let mut query_done: Option<crate::db::QueryEvent> = None;
-        if let Some(rx) = &self.query_receiver {
+        if let Some(rx) = &self.table_view.query_receiver {
             match rx.try_recv() {
                 Ok(evt) => query_done = Some(evt),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.query_receiver = None;
-                    self.query_loading = false;
+                    self.table_view.query_receiver = None;
+                    self.table_view.query_loading = false;
                 }
             }
         }
         if let Some(crate::db::QueryEvent::Done { result, backend }) = query_done {
-            self.query_receiver = None;
-            self.query_loading = false;
+            self.table_view.query_receiver = None;
+            self.table_view.query_loading = false;
             self.state = AppState::Connected(backend);
             match result {
                 Ok(data) => {
                     let rows = data.rows.len();
                     self.push_log(LogEntry::ok("(query async)", 0, rows));
-                    self.sort_indices = (0..rows).collect();
-                    self.table_data = Some(data);
-                    self.table_error = None;
+                    self.table_view.sort_indices = (0..rows).collect();
+                    self.table_view.table_data = Some(data);
+                    self.table_view.table_error = None;
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("(query async)", 0, &e));
-                    self.table_data = None;
-                    self.table_error = Some(e);
-                    self.sort_indices.clear();
+                    self.table_view.table_data = None;
+                    self.table_view.table_error = Some(e);
+                    self.table_view.sort_indices.clear();
                 }
             }
         }
+    }
+
+    /// Procesa la acción resultante del modal activo.
+    fn handle_modal_action(&mut self, modal_action: ModalAction) {
+        match modal_action {
+            ModalAction::None => {}
+            ModalAction::Cancel => {
+                self.ui.modal = ModalState::None;
+            }
+            ModalAction::ApplyAndSwitch { new_db, new_table } => {
+                self.ui.modal = ModalState::None;
+                self.apply_pending_edits();
+                if self.table_view.pending_edits.is_empty() {
+                    self.on_table_selected(new_db, new_table);
+                    self.active_tab = ActiveTab::Datos;
+                }
+            }
+            ModalAction::DiscardAndSwitch { new_db, new_table } => {
+                self.ui.modal = ModalState::None;
+                self.table_view.pending_edits.clear();
+                self.table_view.editing_cell = None;
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
+                    let key = Self::pinned_table_key(db, table);
+                    self.pinned_pending_edits.remove(&key);
+                }
+                self.on_table_selected(new_db, new_table);
+                self.active_tab = ActiveTab::Datos;
+            }
+            ModalAction::CreateDatabase { name, charset } => {
+                let result = match &mut self.state {
+                    AppState::Connected(b) => b.create_database(&name, &charset),
+                    _ => Err("No conectado".into()),
+                };
+                if let Ok(()) = &result {
+                    self.push_log(LogEntry::ok(format!("CREATE DATABASE `{name}`"), 0, 0));
+                } else if let Err(ref e) = result {
+                    self.push_log(LogEntry::err(format!("CREATE DATABASE `{name}`"), 0, e));
+                }
+                match result {
+                    Ok(()) => {
+                        self.ui.modal = ModalState::None;
+                        self.schema.databases.clear();
+                        self.schema.databases_info = None;
+                    }
+                    Err(e) => {
+                        if let ModalState::CreateDatabase { error, .. } = &mut self.ui.modal {
+                            *error = Some(e);
+                        }
+                    }
+                }
+            }
+            ModalAction::CreateTable { db, name, columns } => {
+                let sql = modals::build_create_table_sql(&db, &name, &columns);
+                let result = self.run_write(&sql);
+                match result {
+                    Ok(_) => {
+                        self.ui.modal = ModalState::None;
+                        self.invalidate_after_write(Some(&db), None);
+                    }
+                    Err(e) => {
+                        if let ModalState::CreateTable { error, .. } = &mut self.ui.modal {
+                            *error = Some(e);
+                        }
+                    }
+                }
+            }
+            ModalAction::DropDatabase(db) => {
+                let result = match &mut self.state {
+                    AppState::Connected(b) => b.drop_database(&db),
+                    _ => Err("No conectado".into()),
+                };
+                if let Ok(()) = &result {
+                    self.push_log(LogEntry::ok(format!("DROP DATABASE `{db}`"), 0, 0));
+                } else if let Err(ref e) = result {
+                    self.push_log(LogEntry::err(format!("DROP DATABASE `{db}`"), 0, e));
+                }
+                self.ui.modal = ModalState::None;
+                if result.is_ok() {
+                    self.invalidate_after_write(Some(&db), None);
+                }
+            }
+            ModalAction::DropTable { db, table } => {
+                let result = match &mut self.state {
+                    AppState::Connected(b) => b.drop_table(&db, &table),
+                    _ => Err("No conectado".into()),
+                };
+                if let Ok(()) = &result {
+                    self.push_log(LogEntry::ok(format!("DROP TABLE `{db}`.`{table}`"), 0, 0));
+                } else if let Err(ref e) = result {
+                    self.push_log(LogEntry::err(format!("DROP TABLE `{db}`.`{table}`"), 0, e));
+                }
+                self.ui.modal = ModalState::None;
+                if result.is_ok() {
+                    self.invalidate_after_write(Some(&db), Some(&table));
+                }
+            }
+            ModalAction::TruncateTable { db, table } => {
+                let result = match &mut self.state {
+                    AppState::Connected(b) => b.truncate_table(&db, &table),
+                    _ => Err("No conectado".into()),
+                };
+                if let Ok(()) = &result {
+                    self.push_log(LogEntry::ok(format!("TRUNCATE TABLE `{db}`.`{table}`"), 0, 0));
+                } else if let Err(ref e) = result {
+                    self.push_log(LogEntry::err(format!("TRUNCATE TABLE `{db}`.`{table}`"), 0, e));
+                }
+                let result = result.map(|_| 0u64);
+                self.ui.modal = ModalState::None;
+                if result.is_ok() {
+                    if matches!(
+                        &self.schema.selected_node,
+                        Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
+                    ) {
+                        let sql = self.build_sql(&db, &table);
+                        self.run_query_async(sql);
+                    }
+                    self.invalidate_after_write(Some(&db), Some(&table));
+                }
+            }
+            ModalAction::TruncateAllTables(db) => {
+                self.ui.modal = ModalState::None;
+                let tables = self.schema.tables_cache.get(&db).cloned().unwrap_or_default();
+                for table in &tables {
+                    let _ = self.run_write(&format!(
+                        "TRUNCATE TABLE `{}`.`{}`",
+                        db.replace('`', "``"),
+                        table.replace('`', "``")
+                    ));
+                }
+                self.invalidate_after_write(Some(&db), None);
+            }
+            ModalAction::ApplyFilter { sql_fragment } => {
+                self.ui.modal = ModalState::None;
+                self.table_view.filter_text = sql_fragment;
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
+                    let sql = self.build_sql(db, table);
+                    self.run_query_async(sql);
+                }
+            }
+            ModalAction::DeleteRow { db, table, row_idx } => {
+                self.ui.modal = ModalState::None;
+                let Some(data) = self.table_view.table_data.clone() else { return; };
+                let pks = self.table_view.primary_keys.clone();
+                let where_parts: Vec<String> = pks
+                    .iter()
+                    .filter_map(|pk| {
+                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
+                        let pk_val = data.rows.get(row_idx)?.get(pk_idx)?;
+                        Some(format!(
+                            "`{}` = '{}'",
+                            pk.replace('`', "``"),
+                            escape_sql(pk_val.as_deref().unwrap_or(""))
+                        ))
+                    })
+                    .collect();
+                if !where_parts.is_empty() {
+                    let sql = format!(
+                        "DELETE FROM `{}`.`{}` WHERE {}",
+                        db.replace('`', "``"),
+                        table.replace('`', "``"),
+                        where_parts.join(" AND ")
+                    );
+                    if self.run_write(&sql).is_ok() {
+                        self.table_view.pending_edits.retain(|e| e.row_idx != row_idx);
+                        let sql = self.build_sql(&db, &table);
+                        self.run_query_async(sql);
+                    }
+                }
+            }
+            ModalAction::CloneTable { db, src_table, new_name, copy_data } => {
+                let create_sql = format!(
+                    "CREATE TABLE `{}`.`{}` LIKE `{}`.`{}`",
+                    db.replace('`', "``"), new_name.replace('`', "``"),
+                    db.replace('`', "``"), src_table.replace('`', "``")
+                );
+                match self.run_write(&create_sql) {
+                    Ok(_) => {
+                        if copy_data {
+                            let insert_sql = format!(
+                                "INSERT INTO `{}`.`{}` SELECT * FROM `{}`.`{}`",
+                                db.replace('`', "``"), new_name.replace('`', "``"),
+                                db.replace('`', "``"), src_table.replace('`', "``")
+                            );
+                            if let Err(e) = self.run_write(&insert_sql) {
+                                if let ModalState::CloneTable { error, .. } = &mut self.ui.modal {
+                                    *error = Some(e);
+                                }
+                                return;
+                            }
+                        }
+                        self.ui.modal = ModalState::None;
+                        self.invalidate_after_write(Some(&db), None);
+                    }
+                    Err(e) => {
+                        if let ModalState::CloneTable { error, .. } = &mut self.ui.modal {
+                            *error = Some(e);
+                        }
+                    }
+                }
+            }
+            ModalAction::InsertRow { db, table, col_names, values, nulls } => {
+                if self.table_view.table_data.is_none() { return; }
+                let col_list: Vec<String> = col_names
+                    .iter()
+                    .map(|c| format!("`{}`", c.replace('`', "``")))
+                    .collect();
+                let val_list: Vec<String> = values
+                    .iter()
+                    .zip(nulls.iter())
+                    .map(|(val, is_null)| {
+                        if *is_null { "NULL".to_string() } else { format!("'{}'", escape_sql(val)) }
+                    })
+                    .collect();
+                let sql = format!(
+                    "INSERT INTO `{}`.`{}` ({}) VALUES ({})",
+                    db.replace('`', "``"),
+                    table.replace('`', "``"),
+                    col_list.join(", "),
+                    val_list.join(", ")
+                );
+                match self.run_write(&sql) {
+                    Ok(_) => {
+                        self.ui.modal = ModalState::None;
+                        let sql = self.build_sql(&db, &table);
+                        self.run_query_async(sql);
+                    }
+                    Err(e) => {
+                        if let ModalState::InsertRow { error, .. } = &mut self.ui.modal {
+                            *error = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl eframe::App for RustqlApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Aplicar ajustes si cambiaron
+        if self.ui.settings_dirty {
+            settings::apply(ctx, &self.ui.settings);
+            settings::save(&self.ui.settings);
+            self.ui.settings_dirty = false;
+        }
+
+        let f9 = ctx.input(|i| i.key_pressed(egui::Key::F9));
+        let f5 = ctx.input(|i| i.key_pressed(egui::Key::F5));
+        let ctrl_enter =
+            ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+
+        // ── Proactive data loading for current tab ────────────────────────
+        if matches!(&self.state, AppState::Connected(_)) {
+            self.maybe_load_tab_data();
+        }
+
+        // ── Polling de hilos de fondo ─────────────────────────────────────
+        self.poll_connection(ctx);
+        self.poll_query_receiver(ctx);
 
         // Snapshot de visibilidad de paneles para detectar cambios
-        let (prev_sidebar, prev_log) = (self.show_sidebar, self.show_log);
+        let (prev_sidebar, prev_log) = (self.ui.show_sidebar, self.ui.show_log);
 
         // ── Señales del frame ────────────────────────────────────────────
         let mut connect_clicked = false;
@@ -791,7 +1014,7 @@ impl eframe::App for RustqlApp {
                 }
                 AppState::Disconnected => None,
             };
-            let sb_db = match &self.selected_node {
+            let sb_db = match &self.schema.selected_node {
                 Some(SelectedNode::Database(d)) => Some(d.clone()),
                 Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
                 _ => None,
@@ -801,9 +1024,9 @@ impl eframe::App for RustqlApp {
                 .show(ctx, |ui| {
                     statusbar::show(
                         ui,
-                        &mut self.show_sidebar,
-                        &mut self.show_log,
-                        &mut self.show_settings,
+                        &mut self.ui.show_sidebar,
+                        &mut self.ui.show_log,
+                        &mut self.ui.show_settings,
                         sb_host.as_deref(),
                         sb_db.as_deref(),
                     );
@@ -811,22 +1034,22 @@ impl eframe::App for RustqlApp {
         }
         if matches!(self.state, AppState::Connected(_))
 
-            && self.show_log {
+            && self.ui.show_log {
                 egui::TopBottomPanel::bottom("log_panel")
                     .resizable(true)
                     .min_height(80.0)
                     .max_height(300.0)
                     .show(ctx, |ui| {
-                        log_panel::show(ui, &self.query_log);
+                        log_panel::show(ui, &self.ui.query_log);
                     });
             }
 
         // ── Panel de ajustes (derecha) ───────────────────────────────────
-        if self.show_settings {
+        if self.ui.show_settings {
             egui::SidePanel::right("settings_panel")
                 .exact_width(240.0)
                 .show(ctx, |ui| {
-                    settings_changed = settings_panel::show(ui, &mut self.settings);
+                    settings_changed = settings_panel::show(ui, &mut self.ui.settings);
                 });
         }
 
@@ -895,10 +1118,10 @@ impl eframe::App for RustqlApp {
                 });
             }
 
-            AppState::Connected(backend) => {
+            AppState::Connected(_) => {
                 // ── Sidebar ───────────────────────────────────────────────
-                if self.show_sidebar {
-                    let (sel_db, sel_table) = match &self.selected_node {
+                if self.ui.show_sidebar {
+                    let (sel_db, sel_table) = match &self.schema.selected_node {
                         Some(SelectedNode::Table { db, table }) => {
                             (Some(db.as_str()), Some(table.as_str()))
                         }
@@ -918,14 +1141,13 @@ impl eframe::App for RustqlApp {
                         .show(ctx, |ui| {
                             sidebar_action = sidebar::show(
                                 ui,
-                                backend,
-                                &mut self.databases,
-                                &mut self.tables_cache,
+                                &mut self.schema.databases,
+                                &mut self.schema.tables_cache,
                                 sel_db,
                                 sel_table,
-                                &mut self.table_search,
-                                &self.settings.fav_tables,
-                                &mut self.show_only_fav,
+                                &mut self.schema.table_search,
+                                &self.ui.settings.fav_tables,
+                                &mut self.ui.show_only_fav,
                                 &self.params.host,
                                 &server_name,
                             );
@@ -934,11 +1156,11 @@ impl eframe::App for RustqlApp {
 
                 // ── Tab bar ───────────────────────────────────────────────
                 let has_db = matches!(
-                    &self.selected_node,
+                    &self.schema.selected_node,
                     Some(SelectedNode::Database(_) | SelectedNode::Table { .. })
                 );
                 let has_table =
-                    matches!(&self.selected_node, Some(SelectedNode::Table { .. }));
+                    matches!(&self.schema.selected_node, Some(SelectedNode::Table { .. }));
 
                 {
                     let server_name_tab = self.selected_profile_idx
@@ -946,12 +1168,12 @@ impl eframe::App for RustqlApp {
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| self.params.host.clone());
 
-                    let db_name_tab = match &self.selected_node {
+                    let db_name_tab = match &self.schema.selected_node {
                         Some(SelectedNode::Database(d)) => Some(d.clone()),
                         Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
                         _ => None,
                     };
-                    let table_name_tab = match &self.selected_node {
+                    let table_name_tab = match &self.schema.selected_node {
                         Some(SelectedNode::Table { table, .. }) => Some(table.clone()),
                         _ => None,
                     };
@@ -964,11 +1186,11 @@ impl eframe::App for RustqlApp {
                         let key = Self::pinned_table_key(db, table);
                         // Si es la tabla actualmente abierta, usar los pending_edits en vivo
                         let is_current = matches!(
-                            &self.selected_node,
+                            &self.schema.selected_node,
                             Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
                         );
                         if is_current {
-                            self.pending_edits.len()
+                            self.table_view.pending_edits.len()
                         } else {
                             self.pinned_pending_edits.get(&key).map_or(0, |v| v.len())
                         }
@@ -995,22 +1217,22 @@ impl eframe::App for RustqlApp {
                 }
 
                 // ── Apply bar (solo en tab Datos con cambios pendientes) ──
-                let has_pending = !self.pending_edits.is_empty()
-                    || !self.pending_deletes.is_empty()
-                    || !self.pending_inserts.is_empty();
+                let has_pending = !self.table_view.pending_edits.is_empty()
+                    || !self.table_view.pending_deletes.is_empty()
+                    || !self.table_view.pending_inserts.is_empty();
                 if self.active_tab == ActiveTab::Datos && has_pending {
                     // pk_missing solo bloquea si hay edits pendientes (DELETE e INSERT no requieren PK en la UI)
-                    let pk_missing = self.table_data.is_some()
-                        && self.primary_keys.is_empty()
-                        && !self.pending_edits.is_empty();
+                    let pk_missing = self.table_view.table_data.is_some()
+                        && self.table_view.primary_keys.is_empty()
+                        && !self.table_view.pending_edits.is_empty();
                     egui::TopBottomPanel::bottom("apply_bar")
                         .exact_height(36.0)
                         .show(ctx, |ui| {
                             apply_bar_action = results_grid::show_apply_bar(
                                 ui,
-                                &self.pending_edits,
-                                self.pending_deletes.len(),
-                                self.pending_inserts.len(),
+                                &self.table_view.pending_edits,
+                                self.table_view.pending_deletes.len(),
+                                self.table_view.pending_inserts.len(),
                                 ctrl_enter,
                                 pk_missing,
                             );
@@ -1021,12 +1243,12 @@ impl eframe::App for RustqlApp {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     match self.active_tab {
                         ActiveTab::Servidor => {
-                            let dbs = self.databases_info.as_deref().unwrap_or(&[]);
+                            let dbs = self.schema.databases_info.as_deref().unwrap_or(&[]);
                             server_info::show(ui, &self.params.host, dbs);
                         }
 
                         ActiveTab::Bbdd => {
-                            let db_name = match &self.selected_node {
+                            let db_name = match &self.schema.selected_node {
                                 Some(SelectedNode::Database(d)) => Some(d.clone()),
                                 Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
                                 _ => None,
@@ -1034,7 +1256,7 @@ impl eframe::App for RustqlApp {
                             if let Some(db) = &db_name {
                                 let empty = Vec::new();
                                 let tables =
-                                    self.tables_info.get(db).unwrap_or(&empty);
+                                    self.schema.tables_info.get(db).unwrap_or(&empty);
                                 db_info_action = db_info::show(ui, db, tables);
                             } else {
                                 ui.centered_and_justified(|ui| {
@@ -1047,11 +1269,11 @@ impl eframe::App for RustqlApp {
 
                         ActiveTab::Tabla => {
                             if let Some(SelectedNode::Table { db, table }) =
-                                &self.selected_node.clone()
+                                &self.schema.selected_node.clone()
                             {
                                 let key = (db.clone(), table.clone());
                                 let empty = Vec::new();
-                                let cols = self.columns_info.get(&key).unwrap_or(&empty);
+                                let cols = self.schema.columns_info.get(&key).unwrap_or(&empty);
                                 table_structure::show(ui, db, table, cols);
                             } else {
                                 ui.centered_and_justified(|ui| {
@@ -1061,7 +1283,7 @@ impl eframe::App for RustqlApp {
                         }
 
                         ActiveTab::Datos => {
-                            let selected_table = match &self.selected_node {
+                            let selected_table = match &self.schema.selected_node {
                                 Some(SelectedNode::Table { db, table }) => {
                                     Some((db.clone(), table.clone()))
                                 }
@@ -1071,39 +1293,39 @@ impl eframe::App for RustqlApp {
                                 let apply_f9 = f9 && self.active_tab == ActiveTab::Datos;
                                 filter_action = filter_bar::show(
                                     ui,
-                                    &mut self.filter_text,
+                                    &mut self.table_view.filter_text,
                                     apply_f9,
-                                    &self.filter_history.clone(),
+                                    &self.table_view.filter_history.clone(),
                                 );
                                 ui.separator();
                             }
-                            let col_info_key = match &self.selected_node {
+                            let col_info_key = match &self.schema.selected_node {
                                 Some(SelectedNode::Table { db, table }) => Some((db.clone(), table.clone())),
                                 _ => None,
                             };
                             let empty_cols: Vec<ColumnInfo> = Vec::new();
                             let col_info_slice = col_info_key.as_ref()
-                                .and_then(|k| self.columns_info.get(k))
+                                .and_then(|k| self.schema.columns_info.get(k))
                                 .map(|v| v.as_slice())
                                 .unwrap_or(empty_cols.as_slice());
                             grid_action = results_grid::show(
                                 ui,
                                 &selected_table,
-                                &self.table_data,
-                                &self.table_error,
-                                &mut self.sort_specs,
-                                &self.sort_indices,
-                                &self.pending_edits,
-                                &self.pending_deletes,
-                                &self.pending_inserts,
-                                &mut self.editing_cell,
-                                &mut self.selected_cell,
-                                &mut self.selected_rows,
-                                &mut self.last_selected_row,
-                                &mut self.drag_select_from,
-                                &self.primary_keys,
+                                &self.table_view.table_data,
+                                &self.table_view.table_error,
+                                &mut self.table_view.sort_specs,
+                                &self.table_view.sort_indices,
+                                &self.table_view.pending_edits,
+                                &self.table_view.pending_deletes,
+                                &self.table_view.pending_inserts,
+                                &mut self.table_view.editing_cell,
+                                &mut self.table_view.selected_cell,
+                                &mut self.table_view.selected_rows,
+                                &mut self.table_view.last_selected_row,
+                                &mut self.table_view.drag_select_from,
+                                &self.table_view.primary_keys,
                                 col_info_slice,
-                                self.query_loading,
+                                self.table_view.query_loading,
                             );
                         }
 
@@ -1111,7 +1333,7 @@ impl eframe::App for RustqlApp {
                             if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
                                 let apply_f9 = f9 && matches!(self.active_tab, ActiveTab::Sql(_));
                                 let result_clone = tab.result.clone();
-                                let databases_clone = self.databases.clone();
+                                let databases_clone = self.schema.databases.clone();
                                 sql_action = sql_editor::show(
                                     ui,
                                     &mut tab.sql_text,
@@ -1143,7 +1365,7 @@ impl eframe::App for RustqlApp {
         }
 
         // ── Modal (sobre todo) ────────────────────────────────────────────
-        let modal_action = modals_ui::show(ctx, &mut self.modal);
+        let modal_action = modals_ui::show(ctx, &mut self.ui.modal);
 
         // ── Aplicar señales ───────────────────────────────────────────────
 
@@ -1152,14 +1374,14 @@ impl eframe::App for RustqlApp {
         }
 
         if settings_changed {
-            self.settings_dirty = true;
+            self.ui.settings_dirty = true;
         }
 
         // Persistir visibilidad de paneles cuando cambia
-        if self.show_sidebar != prev_sidebar || self.show_log != prev_log {
-            self.settings.show_sidebar = self.show_sidebar;
-            self.settings.show_log = self.show_log;
-            settings::save(&self.settings);
+        if self.ui.show_sidebar != prev_sidebar || self.ui.show_log != prev_log {
+            self.ui.settings.show_sidebar = self.ui.show_sidebar;
+            self.ui.settings.show_log = self.ui.show_log;
+            settings::save(&self.ui.settings);
         }
 
         // Handle tab bar result
@@ -1168,17 +1390,17 @@ impl eframe::App for RustqlApp {
                 ActiveTab::Pinned(idx) => {
                     if let Some((pin_db, pin_table)) = self.pinned_tables.get(idx).cloned() {
                         let already_selected = matches!(
-                            &self.selected_node,
+                            &self.schema.selected_node,
                             Some(SelectedNode::Table { db, table }) if *db == pin_db && *table == pin_table
                         );
                         if !already_selected {
                             if self.needs_confirm_before_switch() {
-                                let current_table = match &self.selected_node {
+                                let current_table = match &self.schema.selected_node {
                                     Some(SelectedNode::Table { table: t, .. }) => t.clone(),
                                     _ => String::new(),
                                 };
-                                let count = self.pending_edits.len();
-                                self.modal = modals::ModalState::ConfirmSwitchTable {
+                                let count = self.table_view.pending_edits.len();
+                                self.ui.modal = modals::ModalState::ConfirmSwitchTable {
                                     new_db: pin_db,
                                     new_table: pin_table,
                                     pending_count: count,
@@ -1198,7 +1420,7 @@ impl eframe::App for RustqlApp {
         }
 
         if tab_bar_result.new_sql_tab || ctrl_t {
-            let db_ctx = match &self.selected_node {
+            let db_ctx = match &self.schema.selected_node {
                 Some(SelectedNode::Database(d)) => d.clone(),
                 Some(SelectedNode::Table { db, .. }) => db.clone(),
                 _ => String::new(),
@@ -1247,166 +1469,169 @@ impl eframe::App for RustqlApp {
         match grid_action {
             GridAction::SortChanged => {
                 // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
-                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
                     let sql = self.build_sql(db, table);
                     self.run_query_async(sql);
                 }
                 self.save_table_state();
             }
-            GridAction::CellEditStarted { row_idx, col_idx, current_value } => {
-                let is_insert = row_idx >= results_grid::INSERT_ROW_BASE;
-                self.editing_cell = Some(EditingCell {
-                    row_idx,
+            GridAction::CellEditStarted { row, col_idx, current_value } => {
+                self.table_view.editing_cell = Some(EditingCell {
+                    row,
                     col_idx,
                     buffer: current_value,
                     needs_focus: true,
-                    is_insert,
                 });
             }
-            GridAction::CellSetNull { row_idx, col_idx } => {
-                self.editing_cell = None;
-                if row_idx >= results_grid::INSERT_ROW_BASE {
-                    let insert_idx = row_idx - results_grid::INSERT_ROW_BASE;
-                    if let Some(ins) = self.pending_inserts.get_mut(insert_idx)
-                        && col_idx < ins.values.len() {
-                            ins.values[col_idx] = None;
-                        }
-                } else {
-                    let original = self
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx))
-                        .and_then(|r| r.get(col_idx))
-                        .cloned()
-                        .unwrap_or_default();
-                    self.pending_edits
-                        .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                    self.pending_edits.push(PendingEdit {
-                        row_idx,
-                        col_idx,
-                        original,
-                        new_value: String::new(),
-                        is_null: true,
-                    });
-                }
-            }
-            GridAction::CellEditCommitted { row_idx, col_idx, new_value } => {
-                self.editing_cell = None;
-                if row_idx >= results_grid::INSERT_ROW_BASE {
-                    let insert_idx = row_idx - results_grid::INSERT_ROW_BASE;
-                    if let Some(ins) = self.pending_inserts.get_mut(insert_idx)
-                        && col_idx < ins.values.len() {
-                            ins.values[col_idx] = Some(new_value);
-                        }
-                } else {
-                    let original = self
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx))
-                        .and_then(|r| r.get(col_idx))
-                        .cloned()
-                        .unwrap_or_default();
-
-                    if original.as_deref() == Some(new_value.as_str()) {
-                        self.pending_edits
+            GridAction::CellSetNull { row, col_idx } => {
+                self.table_view.editing_cell = None;
+                match row {
+                    RowRef::Insert(insert_idx) => {
+                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
+                            && col_idx < ins.values.len() {
+                                ins.values[col_idx] = None;
+                            }
+                    }
+                    RowRef::Existing(row_idx) => {
+                        let original = self
+                            .table_view.table_data
+                            .as_ref()
+                            .and_then(|d| d.rows.get(row_idx))
+                            .and_then(|r| r.get(col_idx))
+                            .cloned()
+                            .unwrap_or_default();
+                        self.table_view.pending_edits
                             .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                    } else if let Some(existing) = self
-                        .pending_edits
-                        .iter_mut()
-                        .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                    {
-                        if existing.original.as_deref() == Some(new_value.as_str()) && !existing.is_null {
-                            let idx = self
-                                .pending_edits
-                                .iter()
-                                .position(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                                .unwrap();
-                            self.pending_edits.remove(idx);
-                        } else {
-                            existing.new_value = new_value;
-                            existing.is_null = false;
-                        }
-                    } else {
-                        self.pending_edits.push(PendingEdit {
+                        self.table_view.pending_edits.push(PendingEdit {
                             row_idx,
                             col_idx,
                             original,
-                            new_value,
-                            is_null: false,
+                            new_value: String::new(),
+                            is_null: true,
                         });
+                    }
+                }
+            }
+            GridAction::CellEditCommitted { row, col_idx, new_value } => {
+                self.table_view.editing_cell = None;
+                match row {
+                    RowRef::Insert(insert_idx) => {
+                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
+                            && col_idx < ins.values.len() {
+                                ins.values[col_idx] = Some(new_value);
+                            }
+                    }
+                    RowRef::Existing(row_idx) => {
+                        let original = self
+                            .table_view.table_data
+                            .as_ref()
+                            .and_then(|d| d.rows.get(row_idx))
+                            .and_then(|r| r.get(col_idx))
+                            .cloned()
+                            .unwrap_or_default();
+
+                        if original.as_deref() == Some(new_value.as_str()) {
+                            self.table_view.pending_edits
+                                .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
+                        } else if let Some(existing) = self
+                            .table_view.pending_edits
+                            .iter_mut()
+                            .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
+                        {
+                            if existing.original.as_deref() == Some(new_value.as_str()) && !existing.is_null {
+                                let idx = self
+                                    .table_view.pending_edits
+                                    .iter()
+                                    .position(|e| e.row_idx == row_idx && e.col_idx == col_idx)
+                                    .unwrap();
+                                self.table_view.pending_edits.remove(idx);
+                            } else {
+                                existing.new_value = new_value;
+                                existing.is_null = false;
+                            }
+                        } else {
+                            self.table_view.pending_edits.push(PendingEdit {
+                                row_idx,
+                                col_idx,
+                                original,
+                                new_value,
+                                is_null: false,
+                            });
+                        }
                     }
                 }
             }
             GridAction::CellEditCancelled => {
-                self.editing_cell = None;
+                self.table_view.editing_cell = None;
             }
-            GridAction::CellEditTabNext { row_idx, col_idx, new_value } => {
-                // Commit current value
-                let is_insert = row_idx >= results_grid::INSERT_ROW_BASE;
-                if is_insert {
-                    let insert_idx = row_idx - results_grid::INSERT_ROW_BASE;
-                    if let Some(ins) = self.pending_inserts.get_mut(insert_idx)
-                        && col_idx < ins.values.len() {
-                            ins.values[col_idx] = Some(new_value);
+            GridAction::CellEditTabNext { row, col_idx, new_value } => {
+                // Commit current value, then move focus to next column
+                match row {
+                    RowRef::Insert(insert_idx) => {
+                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
+                            && col_idx < ins.values.len() {
+                                ins.values[col_idx] = Some(new_value);
+                            }
+                    }
+                    RowRef::Existing(row_idx) => {
+                        let original = self
+                            .table_view.table_data
+                            .as_ref()
+                            .and_then(|d| d.rows.get(row_idx))
+                            .and_then(|r| r.get(col_idx))
+                            .cloned()
+                            .unwrap_or_default();
+                        if original.as_deref() != Some(new_value.as_str()) {
+                            self.table_view.pending_edits.retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
+                            self.table_view.pending_edits.push(PendingEdit {
+                                row_idx, col_idx, original, new_value, is_null: false,
+                            });
                         }
-                } else {
-                    let original = self
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx))
-                        .and_then(|r| r.get(col_idx))
-                        .cloned()
-                        .unwrap_or_default();
-                    if original.as_deref() != Some(new_value.as_str()) {
-                        self.pending_edits.retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                        self.pending_edits.push(PendingEdit {
-                            row_idx, col_idx, original, new_value, is_null: false,
-                        });
                     }
                 }
                 // Move to next column
-                let col_count = self.table_data.as_ref().map(|d| d.columns.len()).unwrap_or(1);
+                let col_count = self.table_view.table_data.as_ref().map(|d| d.columns.len()).unwrap_or(1);
                 let next_col = (col_idx + 1) % col_count;
-                let next_val = if is_insert {
-                    let insert_idx = row_idx - results_grid::INSERT_ROW_BASE;
-                    self.pending_inserts.get(insert_idx)
+                let next_val = match row {
+                    RowRef::Insert(insert_idx) => self
+                        .table_view.pending_inserts
+                        .get(insert_idx)
                         .and_then(|ins| ins.values.get(next_col))
                         .and_then(|v| v.as_deref())
                         .unwrap_or("")
-                        .to_string()
-                } else {
-                    self.table_data
+                        .to_string(),
+                    RowRef::Existing(row_idx) => self
+                        .table_view.table_data
                         .as_ref()
                         .and_then(|d| d.rows.get(row_idx))
                         .and_then(|r| r.get(next_col))
                         .and_then(|v| v.as_deref())
                         .unwrap_or("")
-                        .to_string()
+                        .to_string(),
                 };
-                self.editing_cell = Some(EditingCell {
-                    row_idx,
+                self.table_view.editing_cell = Some(EditingCell {
+                    row,
                     col_idx: next_col,
                     buffer: next_val,
                     needs_focus: true,
-                    is_insert,
                 });
             }
             GridAction::ApplyEdits => {
                 self.apply_pending_changes();
             }
             GridAction::DiscardEdits => {
-                self.pending_edits.clear();
-                self.pending_deletes.clear();
-                self.pending_inserts.clear();
-                self.editing_cell = None;
-                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                self.table_view.pending_edits.clear();
+                self.table_view.pending_deletes.clear();
+                self.table_view.pending_inserts.clear();
+                self.table_view.editing_cell = None;
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
                     let key = Self::pinned_table_key(db, table);
                     self.pinned_pending_edits.remove(&key);
                 }
             }
             GridAction::FilterBy { sql_fragment } => {
-                self.filter_text = sql_fragment;
-                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                self.table_view.filter_text = sql_fragment;
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
                     let sql = self.build_sql(db, table);
                     self.run_query_async(sql);
                 }
@@ -1416,40 +1641,40 @@ impl eframe::App for RustqlApp {
                     Ok(text) => {
                         let esc_col = format!("`{}`", col_name.replace('`', "``"));
                         let esc_val = escape_sql(&text);
-                        self.filter_text = format!("{esc_col} = '{esc_val}'");
-                        if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                        self.table_view.filter_text = format!("{esc_col} = '{esc_val}'");
+                        if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
                             let sql = self.build_sql(db, table);
                             self.run_query_async(sql);
                         }
                     }
                     Err(e) => {
-                        self.table_error = Some(format!("No se pudo leer el portapapeles: {e}"));
+                        self.table_view.table_error = Some(format!("No se pudo leer el portapapeles: {e}"));
                     }
                 }
             }
             GridAction::FilterUserInput { col_name } => {
-                self.modal = ModalState::FilterInput {
+                self.ui.modal = ModalState::FilterInput {
                     col_name,
                     value: String::new(),
                     operator: modals::FilterOperator::default(),
                 };
             }
             GridAction::MarkDeleteRow { row_idx } => {
-                if !self.pending_deletes.remove(&row_idx) {
-                    self.pending_deletes.insert(row_idx);
+                if !self.table_view.pending_deletes.remove(&row_idx) {
+                    self.table_view.pending_deletes.insert(row_idx);
                 }
             }
             GridAction::InsertRow => {
                 // Create blank insert row at the bottom
-                let col_count = self.table_data.as_ref().map(|d| d.columns.len()).unwrap_or(0);
+                let col_count = self.table_view.table_data.as_ref().map(|d| d.columns.len()).unwrap_or(0);
                 if col_count == 0 { } else {
-                    let col_info_key = match &self.selected_node {
+                    let col_info_key = match &self.schema.selected_node {
                         Some(SelectedNode::Table { db, table }) => Some((db.clone(), table.clone())),
                         _ => None,
                     };
                     let empty_cols: Vec<ColumnInfo> = Vec::new();
                     let ci = col_info_key.as_ref()
-                        .and_then(|k| self.columns_info.get(k))
+                        .and_then(|k| self.schema.columns_info.get(k))
                         .map(|v| v.as_slice())
                         .unwrap_or(empty_cols.as_slice());
                     let auto_cols: Vec<bool> = (0..col_count).map(|i| {
@@ -1462,25 +1687,25 @@ impl eframe::App for RustqlApp {
                             ci.get(i).and_then(|c| c.default_val.clone()).map(Some).unwrap_or(Some(String::new()))
                         }
                     }).collect();
-                    self.pending_inserts.push(PendingInsert { values, auto_cols });
+                    self.table_view.pending_inserts.push(PendingInsert { values, auto_cols });
                 }
             }
             GridAction::CloneRow { row_idx } => {
-                let col_count = self.table_data.as_ref().map(|d| d.columns.len()).unwrap_or(0);
+                let col_count = self.table_view.table_data.as_ref().map(|d| d.columns.len()).unwrap_or(0);
                 if col_count == 0 { } else {
-                    let col_info_key = match &self.selected_node {
+                    let col_info_key = match &self.schema.selected_node {
                         Some(SelectedNode::Table { db, table }) => Some((db.clone(), table.clone())),
                         _ => None,
                     };
                     let empty_cols: Vec<ColumnInfo> = Vec::new();
                     let ci = col_info_key.as_ref()
-                        .and_then(|k| self.columns_info.get(k))
+                        .and_then(|k| self.schema.columns_info.get(k))
                         .map(|v| v.as_slice())
                         .unwrap_or(empty_cols.as_slice());
                     let auto_cols: Vec<bool> = (0..col_count).map(|i| {
                         ci.get(i).map(|c| c.extra.contains("auto_increment")).unwrap_or(false)
                     }).collect();
-                    let row_data = self.table_data.as_ref().and_then(|d| d.rows.get(row_idx));
+                    let row_data = self.table_view.table_data.as_ref().and_then(|d| d.rows.get(row_idx));
                     let values: Vec<Option<String>> = (0..col_count).map(|i| {
                         if auto_cols.get(i).copied().unwrap_or(false) {
                             None // Skip auto_increment columns
@@ -1488,36 +1713,36 @@ impl eframe::App for RustqlApp {
                             row_data.and_then(|r| r.get(i)).cloned().unwrap_or(None)
                         }
                     }).collect();
-                    self.pending_inserts.push(PendingInsert { values, auto_cols });
+                    self.table_view.pending_inserts.push(PendingInsert { values, auto_cols });
                 }
             }
             GridAction::RemoveInsertRow { insert_idx } => {
-                if insert_idx < self.pending_inserts.len() {
-                    self.pending_inserts.remove(insert_idx);
+                if insert_idx < self.table_view.pending_inserts.len() {
+                    self.table_view.pending_inserts.remove(insert_idx);
                 }
             }
             GridAction::RowSelected { row_idx, shift, ctrl } => {
                 if shift {
-                    let anchor = self.last_selected_row.unwrap_or(row_idx);
+                    let anchor = self.table_view.last_selected_row.unwrap_or(row_idx);
                     let (lo, hi) = (anchor.min(row_idx), anchor.max(row_idx));
-                    self.selected_rows = (lo..=hi).collect();
+                    self.table_view.selected_rows = (lo..=hi).collect();
                 } else if ctrl {
-                    if !self.selected_rows.remove(&row_idx) {
-                        self.selected_rows.insert(row_idx);
-                        self.last_selected_row = Some(row_idx);
+                    if !self.table_view.selected_rows.remove(&row_idx) {
+                        self.table_view.selected_rows.insert(row_idx);
+                        self.table_view.last_selected_row = Some(row_idx);
                     }
                 } else {
-                    self.selected_rows.clear();
-                    self.selected_rows.insert(row_idx);
-                    self.last_selected_row = Some(row_idx);
-                    self.drag_select_from = Some(row_idx);
+                    self.table_view.selected_rows.clear();
+                    self.table_view.selected_rows.insert(row_idx);
+                    self.table_view.last_selected_row = Some(row_idx);
+                    self.table_view.drag_select_from = Some(row_idx);
                 }
-                self.selected_cell = None;
+                self.table_view.selected_cell = None;
             }
             GridAction::CopySelectedRows => {
-                if let Some(data) = &self.table_data {
-                    let fmt = self.settings.copy_format.clone();
-                    let rows: Vec<&Vec<Option<String>>> = self.selected_rows.iter()
+                if let Some(data) = &self.table_view.table_data {
+                    let fmt = self.ui.settings.copy_format.clone();
+                    let rows: Vec<&Vec<Option<String>>> = self.table_view.selected_rows.iter()
                         .filter_map(|&i| data.rows.get(i))
                         .collect();
                     if !rows.is_empty() {
@@ -1527,14 +1752,14 @@ impl eframe::App for RustqlApp {
                 }
             }
             GridAction::CellSelected { row_idx, col_idx } => {
-                self.selected_cell = Some((row_idx, col_idx));
-                self.selected_rows.clear();
-                self.last_selected_row = None;
+                self.table_view.selected_cell = Some((row_idx, col_idx));
+                self.table_view.selected_rows.clear();
+                self.table_view.last_selected_row = None;
             }
             GridAction::MarkDeleteRows { row_indices } => {
                 for row_idx in row_indices {
-                    if !self.pending_deletes.remove(&row_idx) {
-                        self.pending_deletes.insert(row_idx);
+                    if !self.table_view.pending_deletes.remove(&row_idx) {
+                        self.table_view.pending_deletes.insert(row_idx);
                     }
                 }
             }
@@ -1545,11 +1770,11 @@ impl eframe::App for RustqlApp {
         match apply_bar_action {
             GridAction::ApplyEdits => self.apply_pending_changes(),
             GridAction::DiscardEdits => {
-                self.pending_edits.clear();
-                self.pending_deletes.clear();
-                self.pending_inserts.clear();
-                self.editing_cell = None;
-                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+                self.table_view.pending_edits.clear();
+                self.table_view.pending_deletes.clear();
+                self.table_view.pending_inserts.clear();
+                self.table_view.editing_cell = None;
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
                     let key = Self::pinned_table_key(db, table);
                     self.pinned_pending_edits.remove(&key);
                 }
@@ -1561,29 +1786,29 @@ impl eframe::App for RustqlApp {
         match sidebar_action {
             SidebarAction::None => {}
             SidebarAction::SelectServer => {
-                self.selected_node = Some(SelectedNode::Server);
+                self.schema.selected_node = Some(SelectedNode::Server);
                 self.active_tab = ActiveTab::Servidor;
             }
             SidebarAction::SelectDatabase(db) => {
-                self.selected_node = Some(SelectedNode::Database(db.clone()));
+                self.schema.selected_node = Some(SelectedNode::Database(db.clone()));
                 self.active_tab = ActiveTab::Bbdd;
-                if !self.tables_info.contains_key(&db) {
+                if !self.schema.tables_info.contains_key(&db) {
                     self.load_tables_info(&db);
                 }
             }
             SidebarAction::SelectTable { db, table } => {
                 let already_selected = matches!(
-                    &self.selected_node,
+                    &self.schema.selected_node,
                     Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
                 );
                 if !already_selected {
                     if self.needs_confirm_before_switch() {
-                        let current_table = match &self.selected_node {
+                        let current_table = match &self.schema.selected_node {
                             Some(SelectedNode::Table { table: t, .. }) => t.clone(),
                             _ => String::new(),
                         };
-                        let count = self.pending_edits.len();
-                        self.modal = modals::ModalState::ConfirmSwitchTable {
+                        let count = self.table_view.pending_edits.len();
+                        self.ui.modal = modals::ModalState::ConfirmSwitchTable {
                             new_db: db,
                             new_table: table,
                             pending_count: count,
@@ -1598,14 +1823,14 @@ impl eframe::App for RustqlApp {
                 }
             }
             SidebarAction::CreateDatabase => {
-                self.modal = ModalState::CreateDatabase {
+                self.ui.modal = ModalState::CreateDatabase {
                     name: String::new(),
                     charset: "utf8mb4".into(),
                     error: None,
                 };
             }
             SidebarAction::CreateTable { db } => {
-                self.modal = ModalState::CreateTable {
+                self.ui.modal = ModalState::CreateTable {
                     db,
                     name: String::new(),
                     columns: vec![NewColumnDef::new()],
@@ -1614,7 +1839,7 @@ impl eframe::App for RustqlApp {
             }
             SidebarAction::DropDatabase { db } => {
                 let target = db.clone();
-                self.modal = ModalState::ConfirmDrop {
+                self.ui.modal = ModalState::ConfirmDrop {
                     kind: DropKind::Database,
                     target,
                     db: Some(db),
@@ -1623,7 +1848,7 @@ impl eframe::App for RustqlApp {
             }
             SidebarAction::TruncateAllTables { db } => {
                 let target = format!("todas las tablas de '{db}'");
-                self.modal = ModalState::ConfirmTruncate {
+                self.ui.modal = ModalState::ConfirmTruncate {
                     kind: TruncateKind::AllInDatabase,
                     target,
                     db: Some(db),
@@ -1632,7 +1857,7 @@ impl eframe::App for RustqlApp {
             }
             SidebarAction::DropTable { db, table } => {
                 let target = format!("{db}.{table}");
-                self.modal = ModalState::ConfirmDrop {
+                self.ui.modal = ModalState::ConfirmDrop {
                     kind: DropKind::Table,
                     target,
                     db: Some(db),
@@ -1641,7 +1866,7 @@ impl eframe::App for RustqlApp {
             }
             SidebarAction::TruncateTable { db, table } => {
                 let target = format!("{db}.{table}");
-                self.modal = ModalState::ConfirmTruncate {
+                self.ui.modal = ModalState::ConfirmTruncate {
                     kind: TruncateKind::Table,
                     target,
                     db: Some(db),
@@ -1652,22 +1877,40 @@ impl eframe::App for RustqlApp {
                 ctx.copy_text(name);
             }
             SidebarAction::Refresh => {
-                self.databases.clear();
-                self.tables_cache.clear();
-                self.databases_info = None;
-                self.tables_info.clear();
+                self.schema.databases.clear();
+                self.schema.tables_cache.clear();
+                self.schema.databases_info = None;
+                self.schema.tables_info.clear();
+            }
+            SidebarAction::NeedDatabases => {
+                if let AppState::Connected(b) = &mut self.state {
+                    match b.list_databases() {
+                        Ok(dbs) => self.schema.databases = dbs,
+                        Err(e) => self.table_view.table_error = Some(e),
+                    }
+                }
+                ctx.request_repaint();
+            }
+            SidebarAction::NeedTables(db) => {
+                if let AppState::Connected(b) = &mut self.state {
+                    match b.list_tables(&db) {
+                        Ok(tables) => { self.schema.tables_cache.insert(db, tables); }
+                        Err(e) => self.table_view.table_error = Some(e),
+                    }
+                }
+                ctx.request_repaint();
             }
             SidebarAction::Disconnect => {
                 should_disconnect = true;
             }
             SidebarAction::ToggleFav { db, table } => {
                 let key = format!("{}/{}", db, table);
-                if self.settings.fav_tables.contains(&key) {
-                    self.settings.fav_tables.remove(&key);
+                if self.ui.settings.fav_tables.contains(&key) {
+                    self.ui.settings.fav_tables.remove(&key);
                 } else {
-                    self.settings.fav_tables.insert(key);
+                    self.ui.settings.fav_tables.insert(key);
                 }
-                settings::save(&self.settings);
+                settings::save(&self.ui.settings);
             }
             SidebarAction::PinTable { db, table } => {
                 let already_pinned = self.pinned_tables.iter().any(|(d, t)| *d == db && *t == table);
@@ -1678,17 +1921,17 @@ impl eframe::App for RustqlApp {
             }
             SidebarAction::OpenTableStructure { db, table } => {
                 let already_selected = matches!(
-                    &self.selected_node,
+                    &self.schema.selected_node,
                     Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
                 );
                 if !already_selected {
                     if self.needs_confirm_before_switch() {
-                        let current_table = match &self.selected_node {
+                        let current_table = match &self.schema.selected_node {
                             Some(SelectedNode::Table { table: t, .. }) => t.clone(),
                             _ => String::new(),
                         };
-                        let count = self.pending_edits.len();
-                        self.modal = modals::ModalState::ConfirmSwitchTable {
+                        let count = self.table_view.pending_edits.len();
+                        self.ui.modal = modals::ModalState::ConfirmSwitchTable {
                             new_db: db,
                             new_table: table,
                             pending_count: count,
@@ -1714,7 +1957,7 @@ impl eframe::App for RustqlApp {
                 self.save_tabs_state();
             }
             SidebarAction::CloneTable { db, table } => {
-                self.modal = ModalState::CloneTable {
+                self.ui.modal = ModalState::CloneTable {
                     db,
                     table,
                     new_name: String::new(),
@@ -1730,9 +1973,9 @@ impl eframe::App for RustqlApp {
 
         // F5: recargar grid (invalida también caché de estructura de la tabla)
         if f5
-            && let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
+            && let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
                 // Invalidar caché de columnas para reflejar cambios estructurales
-                self.columns_info.remove(&(db.clone(), table.clone()));
+                self.schema.columns_info.remove(&(db.clone(), table.clone()));
                 let sql = self.build_sql(db, table);
                 self.run_query_async(sql);
             }
@@ -1741,14 +1984,14 @@ impl eframe::App for RustqlApp {
         match filter_action {
             filter_bar::FilterAction::Apply => {
                 if let Some(SelectedNode::Table { db, table }) =
-                    self.selected_node.clone().as_ref()
+                    self.schema.selected_node.clone().as_ref()
                 {
                     // Añadir al historial de la tabla si hay texto
-                    let filter = self.filter_text.trim().to_string();
+                    let filter = self.table_view.filter_text.trim().to_string();
                     if !filter.is_empty() {
-                        self.filter_history.retain(|f| f != &filter);
-                        self.filter_history.insert(0, filter);
-                        self.filter_history.truncate(20);
+                        self.table_view.filter_history.retain(|f| f != &filter);
+                        self.table_view.filter_history.insert(0, filter);
+                        self.table_view.filter_history.truncate(20);
                     }
                     let sql = self.build_sql(db, table);
                     self.run_query_async(sql);
@@ -1757,7 +2000,7 @@ impl eframe::App for RustqlApp {
             }
             filter_bar::FilterAction::Clear => {
                 if let Some(SelectedNode::Table { db, table }) =
-                    self.selected_node.clone().as_ref()
+                    self.schema.selected_node.clone().as_ref()
                 {
                     let sql = self.build_sql(db, table);
                     self.run_query_async(sql);
@@ -1768,19 +2011,19 @@ impl eframe::App for RustqlApp {
 
         // DB info: double-click on table opens it
         if let DbInfoAction::OpenTable(table) = db_info_action {
-            let db = match &self.selected_node {
+            let db = match &self.schema.selected_node {
                 Some(SelectedNode::Database(d)) => Some(d.clone()),
                 Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
                 _ => None,
             };
             if let Some(db) = db {
                 if self.needs_confirm_before_switch() {
-                    let current_table = match &self.selected_node {
+                    let current_table = match &self.schema.selected_node {
                         Some(SelectedNode::Table { table: t, .. }) => t.clone(),
                         _ => String::new(),
                     };
-                    let count = self.pending_edits.len();
-                    self.modal = modals::ModalState::ConfirmSwitchTable {
+                    let count = self.table_view.pending_edits.len();
+                    self.ui.modal = modals::ModalState::ConfirmSwitchTable {
                         new_db: db,
                         new_table: table,
                         pending_count: count,
@@ -1833,259 +2076,7 @@ impl eframe::App for RustqlApp {
         }
 
         // Modal action
-        match modal_action {
-            ModalAction::None => {}
-            ModalAction::Cancel => {
-                self.modal = ModalState::None;
-            }
-            ModalAction::ApplyAndSwitch { new_db, new_table } => {
-                self.modal = ModalState::None;
-                self.apply_pending_edits();
-                // Cambiar solo si los cambios se aplicaron correctamente (pending_edits vacío)
-                if self.pending_edits.is_empty() {
-                    self.on_table_selected(new_db, new_table);
-                    self.active_tab = ActiveTab::Datos;
-                }
-            }
-            ModalAction::DiscardAndSwitch { new_db, new_table } => {
-                self.modal = ModalState::None;
-                self.pending_edits.clear();
-                self.editing_cell = None;
-                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
-                    let key = Self::pinned_table_key(db, table);
-                    self.pinned_pending_edits.remove(&key);
-                }
-                self.on_table_selected(new_db, new_table);
-                self.active_tab = ActiveTab::Datos;
-            }
-            ModalAction::CreateDatabase { name, charset } => {
-                let result = match &mut self.state {
-                    AppState::Connected(b) => b.create_database(&name, &charset),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("CREATE DATABASE `{name}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("CREATE DATABASE `{name}`"), 0, e));
-                }
-                match result {
-                    Ok(()) => {
-                        self.modal = ModalState::None;
-                        self.databases.clear();
-                        self.databases_info = None;
-                    }
-                    Err(e) => {
-                        if let ModalState::CreateDatabase { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
-            ModalAction::CreateTable { db, name, columns } => {
-                let sql = modals::build_create_table_sql(&db, &name, &columns);
-                let result = self.run_write(&sql);
-                match result {
-                    Ok(_) => {
-                        self.modal = ModalState::None;
-                        self.invalidate_after_write(Some(&db), None);
-                    }
-                    Err(e) => {
-                        if let ModalState::CreateTable { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
-            ModalAction::DropDatabase(db) => {
-                let result = match &mut self.state {
-                    AppState::Connected(b) => b.drop_database(&db),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("DROP DATABASE `{db}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("DROP DATABASE `{db}`"), 0, e));
-                }
-                self.modal = ModalState::None;
-                if result.is_ok() {
-                    self.invalidate_after_write(Some(&db), None);
-                }
-            }
-            ModalAction::DropTable { db, table } => {
-                let result = match &mut self.state {
-                    AppState::Connected(b) => b.drop_table(&db, &table),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("DROP TABLE `{db}`.`{table}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("DROP TABLE `{db}`.`{table}`"), 0, e));
-                }
-                self.modal = ModalState::None;
-                if result.is_ok() {
-                    self.invalidate_after_write(Some(&db), Some(&table));
-                }
-            }
-            ModalAction::TruncateTable { db, table } => {
-                let result = match &mut self.state {
-                    AppState::Connected(b) => b.truncate_table(&db, &table),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("TRUNCATE TABLE `{db}`.`{table}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("TRUNCATE TABLE `{db}`.`{table}`"), 0, e));
-                }
-                let result = result.map(|_| 0u64);
-                self.modal = ModalState::None;
-                if result.is_ok() {
-                    // Recargar datos si es la tabla activa
-                    if matches!(
-                        &self.selected_node,
-                        Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
-                    ) {
-                        let sql = self.build_sql(&db, &table);
-                        self.run_query_async(sql);
-                    }
-                    self.invalidate_after_write(Some(&db), Some(&table));
-                }
-            }
-            ModalAction::TruncateAllTables(db) => {
-                self.modal = ModalState::None;
-                let tables = self.tables_cache.get(&db).cloned().unwrap_or_default();
-                for table in &tables {
-                    let _ = self.run_write(&format!(
-                        "TRUNCATE TABLE `{}`.`{}`",
-                        db.replace('`', "``"),
-                        table.replace('`', "``")
-                    ));
-                }
-                self.invalidate_after_write(Some(&db), None);
-            }
-            ModalAction::ApplyFilter { sql_fragment } => {
-                self.modal = ModalState::None;
-                self.filter_text = sql_fragment;
-                if let Some(SelectedNode::Table { db, table }) = &self.selected_node.clone() {
-                    let sql = self.build_sql(db, table);
-                    self.run_query_async(sql);
-                }
-            }
-            ModalAction::DeleteRow { db, table, row_idx } => {
-                self.modal = ModalState::None;
-                let data = match &self.table_data {
-                    Some(d) => d.clone(),
-                    None => return,
-                };
-                let pks = self.primary_keys.clone();
-                let where_parts: Vec<String> = pks
-                    .iter()
-                    .filter_map(|pk| {
-                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
-                        let pk_val = data.rows.get(row_idx)?.get(pk_idx)?;
-                        Some(format!(
-                            "`{}` = '{}'",
-                            pk.replace('`', "``"),
-                            escape_sql(pk_val.as_deref().unwrap_or(""))
-                        ))
-                    })
-                    .collect();
-                if !where_parts.is_empty() {
-                    let sql = format!(
-                        "DELETE FROM `{}`.`{}` WHERE {}",
-                        db.replace('`', "``"),
-                        table.replace('`', "``"),
-                        where_parts.join(" AND ")
-                    );
-                    if self.run_write(&sql).is_ok() {
-                        self.pending_edits.retain(|e| e.row_idx != row_idx);
-                        let sql = self.build_sql(&db, &table);
-                        self.run_query_async(sql);
-                    }
-                }
-            }
-            ModalAction::CloneTable { db, src_table, new_name, copy_data } => {
-                let create_sql = format!(
-                    "CREATE TABLE `{}`.`{}` LIKE `{}`.`{}`",
-                    db.replace('`', "``"), new_name.replace('`', "``"),
-                    db.replace('`', "``"), src_table.replace('`', "``")
-                );
-                match self.run_write(&create_sql) {
-                    Ok(_) => {
-                        if copy_data {
-                            let insert_sql = format!(
-                                "INSERT INTO `{}`.`{}` SELECT * FROM `{}`.`{}`",
-                                db.replace('`', "``"), new_name.replace('`', "``"),
-                                db.replace('`', "``"), src_table.replace('`', "``")
-                            );
-                            if let Err(e) = self.run_write(&insert_sql)
-                                && let ModalState::CloneTable { error, .. } = &mut self.modal {
-                                    *error = Some(e);
-                                    return;
-                                }
-                        }
-                        self.modal = ModalState::None;
-                        self.invalidate_after_write(Some(&db), None);
-                    }
-                    Err(e) => {
-                        if let ModalState::CloneTable { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
-            ModalAction::InsertRow { db, table, col_names, values, nulls } => {
-                let data = match &self.table_data {
-                    Some(d) => d.clone(),
-                    None => return,
-                };
-                let _ = data;
-                let pairs: Vec<String> = col_names
-                    .iter()
-                    .zip(values.iter())
-                    .zip(nulls.iter())
-                    .map(|((col, val), is_null)| {
-                        let col_esc = col.replace('`', "``");
-                        if *is_null {
-                            format!("`{col_esc}` = NULL")
-                        } else {
-                            format!("`{col_esc}` = '{}'", escape_sql(val))
-                        }
-                    })
-                    .collect();
-                let col_list: Vec<String> = col_names
-                    .iter()
-                    .map(|c| format!("`{}`", c.replace('`', "``")))
-                    .collect();
-                let val_list: Vec<String> = col_names
-                    .iter()
-                    .zip(values.iter())
-                    .zip(nulls.iter())
-                    .map(|((_, val), is_null)| {
-                        if *is_null { "NULL".to_string() } else { format!("'{}'", escape_sql(val)) }
-                    })
-                    .collect();
-                let _ = pairs;
-                let sql = format!(
-                    "INSERT INTO `{}`.`{}` ({}) VALUES ({})",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    col_list.join(", "),
-                    val_list.join(", ")
-                );
-                match self.run_write(&sql) {
-                    Ok(_) => {
-                        self.modal = ModalState::None;
-                        let sql = self.build_sql(&db, &table);
-                        self.run_query_async(sql);
-                    }
-                    Err(e) => {
-                        if let ModalState::InsertRow { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
-        }
+        self.handle_modal_action(modal_action);
 
         // Profile selection & management
         if let Some(idx) = profile_selected
