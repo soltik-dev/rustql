@@ -248,6 +248,7 @@ pub fn format_rows_for_copy(
     columns: &[String],
     rows: &[&Vec<Option<String>>],
     fmt: &crate::settings::CopyFormat,
+    table_name: Option<&str>,
 ) -> String {
     match fmt {
         crate::settings::CopyFormat::Csv => {
@@ -269,12 +270,17 @@ pub fn format_rows_for_copy(
             }).collect::<Vec<_>>().join("\n")
         }
         crate::settings::CopyFormat::SqlInserts => {
+            let col_list = columns.iter()
+                .map(|c| format!("`{}`", c.replace('`', "``")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let tbl = table_name.unwrap_or("tabla");
             rows.iter().map(|row| {
                 let vals: Vec<String> = row.iter().map(|cell| match cell {
                     None => "NULL".to_string(),
                     Some(v) => format!("'{}'", crate::db::escape_sql(v)),
                 }).collect();
-                format!("-- INSERT VALUES ({})", vals.join(", "))
+                format!("INSERT INTO `{tbl}` ({col_list}) VALUES ({});", vals.join(", "))
             }).collect::<Vec<_>>().join("\n")
         }
     }
@@ -419,18 +425,25 @@ pub fn show(
     let mut keyboard_action = GridAction::None;
     let no_widget_focused = ui.memory(|m| m.focused().is_none());
 
-    // Ctrl+C: siempre activo (no requiere ausencia de foco), solo requiere no estar editando
-    if editing_cell.is_none() {
-        let ctrl = ui.input(|i| i.modifiers.ctrl);
-        if ctrl && ui.input(|i| i.key_pressed(egui::Key::C)) {
-            if !selected_rows.is_empty() {
-                keyboard_action = GridAction::CopySelectedRows;
-            } else if let Some((sel_row, sel_col)) = *selected_cell
-                && sel_row < data.rows.len()
-                && data.rows[sel_row].get(sel_col).is_some()
-            {
-                let cell_str = data.rows[sel_row][sel_col].as_deref().unwrap_or("").to_string();
-                ui.ctx().copy_text(cell_str);
+    // Ctrl+C: sin foco en widget de texto y sin estar editando una celda.
+    // Usamos Event::Copy (idiomático en egui) + fallback raw key para mayor compatibilidad.
+    let copy_requested = edit_cell_rc.borrow().is_none() && no_widget_focused && ui.input(|i| {
+        i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+            || (i.modifiers.ctrl && i.key_pressed(egui::Key::C))
+    });
+    if copy_requested {
+        if !selected_rows.is_empty() {
+            keyboard_action = GridAction::CopySelectedRows;
+        } else if let Some((sel_row, sel_col)) = *selected_cell {
+            let real_idx = if sort_indices.is_empty() {
+                sel_row
+            } else {
+                sort_indices.get(sel_row).copied().unwrap_or(sel_row)
+            };
+            if let Some(row) = data.rows.get(real_idx) {
+                if let Some(cell) = row.get(sel_col) {
+                    ui.ctx().copy_text(cell.as_deref().unwrap_or("").to_string());
+                }
             }
         }
     }
