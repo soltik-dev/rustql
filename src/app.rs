@@ -1162,11 +1162,10 @@ impl eframe::App for RustqlApp {
                     egui::SidePanel::left("sidebar_v2")
                         .default_width(200.0)
                         .min_width(160.0)
-                        .max_width(320.0)
                         .show(ctx, |ui| {
                             sidebar_action = sidebar::show(
                                 ui,
-                                backend.as_ref(),
+                                Some(backend.as_ref()),
                                 &mut self.schema.databases,
                                 &mut self.schema.tables_cache,
                                 sel_db,
@@ -1390,14 +1389,138 @@ impl eframe::App for RustqlApp {
             }
 
             AppState::QueryRunning => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.spinner();
-                            ui.add_space(8.0);
-                            ui.label("Ejecutando consulta…");
+                // Renderizamos el mismo layout que Connected pero sin backend disponible.
+                // El sidebar funciona con la caché ya cargada (None = no hacer queries).
+                if self.ui.show_sidebar {
+                    let (sel_db, sel_table) = match &self.schema.selected_node {
+                        Some(SelectedNode::Table { db, table }) => {
+                            (Some(db.as_str()), Some(table.as_str()))
+                        }
+                        Some(SelectedNode::Database(db)) => (Some(db.as_str()), None),
+                        _ => (None, None),
+                    };
+                    let server_name = self.selected_profile_idx
+                        .and_then(|i| self.profiles.get(i))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| self.params.host.clone());
+                    egui::SidePanel::left("sidebar_v2")
+                        .default_width(200.0)
+                        .min_width(160.0)
+                        .show(ctx, |ui| {
+                            sidebar_action = sidebar::show(
+                                ui,
+                                None,
+                                &mut self.schema.databases,
+                                &mut self.schema.tables_cache,
+                                sel_db,
+                                sel_table,
+                                &mut self.schema.table_search,
+                                &self.ui.settings.fav_tables,
+                                &mut self.ui.show_only_fav,
+                                &self.params.host,
+                                &server_name,
+                            );
                         });
-                    });
+                }
+
+                let has_db = matches!(
+                    &self.schema.selected_node,
+                    Some(SelectedNode::Database(_) | SelectedNode::Table { .. })
+                );
+                let has_table =
+                    matches!(&self.schema.selected_node, Some(SelectedNode::Table { .. }));
+                {
+                    let server_name_tab = self.selected_profile_idx
+                        .and_then(|i| self.profiles.get(i))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| self.params.host.clone());
+                    let db_name_tab = match &self.schema.selected_node {
+                        Some(SelectedNode::Database(d)) => Some(d.clone()),
+                        Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
+                        _ => None,
+                    };
+                    let table_name_tab = match &self.schema.selected_node {
+                        Some(SelectedNode::Table { table, .. }) => Some(table.clone()),
+                        _ => None,
+                    };
+                    let sql_tab_count = self.sql_tabs.len();
+                    let pinned_tables = self.pinned_tables.clone();
+                    let pinned_pending_counts: Vec<usize> = pinned_tables.iter().map(|(db, table)| {
+                        let key = Self::pinned_table_key(db, table);
+                        let is_current = matches!(
+                            &self.schema.selected_node,
+                            Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
+                        );
+                        if is_current { self.table_view.pending_edits.len() }
+                        else { self.pinned_pending_edits.get(&key).map_or(0, |v| v.len()) }
+                    }).collect();
+                    egui::TopBottomPanel::top("tab_bar")
+                        .min_height(30.0)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            ui.add_space(2.0);
+                            tab_bar_result = tab_bar::show(
+                                ui,
+                                self.active_tab,
+                                has_db,
+                                has_table,
+                                &server_name_tab,
+                                db_name_tab.as_deref(),
+                                table_name_tab.as_deref(),
+                                sql_tab_count,
+                                &pinned_tables,
+                                &pinned_pending_counts,
+                            );
+                        });
+                }
+
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    match self.active_tab {
+                        ActiveTab::Datos => {
+                            let selected_table = match &self.schema.selected_node {
+                                Some(SelectedNode::Table { db, table }) => Some((db.clone(), table.clone())),
+                                _ => None,
+                            };
+                            if selected_table.is_some() {
+                                filter_bar::show(ui, &mut self.table_view.filter_text, false, &self.table_view.filter_history.clone());
+                                ui.separator();
+                            }
+                            let col_info_key = match &self.schema.selected_node {
+                                Some(SelectedNode::Table { db, table }) => Some((db.clone(), table.clone())),
+                                _ => None,
+                            };
+                            let empty_cols: Vec<ColumnInfo> = Vec::new();
+                            let col_info_slice = col_info_key.as_ref()
+                                .and_then(|k| self.schema.columns_info.get(k))
+                                .map(|v| v.as_slice())
+                                .unwrap_or(empty_cols.as_slice());
+                            results_grid::show(
+                                ui,
+                                &selected_table,
+                                &self.table_view.table_data,
+                                &self.table_view.table_error,
+                                &mut self.table_view.sort_specs,
+                                &self.table_view.sort_indices,
+                                &self.table_view.pending_edits,
+                                &self.table_view.pending_deletes,
+                                &self.table_view.pending_inserts,
+                                &mut self.table_view.editing_cell,
+                                &mut self.table_view.selected_cell,
+                                &mut self.table_view.selected_rows,
+                                &mut self.table_view.last_selected_row,
+                                &mut self.table_view.drag_select_from,
+                                &self.table_view.primary_keys,
+                                col_info_slice,
+                                true, // query_loading=true: muestra spinner en el grid
+                            );
+                        }
+                        _ => {
+                            ui.centered_and_justified(|ui| {
+                                ui.spinner();
+                                ui.label("Ejecutando consulta…");
+                            });
+                        }
+                    }
                 });
             }
         }

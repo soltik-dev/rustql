@@ -21,7 +21,6 @@ pub enum SidebarAction {
     SelectServer,
     SelectDatabase(String),
     SelectTable { db: String, table: String },
-    // Acciones de menú contextual
     CreateDatabase,
     CreateTable { db: String },
     DropDatabase { db: String },
@@ -41,7 +40,7 @@ pub enum SidebarAction {
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
 pub fn show(
     ui: &mut egui::Ui,
-    backend: &dyn DbBackend,
+    backend: Option<&dyn DbBackend>,
     databases: &mut Vec<String>,
     tables_cache: &mut HashMap<String, Vec<String>>,
     selected_db: Option<&str>,
@@ -59,15 +58,6 @@ pub fn show(
     let ctrl_f = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
 
     ui.horizontal(|ui| {
-        let search_resp = ui.add(
-            egui::TextEdit::singleline(table_search)
-                .id(egui::Id::new("sidebar_table_search"))
-                .hint_text("Buscar tabla…  Ctrl+F")
-                .desired_width(ui.available_width() - 50.0),
-        );
-        if ctrl_f {
-            search_resp.request_focus();
-        }
         let fav_btn = ui.add(
             egui::Button::new("⭐")
                 .selected(*show_only_fav)
@@ -86,15 +76,27 @@ pub fn show(
             *action.borrow_mut() = SidebarAction::Refresh;
         }
         refresh_btn.on_hover_text("Recargar esquema");
+
+        let search_resp = ui.add(
+            egui::TextEdit::singleline(table_search)
+                .id(egui::Id::new("sidebar_table_search"))
+                .hint_text("Buscar…  Ctrl+F")
+                .desired_width(f32::INFINITY),
+        );
+        if ctrl_f {
+            search_resp.request_focus();
+        }
     });
     ui.separator();
 
     if databases.is_empty() {
-        match backend.list_databases() {
-            Ok(dbs) => *databases = dbs,
-            Err(e) => {
-                ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
-                return SidebarAction::None;
+        if let Some(b) = backend {
+            match b.list_databases() {
+                Ok(dbs) => *databases = dbs,
+                Err(e) => {
+                    ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+                    return SidebarAction::None;
+                }
             }
         }
     }
@@ -117,8 +119,10 @@ pub fn show(
             .show(ui, |ui| {
                 for db in &dbs {
                     if filtering && !tables_cache.contains_key(db) {
-                        if let Ok(tables) = backend.list_tables(db) {
-                            tables_cache.insert(db.clone(), tables);
+                        if let Some(b) = backend {
+                            if let Ok(tables) = b.list_tables(db) {
+                                tables_cache.insert(db.clone(), tables);
+                            }
                         }
                     }
 
@@ -148,8 +152,6 @@ pub fn show(
                         continue;
                     }
 
-                    // Al buscar, NO forzamos abrir: dejamos el estado que el usuario tenía.
-                    // Las BBDD sin coincidencias se ocultan igualmente (continue más abajo).
                     let open: Option<bool> = None;
                     let is_db_selected = selected_db == Some(db.as_str());
                     let db_label = clip_text(db, 24);
@@ -162,11 +164,13 @@ pub fn show(
                     .open(open)
                     .show(ui, |ui: &mut egui::Ui| {
                         if !filtering && !tables_cache.contains_key(db) {
-                            match backend.list_tables(db) {
-                                Ok(tables) => { tables_cache.insert(db.clone(), tables); }
-                                Err(e) => {
-                                    ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
-                                    return;
+                            if let Some(b) = backend {
+                                match b.list_tables(db) {
+                                    Ok(tables) => { tables_cache.insert(db.clone(), tables); }
+                                    Err(e) => {
+                                        ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -211,12 +215,87 @@ pub fn show(
                             } else {
                                 egui::Color32::from_rgb(150, 85, 10)
                             };
-                            let label_text = egui::RichText::new(&display).color(
-                                if is_fav { fav_color } else { ui.visuals().text_color() },
+
+                            // Fila completa: iconos a la izquierda, texto a continuación
+                            let available_w = ui.available_width();
+                            let row_height = ui.spacing().interact_size.y;
+                            let icon_w = 18.0;
+                            let (row_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(available_w, row_height),
+                                egui::Sense::hover(),
                             );
 
-                            let resp = ui.selectable_label(is_selected, label_text);
+                            let fav_rect = egui::Rect::from_min_size(
+                                row_rect.min,
+                                egui::vec2(icon_w, row_height),
+                            );
+                            let pin_rect = egui::Rect::from_min_size(
+                                egui::pos2(row_rect.min.x + icon_w, row_rect.min.y),
+                                egui::vec2(icon_w, row_height),
+                            );
+                            let label_rect = egui::Rect::from_min_max(
+                                egui::pos2(row_rect.min.x + icon_w * 2.0, row_rect.min.y),
+                                row_rect.max,
+                            );
 
+                            let fav_resp = ui.interact(fav_rect, ui.id().with(("fav", db.as_str(), table.as_str())), egui::Sense::click());
+                            let pin_resp = ui.interact(pin_rect, ui.id().with(("pin", db.as_str(), table.as_str())), egui::Sense::click());
+                            let resp = ui.interact(label_rect, ui.id().with(("row", db.as_str(), table.as_str())), egui::Sense::click());
+
+                            // Fondo hover/selected
+                            let is_hovered = resp.hovered() || fav_resp.hovered() || pin_resp.hovered();
+                            let bg = if is_selected {
+                                ui.visuals().selection.bg_fill
+                            } else if is_hovered {
+                                ui.visuals().widgets.hovered.weak_bg_fill
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(row_rect, 2.0, bg);
+
+                            // Icono fav: ★ rellena (fav activo) o ☆ vacía, siempre mismo tamaño
+                            let star = if is_fav { "★" } else { "☆" };
+                            let star_color = if is_fav {
+                                fav_color
+                            } else if fav_resp.hovered() {
+                                ui.visuals().strong_text_color()
+                            } else {
+                                ui.visuals().weak_text_color()
+                            };
+                            ui.painter().text(fav_rect.center(), egui::Align2::CENTER_CENTER, star, egui::TextStyle::Body.resolve(ui.style()), star_color);
+
+                            // Icono pin
+                            let pin_color = if pin_resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+                            ui.painter().text(pin_rect.center(), egui::Align2::CENTER_CENTER, "#", egui::TextStyle::Body.resolve(ui.style()), pin_color);
+
+                            // Texto de la tabla
+                            let text_color = if is_selected {
+                                ui.visuals().selection.stroke.color
+                            } else if is_fav {
+                                fav_color
+                            } else {
+                                ui.visuals().text_color()
+                            };
+                            ui.painter().text(
+                                label_rect.left_center() + egui::vec2(2.0, 0.0),
+                                egui::Align2::LEFT_CENTER,
+                                &display,
+                                egui::TextStyle::Body.resolve(ui.style()),
+                                text_color,
+                            );
+
+                            if fav_resp.clicked() {
+                                *action.borrow_mut() = SidebarAction::ToggleFav {
+                                    db: db_clone.clone(),
+                                    table: table_clone.clone(),
+                                };
+                            }
+                            if pin_resp.clicked() {
+                                *action.borrow_mut() = SidebarAction::PinTable {
+                                    db: db_clone.clone(),
+                                    table: table_clone.clone(),
+                                };
+                            }
                             if resp.clicked() || resp.double_clicked() {
                                 *action.borrow_mut() = SidebarAction::SelectTable {
                                     db: db_clone.clone(),
