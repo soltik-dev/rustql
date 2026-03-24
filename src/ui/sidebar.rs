@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use eframe::egui;
 
 use crate::db::DbBackend;
+use crate::ui::icons::*;
 
 fn clip_text(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
@@ -59,7 +60,7 @@ pub fn show(
 
     ui.horizontal(|ui| {
         let fav_btn = ui.add(
-            egui::Button::new("⭐")
+            egui::Button::new(STAR_FILLED)
                 .selected(*show_only_fav)
                 .small(),
         );
@@ -71,7 +72,7 @@ pub fn show(
         } else {
             "Filtrar favoritos"
         });
-        let refresh_btn = ui.add(egui::Button::new("🔄").small());
+        let refresh_btn = ui.add(egui::Button::new(REFRESH).small());
         if refresh_btn.clicked() {
             *action.borrow_mut() = SidebarAction::Refresh;
         }
@@ -105,7 +106,7 @@ pub fn show(
     let filtering = !filter.is_empty();
 
     let _ = host;
-    let server_label = format!("🔌 {}", clip_text(server_name, 28));
+    let server_label = format!("{} {}", PLUG, clip_text(server_name, 28));
 
     ui.spacing_mut().indent = 10.0;
 
@@ -253,8 +254,8 @@ pub fn show(
                             };
                             ui.painter().rect_filled(row_rect, 2.0, bg);
 
-                            // Icono fav: ★ rellena (fav activo) o ☆ vacía, siempre mismo tamaño
-                            let star = if is_fav { "★" } else { "☆" };
+                            // Icono fav: STAR_FILLED o STAR
+                            let star = if is_fav { STAR_FILLED } else { STAR };
                             let star_color = if is_fav {
                                 fav_color
                             } else if fav_resp.hovered() {
@@ -264,9 +265,9 @@ pub fn show(
                             };
                             ui.painter().text(fav_rect.center(), egui::Align2::CENTER_CENTER, star, egui::TextStyle::Body.resolve(ui.style()), star_color);
 
-                            // Icono pin
+                            let pin_icon = PIN;
                             let pin_color = if pin_resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
-                            ui.painter().text(pin_rect.center(), egui::Align2::CENTER_CENTER, "#", egui::TextStyle::Body.resolve(ui.style()), pin_color);
+                            ui.painter().text(pin_rect.center(), egui::Align2::CENTER_CENTER, pin_icon, egui::TextStyle::Body.resolve(ui.style()), pin_color);
 
                             // Texto de la tabla
                             let text_color = if is_selected {
@@ -310,40 +311,40 @@ pub fn show(
                             };
 
                             resp.context_menu(|ui: &mut egui::Ui| {
-                                if ui.button("⭐ Marcar favorito").clicked() {
+                                if ui.button(format!("{STAR_FILLED} Marcar favorito")).clicked() {
                                     *action.borrow_mut() = SidebarAction::ToggleFav {
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
                                     };
                                     ui.close();
                                 }
-                                if ui.button("📌 Fijar tabla").clicked() {
+                                if ui.button(format!("{PIN_FILLED} Fijar tabla")).clicked() {
                                     *action.borrow_mut() = SidebarAction::PinTable {
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
                                     };
                                     ui.close();
                                 }
-                                if ui.button("✏ Ver estructura").clicked() {
+                                if ui.button(format!("{EDIT} Ver estructura")).clicked() {
                                     *action.borrow_mut() = SidebarAction::OpenTableStructure {
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
                                     };
                                     ui.close();
                                 }
-                                if ui.button("▶ Abrir en SQL").clicked() {
+                                if ui.button(format!("{CODE} Abrir en SQL")).clicked() {
                                     *action.borrow_mut() = SidebarAction::OpenInSql {
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
                                     };
                                     ui.close();
                                 }
-                                if ui.button("📋 Copiar nombre").clicked() {
+                                if ui.button(format!("{COPY} Copiar nombre")).clicked() {
                                     *action.borrow_mut() =
                                         SidebarAction::CopyTableName(table_clone.clone());
                                     ui.close();
                                 }
-                                if ui.button("🗒 Clonar tabla").clicked() {
+                                if ui.button(format!("{CLONE} Clonar tabla")).clicked() {
                                     *action.borrow_mut() = SidebarAction::CloneTable {
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
@@ -351,7 +352,7 @@ pub fn show(
                                     ui.close();
                                 }
                                 ui.separator();
-                                if ui.button("🗑 Truncar tabla").clicked() {
+                                if ui.button(format!("{TRASH} Truncar tabla")).clicked() {
                                     *action.borrow_mut() = SidebarAction::TruncateTable {
                                         db: db_clone.clone(),
                                         table: table_clone.clone(),
@@ -359,7 +360,7 @@ pub fn show(
                                     ui.close();
                                 }
                                 if ui
-                                    .add(egui::Button::new("✖ Eliminar tabla").fill(
+                                    .add(egui::Button::new(format!("{TRASH} Eliminar tabla")).fill(
                                         egui::Color32::from_rgb(180, 40, 40),
                                     ))
                                     .clicked()
@@ -380,19 +381,19 @@ pub fn show(
 
                     let db_clone2 = db.clone();
                     db_ch.header_response.context_menu(|ui: &mut egui::Ui| {
-                        if ui.button("➕ Crear tabla").clicked() {
+                        if ui.button(format!("{PLUS} Crear tabla")).clicked() {
                             *action.borrow_mut() =
                                 SidebarAction::CreateTable { db: db_clone2.clone() };
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("🔄 Vaciar todas las tablas").clicked() {
+                        if ui.button(format!("{TRASH} Vaciar todas las tablas")).clicked() {
                             *action.borrow_mut() =
                                 SidebarAction::TruncateAllTables { db: db_clone2.clone() };
                             ui.close();
                         }
                         if ui
-                            .add(egui::Button::new("✖ Eliminar base de datos").fill(
+                            .add(egui::Button::new(format!("{TRASH} Eliminar base de datos")).fill(
                                 egui::Color32::from_rgb(180, 40, 40),
                             ))
                             .clicked()
@@ -410,16 +411,16 @@ pub fn show(
         }
 
         server_ch.header_response.context_menu(|ui| {
-            if ui.button("➕ Crear base de datos").clicked() {
+            if ui.button(format!("{PLUS} Crear base de datos")).clicked() {
                 *action.borrow_mut() = SidebarAction::CreateDatabase;
                 ui.close();
             }
             ui.separator();
-            if ui.button("🔄 Refrescar").clicked() {
+            if ui.button(format!("{REFRESH} Refrescar")).clicked() {
                 *action.borrow_mut() = SidebarAction::Refresh;
                 ui.close();
             }
-            if ui.button("⏏ Desconectar").clicked() {
+            if ui.button(format!("{PLUG} Desconectar")).clicked() {
                 *action.borrow_mut() = SidebarAction::Disconnect;
                 ui.close();
             }

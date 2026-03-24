@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::ui::icons::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActiveTab {
     #[default]
@@ -49,25 +51,25 @@ pub fn show(
     // Row 1: main context tabs + SQL tabs, all wrapping
     ui.horizontal_wrapped(|ui| {
         // Servidor tab
-        let srv_label = format!("🖥 {}", clip_text(server_name, 18));
+        let srv_label = format!("{DATABASE} {}", clip_text(server_name, 18));
         if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true) {
             result.tab_clicked = Some(ActiveTab::Servidor);
         }
 
         // BBDD tab
-        let db_label = format!("💾 {}", clip_text(db_name.unwrap_or("BBDD"), 18));
+        let db_label = format!("{DATABASE} {}", clip_text(db_name.unwrap_or("BBDD"), 18));
         if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db) {
             result.tab_clicked = Some(ActiveTab::Bbdd);
         }
 
         // Estructura tab
-        let struct_label = format!("📋 {}", clip_text(table_name.unwrap_or("Estructura"), 18));
+        let struct_label = format!("{EDIT} {}", clip_text(table_name.unwrap_or("Estructura"), 18));
         if tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table) {
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
         // Datos tab
-        let datos_label = format!("📊 {}", clip_text(table_name.unwrap_or("Datos"), 18));
+        let datos_label = format!("{GRID} {}", clip_text(table_name.unwrap_or("Datos"), 18));
         if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table) {
             result.tab_clicked = Some(ActiveTab::Datos);
         }
@@ -77,7 +79,7 @@ pub fn show(
         // SQL tabs
         for i in 0..sql_tab_count {
             let is_active = active == ActiveTab::Sql(i);
-            let label = format!("📝 SQL {}", i + 1);
+            let label = format!("{CODE} SQL {}", i + 1);
             if tab_btn(ui, &label, is_active, true) {
                 result.tab_clicked = Some(ActiveTab::Sql(i));
             }
@@ -102,7 +104,7 @@ pub fn show(
     // Row 2: pinned tabs (only if any)
     if !pinned_tables.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.label("📌");
+            ui.label(PIN_FILLED);
             for (i, (_db, table)) in pinned_tables.iter().enumerate() {
                 let is_active = active == ActiveTab::Pinned(i);
                 let has_changes = pinned_pending_counts.get(i).copied().unwrap_or(0) > 0;

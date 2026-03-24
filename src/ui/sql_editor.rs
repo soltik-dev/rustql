@@ -44,7 +44,7 @@ pub fn show(
 
         ui.separator();
         ui.label("SQL libre:");
-        if ui.button("▶ Ejecutar  F9").clicked() || f9_pressed {
+        if ui.button(format!("{} Ejecutar  F9", crate::ui::icons::CODE)).clicked() || f9_pressed {
             let sql = sql_text.trim().to_string();
             if !sql.is_empty() {
                 action = SqlEditorAction::Execute {

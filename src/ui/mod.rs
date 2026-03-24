@@ -1,3 +1,4 @@
+pub mod icons;
 pub mod connection_panel;
 pub mod db_info;
 pub mod filter_bar;

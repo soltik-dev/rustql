@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::settings::{AppSettings, CopyFormat, Theme};
+use crate::settings::{self, AppSettings, CopyFormat, Theme};
 
 /// Devuelve true si algún ajuste cambió este frame.
 pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
@@ -21,6 +21,27 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     changed |= ui
         .radio_value(&mut settings.theme, Theme::Dark, "Oscuro")
         .changed();
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    ui.label("Fuente:");
+    let available_fonts = settings::available_system_fonts();
+    if available_fonts.is_empty() {
+        ui.label(egui::RichText::new("No se encontraron fuentes del sistema").weak());
+    } else {
+        egui::ComboBox::from_id_salt("font_family")
+            .selected_text(&settings.font_family)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for (name, _) in &available_fonts {
+                    changed |= ui
+                        .selectable_value(&mut settings.font_family, name.clone(), name)
+                        .changed();
+                }
+            });
+    }
 
     ui.add_space(12.0);
     ui.separator();

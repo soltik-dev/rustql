@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::ui::icons::*;
+
 // ── Tipos de datos para formularios ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
@@ -398,7 +400,7 @@ fn show_create_table(
                 columns.remove(idx);
             }
 
-            if ui.button("+ Añadir columna").clicked() {
+            if ui.button(format!("{PLUS} Añadir columna")).clicked() {
                 columns.push(NewColumnDef::new());
             }
 
@@ -706,14 +708,14 @@ fn show_confirm_switch_table(
             ui.label(format!("¿Qué quieres hacer antes de abrir «{}.{}»?", new_db, new_table));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("💾  Guardar y cambiar").clicked() {
+                if ui.button(format!("{CLONE} Guardar y cambiar")).clicked() {
                     action = ModalAction::ApplyAndSwitch {
                         new_db: new_db.to_string(),
                         new_table: new_table.to_string(),
                     };
                 }
                 if ui
-                    .add(egui::Button::new("🗑  Descartar y cambiar")
+                    .add(egui::Button::new(format!("{TRASH}  Descartar y cambiar"))
                         .fill(egui::Color32::from_rgb(180, 120, 40)))
                     .clicked()
                 {
@@ -756,7 +758,7 @@ fn show_confirm_delete_row(
             ui.label("Esta acción no se puede deshacer.");
             ui.separator();
             ui.horizontal(|ui| {
-                if red_btn(ui, "🗑  Eliminar") {
+                if red_btn(ui, &format!("{TRASH}  Eliminar")) {
                     action = ModalAction::DeleteRow {
                         db: db.to_string(),
                         table: table.to_string(),
@@ -828,7 +830,7 @@ fn show_insert_row(
             }
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("➕  Insertar").clicked() {
+                if ui.button(format!("{PLUS}  Insertar")).clicked() {
                     action = ModalAction::InsertRow {
                         db: db.to_string(),
                         table: table.to_string(),
@@ -891,7 +893,7 @@ fn show_clone_table(
             }
             ui.separator();
             ui.horizontal(|ui| {
-                let ok = ui.add_enabled(!new_name.is_empty(), egui::Button::new("🗒  Clonar")).clicked();
+                let ok = ui.add_enabled(!new_name.is_empty(), egui::Button::new(format!("{CLONE}  Clonar"))).clicked();
                 if ok {
                     action = ModalAction::CloneTable {
                         db: db.to_string(),

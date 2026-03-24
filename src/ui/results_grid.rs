@@ -122,13 +122,13 @@ pub fn show_apply_bar(
             if pending_deletes > 0 {
                 ui.colored_label(
                     egui::Color32::from_rgb(200, 80, 80),
-                    format!("🗑 {} eliminación(es)", pending_deletes),
+                    format!("{} {} eliminación(es)", crate::ui::icons::TRASH, pending_deletes),
                 );
             }
             if pending_inserts > 0 {
                 ui.colored_label(
                     egui::Color32::from_rgb(80, 180, 80),
-                    format!("➕ {} inserción(es)", pending_inserts),
+                    format!("{} {} inserción(es)", crate::ui::icons::PLUS, pending_inserts),
                 );
             }
         }

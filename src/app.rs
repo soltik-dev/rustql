@@ -987,6 +987,7 @@ impl eframe::App for RustqlApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Aplicar ajustes si cambiaron
         if self.ui.settings_dirty {
+            settings::setup_fonts(ctx, &self.ui.settings);
             settings::apply(ctx, &self.ui.settings);
             settings::save(&self.ui.settings);
             self.ui.settings_dirty = false;
