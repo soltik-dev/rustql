@@ -1371,9 +1371,17 @@ fn render_export_done(
     destination:  &ExportDestination,
 ) -> ModalAction {
     let mut action = ModalAction::None;
+    let error_count = tables.iter()
+        .filter(|t| t.selected && matches!(t.state, TableExportState::Error(_)))
+        .count();
 
-    ui.add(egui::ProgressBar::new(1.0)
-        .text("✓ Completado"));
+    if error_count == 0 {
+        ui.add(egui::ProgressBar::new(1.0).text("✓ Completado"));
+    } else {
+        ui.add(egui::ProgressBar::new(1.0)
+            .text(format!("⚠ Completado con {error_count} errores"))
+            .fill(egui::Color32::from_rgb(160, 110, 30)));
+    }
     ui.add_space(6.0);
 
     ui.scope(|ui| {
@@ -1399,6 +1407,10 @@ fn render_export_done(
                                 if let TableExportState::Done { rows } = &entry.state {
                                     ui.label(egui::RichText::new(format_rows(*rows)).color(egui::Color32::GRAY).small());
                                 }
+                                if let TableExportState::Error(e) = &entry.state {
+                                    ui.label(egui::RichText::new(e).color(egui::Color32::RED).small())
+                                        .on_hover_text(e);
+                                }
                             });
                         }
                     });
@@ -1407,9 +1419,17 @@ fn render_export_done(
             strip.cell(|ui| { ui.separator(); });
 
             strip.cell(|ui| {
-                ui.label(egui::RichText::new("Exportación completada").color(egui::Color32::GREEN).strong());
+                if error_count == 0 {
+                    ui.label(egui::RichText::new("Exportación completada").color(egui::Color32::GREEN).strong());
+                } else {
+                    ui.label(egui::RichText::new("Exportación completada con errores").color(egui::Color32::ORANGE).strong());
+                }
                 ui.add_space(8.0);
                 ui.label(format!("Tablas: {total_tables}"));
+                if error_count > 0 {
+                    ui.label(egui::RichText::new(format!("Con error: {error_count} (detalle en el log)"))
+                        .color(egui::Color32::RED));
+                }
                 ui.label(format!("Filas:  {}", format_rows(total_rows)));
                 ui.label(format!("Tiempo: {:.1}s", elapsed_ms as f64 / 1000.0));
                 ui.add_space(8.0);

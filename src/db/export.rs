@@ -3,6 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use mysql::PooledConn;
+use mysql::prelude::Queryable;
+
 use super::{ConnectionParams, escape_ident, escape_sql};
 use super::mysql::MysqlBackend;
 use super::DbBackend;
@@ -233,6 +236,13 @@ fn export_to_same_server_db(
     backend.execute_query(&create_db_sql)
         .map_err(|e| format!("No se pudo crear la base de datos '{target_db}': {e}"))?;
 
+    // Una única conexión para toda la copia: FOREIGN_KEY_CHECKS es de sesión
+    // (el pool puede resetearla entre queries) y sin ella el orden de las
+    // tablas con claves foráneas hace fallar CREATE/INSERT.
+    let mut conn = backend.conn()?;
+    conn.query_drop("SET FOREIGN_KEY_CHECKS = 0")
+        .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
+
     let mut total_rows = 0u64;
     let mut done = 0usize;
 
@@ -243,7 +253,7 @@ fn export_to_same_server_db(
 
         let _ = tx.send(ExportEvent::TableStarted(table.clone()));
 
-        let result = copy_table_same_server(backend, source_db, table, target_db, options);
+        let result = copy_table_same_server(&mut conn, source_db, table, target_db, options);
         match result {
             Ok(rows) => {
                 total_rows += rows;
@@ -260,7 +270,7 @@ fn export_to_same_server_db(
 }
 
 fn copy_table_same_server(
-    backend:   &MysqlBackend,
+    conn:      &mut PooledConn,
     source_db: &str,
     table:     &str,
     target_db: &str,
@@ -270,31 +280,22 @@ fn copy_table_same_server(
     let dst = format!("`{}`.`{}`", escape_ident(target_db), escape_ident(table));
 
     if options.drop_if_exists {
-        backend.execute_query(&format!("DROP TABLE IF EXISTS {dst}"))
+        conn.query_drop(format!("DROP TABLE IF EXISTS {dst}"))
             .map_err(|e| format!("DROP TABLE: {e}"))?;
     }
 
     if options.include_create {
-        backend.execute_query(&format!("CREATE TABLE {dst} LIKE {src}"))
+        conn.query_drop(format!("CREATE TABLE {dst} LIKE {src}"))
             .map_err(|e| format!("CREATE TABLE LIKE: {e}"))?;
     }
 
-    let rows = if options.include_data {
-        let _result = backend.execute_query(&format!("INSERT INTO {dst} SELECT * FROM {src}"))
-            .map_err(|e| format!("INSERT INTO ... SELECT: {e}"))?;
-        // INSERT INTO ... SELECT no devuelve filas, consultamos el conteo
-        let count_result = backend.execute_query(&format!("SELECT COUNT(*) FROM {dst}"))
-            .map_err(|e| format!("COUNT(*): {e}"))?;
-        count_result.rows.first()
-            .and_then(|r| r.first())
-            .and_then(|v| v.as_deref())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    if !options.include_data {
+        return Ok(0);
+    }
 
-    Ok(rows)
+    conn.query_drop(format!("INSERT INTO {dst} SELECT * FROM {src}"))
+        .map_err(|e| format!("INSERT INTO ... SELECT: {e}"))?;
+    Ok(conn.affected_rows())
 }
 
 // ── Exportar a otro servidor ───────────────────────────────────────────────────
@@ -314,6 +315,12 @@ fn export_to_remote(
     dst_backend.execute_query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", escape_ident(target_db)))
         .map_err(|e| format!("No se pudo crear la BBDD destino '{target_db}': {e}"))?;
 
+    // Sesión estable en destino con FOREIGN_KEY_CHECKS desactivado (ver
+    // export_to_same_server_db).
+    let mut dst_conn = dst_backend.conn()?;
+    dst_conn.query_drop("SET FOREIGN_KEY_CHECKS = 0")
+        .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
+
     let mut total_rows = 0u64;
     let mut done = 0usize;
 
@@ -324,7 +331,7 @@ fn export_to_remote(
 
         let _ = tx.send(ExportEvent::TableStarted(table.clone()));
 
-        let result = copy_table_remote(src_backend, dst_backend, source_db, table, target_db, options);
+        let result = copy_table_remote(src_backend, &mut dst_conn, source_db, table, target_db, options);
         match result {
             Ok(rows) => {
                 total_rows += rows;
@@ -342,7 +349,7 @@ fn export_to_remote(
 
 fn copy_table_remote(
     src:       &MysqlBackend,
-    dst:       &MysqlBackend,
+    dst_conn:  &mut PooledConn,
     source_db: &str,
     table:     &str,
     target_db: &str,
@@ -351,7 +358,7 @@ fn copy_table_remote(
     let dst_ref = format!("`{}`.`{}`", escape_ident(target_db), escape_ident(table));
 
     if options.drop_if_exists {
-        dst.execute_query(&format!("DROP TABLE IF EXISTS {dst_ref}"))
+        dst_conn.query_drop(format!("DROP TABLE IF EXISTS {dst_ref}"))
             .map_err(|e| format!("DROP TABLE: {e}"))?;
     }
 
@@ -362,7 +369,7 @@ fn copy_table_remote(
             &format!("`{}`", escape_ident(table)),
             &format!("`{}`.`{}`", escape_ident(target_db), escape_ident(table)),
         );
-        dst.execute_query(&dst_ddl)
+        dst_conn.query_drop(dst_ddl)
             .map_err(|e| format!("CREATE TABLE en destino: {e}"))?;
     }
 
@@ -404,7 +411,7 @@ fn copy_table_remote(
             .join(", ");
 
         let insert_sql = format!("INSERT INTO {dst_ref} ({col_list}) VALUES {values_list}");
-        dst.execute_query(&insert_sql)
+        dst_conn.query_drop(insert_sql)
             .map_err(|e| format!("INSERT batch: {e}"))?;
     }
 

@@ -756,8 +756,11 @@ impl RustqlApp {
     }
 
     /// Consume eventos del hilo de exportación y actualiza el estado del modal.
+    /// Los errores también se registran en el log de consultas para que quede
+    /// constancia después de cerrar el modal.
     fn poll_export_progress(&mut self, ctx: &egui::Context) {
         let mut new_phase: Option<ExportPhase> = None;
+        let mut log_entries: Vec<LogEntry> = Vec::new();
 
         {
             let ModalState::ExportData { tables, phase, .. } = &mut self.ui.modal else { return };
@@ -778,12 +781,20 @@ impl RustqlApp {
                         running.rows_done += rows;
                     }
                     Ok(ExportEvent::TableError { table, error }) => {
+                        log_entries.push(LogEntry::err(
+                            format!("Export `{table}`"), 0, error.as_str(),
+                        ));
                         if let Some(e) = tables.iter_mut().find(|e| e.name == table) {
                             e.state = TableExportState::Error(error);
                         }
                         running.done_count += 1;
                     }
                     Ok(ExportEvent::Finished { total_tables, total_rows, elapsed_ms }) => {
+                        log_entries.push(LogEntry::ok(
+                            format!("Exportación finalizada: {total_tables} tablas"),
+                            elapsed_ms,
+                            total_rows as usize,
+                        ));
                         new_phase = Some(ExportPhase::Done { total_tables, total_rows, elapsed_ms });
                         break;
                     }
@@ -792,6 +803,7 @@ impl RustqlApp {
                         break;
                     }
                     Ok(ExportEvent::Failed(error)) => {
+                        log_entries.push(LogEntry::err("Exportación", 0, error.as_str()));
                         new_phase = Some(ExportPhase::Failed(error));
                         break;
                     }
@@ -807,6 +819,10 @@ impl RustqlApp {
                     }
                 }
             }
+        }
+
+        for entry in log_entries {
+            self.push_log(entry);
         }
 
         if let Some(p) = new_phase

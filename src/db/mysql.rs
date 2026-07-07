@@ -91,7 +91,9 @@ impl MysqlBackend {
 
     /// Obtiene una conexión del pool. Si la conexión previa había muerto,
     /// el pool crea una nueva automáticamente.
-    fn conn(&self) -> DbResult<PooledConn> {
+    /// `pub(super)` para que export.rs pueda mantener una sesión estable
+    /// (variables como FOREIGN_KEY_CHECKS no sobreviven al pool).
+    pub(super) fn conn(&self) -> DbResult<PooledConn> {
         self.pool
             .get_conn()
             .map_err(|e| format!("Sin conexión con el servidor: {e}"))
