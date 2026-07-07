@@ -1045,6 +1045,9 @@ fn show_export_data(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
+            // Ancho fijo: sin esto, las fases con StripBuilder pueden recibir
+            // un ancho no acotado del auto-size y propagar NaN al layout.
+            ui.set_width(600.0);
             match phase {
                 ExportPhase::Configuring => {
                     action = render_export_config(
@@ -1294,8 +1297,7 @@ fn render_export_running(
 
     // Barra de progreso
     ui.add(egui::ProgressBar::new(fraction)
-        .text(format!("{}/{} tablas", running.done_count, total))
-        .desired_width(f32::INFINITY));
+        .text(format!("{}/{} tablas", running.done_count, total)));
     ui.add_space(6.0);
 
     ui.scope(|ui| {
@@ -1371,8 +1373,7 @@ fn render_export_done(
     let mut action = ModalAction::None;
 
     ui.add(egui::ProgressBar::new(1.0)
-        .text("✓ Completado")
-        .desired_width(f32::INFINITY));
+        .text("✓ Completado"));
     ui.add_space(6.0);
 
     ui.scope(|ui| {
@@ -1434,8 +1435,7 @@ fn render_export_cancelled(
     let mut action = ModalAction::None;
 
     ui.add(egui::ProgressBar::new(0.0)
-        .text("✗ Cancelado")
-        .desired_width(f32::INFINITY));
+        .text("✗ Cancelado"));
     ui.add_space(6.0);
 
     egui::ScrollArea::vertical()
@@ -1467,8 +1467,7 @@ fn render_export_failed(ui: &mut egui::Ui, error: &str) -> ModalAction {
     let mut action = ModalAction::None;
 
     ui.add(egui::ProgressBar::new(0.0)
-        .text("✗ Error")
-        .desired_width(f32::INFINITY));
+        .text("✗ Error"));
     ui.add_space(6.0);
 
     ui.label(egui::RichText::new("La exportación falló:").color(egui::Color32::RED).strong());

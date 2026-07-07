@@ -12,6 +12,10 @@ use app::RustqlApp;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    // Muestra en stderr los errores de las dependencias (rfd, eframe, …),
+    // que usan el crate `log` y sin logger se pierden en silencio.
+    env_logger::init();
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 680.0])
