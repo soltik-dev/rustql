@@ -61,7 +61,7 @@ pub fn show(
 
     // Editor
     let available = ui.available_size();
-    let editor_height = (available.y * 0.35).max(80.0).min(300.0);
+    let editor_height = (available.y * 0.35).clamp(80.0, 300.0);
 
     ui.add_sized(
         [available.x, editor_height],

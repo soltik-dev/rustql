@@ -189,8 +189,8 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         .or_else(|| available.first())
         .map(|(_, path)| path.clone());
 
-    if let Some(path) = chosen_path {
-        if let Ok(data) = std::fs::read(&path) {
+    if let Some(path) = chosen_path
+        && let Ok(data) = std::fs::read(&path) {
             fonts.font_data.insert(
                 "system_font".to_owned(),
                 egui::FontData::from_owned(data).into(),
@@ -201,7 +201,6 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
                 .unwrap()
                 .insert(1, "system_font".to_owned());
         }
-    }
 
     // 3. Emoji/símbolo como último fallback
     for path in emoji_candidates {

@@ -2,7 +2,7 @@ use mysql::{Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Valu
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, TableInfo,
-    escape_sql, validate_charset,
+    escape_ident, escape_sql, validate_charset,
 };
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -106,7 +106,7 @@ impl DbBackend for MysqlBackend {
     }
 
     fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
-        let query = format!("SHOW TABLES FROM `{}`", escape_sql(database));
+        let query = format!("SHOW TABLES FROM `{}`", escape_ident(database));
         self.conn()?
             .query(query)
             .map_err(|e| format!("Error en query: {e}"))
@@ -223,22 +223,22 @@ impl DbBackend for MysqlBackend {
         validate_charset(charset)?;
         let sql = format!(
             "CREATE DATABASE `{}` CHARACTER SET {}",
-            name.replace('`', "``"),
+            escape_ident(name),
             charset
         );
         self.execute_write(&sql).map(|_| ())
     }
 
     fn drop_database(&mut self, name: &str) -> DbResult<()> {
-        let sql = format!("DROP DATABASE `{}`", name.replace('`', "``"));
+        let sql = format!("DROP DATABASE `{}`", escape_ident(name));
         self.execute_write(&sql).map(|_| ())
     }
 
     fn drop_table(&mut self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!(
             "DROP TABLE `{}`.`{}`",
-            db.replace('`', "``"),
-            table.replace('`', "``")
+            escape_ident(db),
+            escape_ident(table)
         );
         self.execute_write(&sql).map(|_| ())
     }
@@ -246,8 +246,8 @@ impl DbBackend for MysqlBackend {
     fn truncate_table(&mut self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!(
             "TRUNCATE TABLE `{}`.`{}`",
-            db.replace('`', "``"),
-            table.replace('`', "``")
+            escape_ident(db),
+            escape_ident(table)
         );
         self.execute_write(&sql).map(|_| ())
     }

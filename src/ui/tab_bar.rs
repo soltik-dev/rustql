@@ -31,6 +31,7 @@ fn clip_text(s: &str, max_chars: usize) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     active: ActiveTab,

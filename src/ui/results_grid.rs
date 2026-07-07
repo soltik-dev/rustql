@@ -181,12 +181,14 @@ fn paint_text_truncated(
 ) {
     use egui::text::{LayoutJob, TextFormat};
     let font_id = egui::TextStyle::Body.resolve(ui.style());
-    let mut job = LayoutJob::default();
-    job.wrap = egui::text::TextWrapping {
-        max_width: clip_width,
-        max_rows: 1,
-        break_anywhere: false,
-        overflow_character: Some('…'),
+    let mut job = LayoutJob {
+        wrap: egui::text::TextWrapping {
+            max_width: clip_width,
+            max_rows: 1,
+            break_anywhere: false,
+            overflow_character: Some('…'),
+        },
+        ..Default::default()
     };
     job.append(text, 0.0, TextFormat {
         font_id,
@@ -440,11 +442,10 @@ pub fn show(
             } else {
                 sort_indices.get(sel_row).copied().unwrap_or(sel_row)
             };
-            if let Some(row) = data.rows.get(real_idx) {
-                if let Some(cell) = row.get(sel_col) {
+            if let Some(row) = data.rows.get(real_idx)
+                && let Some(cell) = row.get(sel_col) {
                     ui.ctx().copy_text(cell.as_deref().unwrap_or("").to_string());
                 }
-            }
         }
     }
 
@@ -614,7 +615,7 @@ pub fn show(
                     let is_selected_row = selected_rows.contains(&real_idx) && !is_pending_delete;
                     let row_modified = pending_edits.iter().any(|e| e.row_idx == real_idx);
 
-                    for col_i in 0..col_count {
+                    for (col_i, cell_opt) in row_data.iter().enumerate().take(col_count) {
                         row.col(|ui| {
                             let is_editing = edit_cell_rc
                                 .borrow()
@@ -737,7 +738,6 @@ pub fn show(
                                 }
                             } else {
                                 // ── Celda normal ──────────────────────────────
-                                let cell_opt = &row_data[col_i];
                                 let is_null_cell = cell_opt.is_none();
                                 let cell_text = cell_opt.as_deref().unwrap_or("").to_string();
 
