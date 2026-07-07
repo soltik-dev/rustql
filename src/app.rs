@@ -815,6 +815,29 @@ impl RustqlApp {
             }
     }
 
+    /// Tablas de una BBDD para el modal de exportación: usa la caché del
+    /// sidebar o, si el árbol aún no se expandió, las pide al backend.
+    fn export_tables_for(&mut self, db: &str) -> Vec<String> {
+        if let Some(tables) = self.schema.tables_cache.get(db) {
+            return tables.clone();
+        }
+        let AppState::Connected(backend) = &self.state else {
+            return Vec::new();
+        };
+        match backend.list_tables(db) {
+            Ok(tables) => {
+                self.schema.tables_cache.insert(db.to_string(), tables.clone());
+                tables
+            }
+            Err(e) => {
+                self.push_log(LogEntry::err(
+                    format!("SHOW TABLES FROM `{db}`"), 0, e.as_str(),
+                ));
+                Vec::new()
+            }
+        }
+    }
+
     /// Procesa la acción resultante del modal activo.
     fn handle_modal_action(&mut self, modal_action: ModalAction) {
         match modal_action {
@@ -2225,7 +2248,7 @@ impl eframe::App for RustqlApp {
                 };
             }
             SidebarAction::ExportDatabase(db) => {
-                let tables = self.schema.tables_cache.get(&db).cloned().unwrap_or_default();
+                let tables = self.export_tables_for(&db);
                 let dbs = self.schema.databases.clone();
                 let profiles = self.profiles.clone();
                 self.ui.modal = ModalState::ExportData {
@@ -2244,14 +2267,21 @@ impl eframe::App for RustqlApp {
                 };
             }
             SidebarAction::ExportTable { db, table } => {
+                // Mostrar todas las tablas de la BBDD con solo la pulsada marcada.
+                let mut names = self.export_tables_for(&db);
+                if names.is_empty() {
+                    names.push(table.clone());
+                }
                 let dbs = self.schema.databases.clone();
                 let profiles = self.profiles.clone();
                 self.ui.modal = ModalState::ExportData {
                     source_db:      db,
                     source_table:   Some(table.clone()),
-                    tables:         vec![TableExportEntry {
-                        name: table, selected: true, state: TableExportState::Pending,
-                    }],
+                    tables:         names.into_iter().map(|n| TableExportEntry {
+                        selected: n == table,
+                        name: n,
+                        state: TableExportState::Pending,
+                    }).collect(),
                     databases:      dbs,
                     profiles,
                     destination:    ExportDestination::SqlFile { path: String::new() },
