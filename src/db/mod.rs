@@ -1,4 +1,7 @@
 pub mod mysql;
+pub mod export;
+
+pub use export::{ExportDestination, ExportEvent, ExportOptions};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {

@@ -4,16 +4,23 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::db::{
     ColumnInfo, ConnectionParams, ConnectEvent, DatabaseInfo, DbBackend, QueryResult, TableInfo,
     connect_mysql_progress, escape_ident, escape_sql,
+    ExportDestination, ExportEvent, ExportOptions,
 };
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnectionProfile};
 use crate::settings::{self, AppSettings, SavedSqlTab};
 use crate::table_state::{self, TableStates};
 use crate::ui::db_info::DbInfoAction;
-use crate::ui::modals::{self, DropKind, ModalAction, ModalState, NewColumnDef, TruncateKind};
+use crate::ui::modals::{
+    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState,
+    NewColumnDef, TableExportEntry, TableExportState, TruncateKind,
+};
 use crate::ui::results_grid::{EditingCell, GridAction, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec};
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
@@ -748,6 +755,66 @@ impl RustqlApp {
         }
     }
 
+    /// Consume eventos del hilo de exportación y actualiza el estado del modal.
+    fn poll_export_progress(&mut self, ctx: &egui::Context) {
+        let mut new_phase: Option<ExportPhase> = None;
+
+        {
+            let ModalState::ExportData { tables, phase, .. } = &mut self.ui.modal else { return };
+            let ExportPhase::Running(running) = phase else { return };
+
+            loop {
+                match running.receiver.try_recv() {
+                    Ok(ExportEvent::TableStarted(name)) => {
+                        if let Some(e) = tables.iter_mut().find(|e| e.name == name) {
+                            e.state = TableExportState::InProgress;
+                        }
+                    }
+                    Ok(ExportEvent::TableDone { table, rows }) => {
+                        if let Some(e) = tables.iter_mut().find(|e| e.name == table) {
+                            e.state = TableExportState::Done { rows };
+                        }
+                        running.done_count += 1;
+                        running.rows_done += rows;
+                    }
+                    Ok(ExportEvent::TableError { table, error }) => {
+                        if let Some(e) = tables.iter_mut().find(|e| e.name == table) {
+                            e.state = TableExportState::Error(error);
+                        }
+                        running.done_count += 1;
+                    }
+                    Ok(ExportEvent::Finished { total_tables, total_rows, elapsed_ms }) => {
+                        new_phase = Some(ExportPhase::Done { total_tables, total_rows, elapsed_ms });
+                        break;
+                    }
+                    Ok(ExportEvent::Cancelled) => {
+                        new_phase = Some(ExportPhase::Cancelled);
+                        break;
+                    }
+                    Ok(ExportEvent::Failed(error)) => {
+                        new_phase = Some(ExportPhase::Failed(error));
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        new_phase = Some(ExportPhase::Failed(
+                            "El hilo de exportación terminó de forma inesperada.".to_string(),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(p) = new_phase
+            && let ModalState::ExportData { phase, .. } = &mut self.ui.modal {
+                *phase = p;
+            }
+    }
+
     /// Procesa la acción resultante del modal activo.
     fn handle_modal_action(&mut self, modal_action: ModalAction) {
         match modal_action {
@@ -979,6 +1046,33 @@ impl RustqlApp {
                     }
                 }
             }
+            ModalAction::StartExport { source_db, tables, destination, options } => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let rx = crate::db::export::spawn_export(
+                    self.params.clone(),
+                    source_db,
+                    tables,
+                    destination,
+                    options,
+                    Arc::clone(&cancel),
+                );
+                if let ModalState::ExportData { phase, .. } = &mut self.ui.modal {
+                    *phase = ExportPhase::Running(ExportRunning {
+                        receiver:    rx,
+                        cancel_flag: cancel,
+                        rows_done:   0,
+                        done_count:  0,
+                    });
+                }
+            }
+            ModalAction::CancelExport => {
+                if let ModalState::ExportData { phase: ExportPhase::Running(running), .. } = &mut self.ui.modal {
+                    running.cancel_flag.store(true, Ordering::Relaxed);
+                }
+            }
+            ModalAction::CloseExport => {
+                self.ui.modal = ModalState::None;
+            }
         }
     }
 }
@@ -1006,6 +1100,7 @@ impl eframe::App for RustqlApp {
         // ── Polling de hilos de fondo ─────────────────────────────────────
         self.poll_connection(ctx);
         self.poll_query_receiver(ctx);
+        self.poll_export_progress(ctx);
 
         // Snapshot de visibilidad de paneles para detectar cambios
         let (prev_sidebar, prev_log) = (self.ui.show_sidebar, self.ui.show_log);
@@ -2126,6 +2221,43 @@ impl eframe::App for RustqlApp {
                     new_name: String::new(),
                     copy_data: true,
                     error: None,
+                };
+            }
+            SidebarAction::ExportDatabase(db) => {
+                let tables = self.schema.tables_cache.get(&db).cloned().unwrap_or_default();
+                let dbs = self.schema.databases.clone();
+                let profiles = self.profiles.clone();
+                self.ui.modal = ModalState::ExportData {
+                    source_db:      db,
+                    source_table:   None,
+                    tables:         tables.into_iter().map(|n| TableExportEntry {
+                        name: n, selected: true, state: TableExportState::Pending,
+                    }).collect(),
+                    databases:      dbs,
+                    profiles,
+                    destination:    ExportDestination::SqlFile { path: String::new() },
+                    target_db_name: String::new(),
+                    profile_idx:    0,
+                    options:        ExportOptions::default(),
+                    phase:          ExportPhase::Configuring,
+                };
+            }
+            SidebarAction::ExportTable { db, table } => {
+                let dbs = self.schema.databases.clone();
+                let profiles = self.profiles.clone();
+                self.ui.modal = ModalState::ExportData {
+                    source_db:      db,
+                    source_table:   Some(table.clone()),
+                    tables:         vec![TableExportEntry {
+                        name: table, selected: true, state: TableExportState::Pending,
+                    }],
+                    databases:      dbs,
+                    profiles,
+                    destination:    ExportDestination::SqlFile { path: String::new() },
+                    target_db_name: String::new(),
+                    profile_idx:    0,
+                    options:        ExportOptions::default(),
+                    phase:          ExportPhase::Configuring,
                 };
             }
         }

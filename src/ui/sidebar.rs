@@ -36,9 +36,12 @@ pub enum SidebarAction {
     OpenTableStructure { db: String, table: String },
     OpenInSql { db: String, table: String },
     CloneTable { db: String, table: String },
+    ExportDatabase(String),
+    ExportTable { db: String, table: String },
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     backend: Option<&dyn DbBackend>,
@@ -90,8 +93,8 @@ pub fn show(
     });
     ui.separator();
 
-    if databases.is_empty() {
-        if let Some(b) = backend {
+    if databases.is_empty()
+        && let Some(b) = backend {
             match b.list_databases() {
                 Ok(dbs) => *databases = dbs,
                 Err(e) => {
@@ -100,7 +103,6 @@ pub fn show(
                 }
             }
         }
-    }
 
     let filter = table_search.to_lowercase();
     let filtering = !filter.is_empty();
@@ -119,13 +121,11 @@ pub fn show(
             .default_open(true)
             .show(ui, |ui| {
                 for db in &dbs {
-                    if filtering && !tables_cache.contains_key(db) {
-                        if let Some(b) = backend {
-                            if let Ok(tables) = b.list_tables(db) {
+                    if filtering && !tables_cache.contains_key(db)
+                        && let Some(b) = backend
+                            && let Ok(tables) = b.list_tables(db) {
                                 tables_cache.insert(db.clone(), tables);
                             }
-                        }
-                    }
 
                     let matching: Vec<String> = if filtering {
                         tables_cache
@@ -164,8 +164,8 @@ pub fn show(
                     .default_open(false)
                     .open(open)
                     .show(ui, |ui: &mut egui::Ui| {
-                        if !filtering && !tables_cache.contains_key(db) {
-                            if let Some(b) = backend {
+                        if !filtering && !tables_cache.contains_key(db)
+                            && let Some(b) = backend {
                                 match b.list_tables(db) {
                                     Ok(tables) => { tables_cache.insert(db.clone(), tables); }
                                     Err(e) => {
@@ -174,7 +174,6 @@ pub fn show(
                                     }
                                 }
                             }
-                        }
 
                         let tables: Vec<String> = {
                             let base = if filtering {
@@ -351,6 +350,13 @@ pub fn show(
                                     };
                                     ui.close();
                                 }
+                                if ui.button(format!("{EXPORT} Exportar tabla")).clicked() {
+                                    *action.borrow_mut() = SidebarAction::ExportTable {
+                                        db: db_clone.clone(),
+                                        table: table_clone.clone(),
+                                    };
+                                    ui.close();
+                                }
                                 ui.separator();
                                 if ui.button(format!("{TRASH} Truncar tabla")).clicked() {
                                     *action.borrow_mut() = SidebarAction::TruncateTable {
@@ -384,6 +390,11 @@ pub fn show(
                         if ui.button(format!("{PLUS} Crear tabla")).clicked() {
                             *action.borrow_mut() =
                                 SidebarAction::CreateTable { db: db_clone2.clone() };
+                            ui.close();
+                        }
+                        if ui.button(format!("{EXPORT} Exportar base de datos")).clicked() {
+                            *action.borrow_mut() =
+                                SidebarAction::ExportDatabase(db_clone2.clone());
                             ui.close();
                         }
                         ui.separator();
