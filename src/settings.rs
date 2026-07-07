@@ -307,15 +307,15 @@ pub fn apply(ctx: &egui::Context, s: &AppSettings) {
         Theme::Dark => dark_visuals(),
         Theme::Light => egui::Visuals::light(),
         Theme::System => match dark_light::detect() {
-            dark_light::Mode::Light => egui::Visuals::light(),
+            Ok(dark_light::Mode::Light) => egui::Visuals::light(),
             _ => dark_visuals(),
         },
     };
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     for font_id in style.text_styles.values_mut() {
         font_id.size = s.font_size;
     }
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }

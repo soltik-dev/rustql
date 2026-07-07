@@ -1078,7 +1078,8 @@ impl RustqlApp {
 }
 
 impl eframe::App for RustqlApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         // Aplicar ajustes si cambiaron
         if self.ui.settings_dirty {
             settings::setup_fonts(ctx, &self.ui.settings);
@@ -1140,9 +1141,9 @@ impl eframe::App for RustqlApp {
                 Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
                 _ => None,
             };
-            egui::TopBottomPanel::bottom("statusbar")
-                .exact_height(26.0)
-                .show(ctx, |ui| {
+            egui::Panel::bottom("statusbar")
+                .exact_size(26.0)
+                .show(ui, |ui| {
                     statusbar::show(
                         ui,
                         &mut self.ui.show_sidebar,
@@ -1156,20 +1157,20 @@ impl eframe::App for RustqlApp {
         if matches!(self.state, AppState::Connected(_) | AppState::QueryRunning)
 
             && self.ui.show_log {
-                egui::TopBottomPanel::bottom("log_panel")
+                egui::Panel::bottom("log_panel")
                     .resizable(true)
-                    .min_height(80.0)
-                    .max_height(300.0)
-                    .show(ctx, |ui| {
+                    .min_size(80.0)
+                    .max_size(300.0)
+                    .show(ui, |ui| {
                         log_panel::show(ui, &self.ui.query_log);
                     });
             }
 
         // ── Panel de ajustes (derecha) ───────────────────────────────────
         if self.ui.show_settings {
-            egui::SidePanel::right("settings_panel")
-                .exact_width(240.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("settings_panel")
+                .exact_size(240.0)
+                .show(ui, |ui| {
                     settings_changed = settings_panel::show(ui, &mut self.ui.settings);
                 });
         }
@@ -1177,9 +1178,9 @@ impl eframe::App for RustqlApp {
         // ── Contenido principal según estado ─────────────────────────────
         match &mut self.state {
             AppState::Disconnected => {
-                egui::SidePanel::left("conn_favorites")
-                    .exact_width(200.0)
-                    .show(ctx, |ui| {
+                egui::Panel::left("conn_favorites")
+                    .exact_size(200.0)
+                    .show(ui, |ui| {
                         let (sel, connect_now) = connection_panel::show_favorites(
                             ui,
                             &self.profiles,
@@ -1191,7 +1192,7 @@ impl eframe::App for RustqlApp {
                         }
                     });
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let result = connection_panel::show_form(
                         ui,
                         &mut self.params,
@@ -1211,9 +1212,9 @@ impl eframe::App for RustqlApp {
                 let host = host.clone();
                 let status = status.clone();
                 let elapsed = start.elapsed().as_secs();
-                egui::SidePanel::left("conn_favorites")
-                    .exact_width(200.0)
-                    .show(ctx, |ui| {
+                egui::Panel::left("conn_favorites")
+                    .exact_size(200.0)
+                    .show(ui, |ui| {
                         let _ = connection_panel::show_favorites(
                             ui,
                             &self.profiles,
@@ -1221,7 +1222,7 @@ impl eframe::App for RustqlApp {
                         );
                     });
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     ui.add_space(ui.available_height() / 3.0);
                     ui.vertical_centered(|ui| {
                         ui.spinner();
@@ -1255,10 +1256,10 @@ impl eframe::App for RustqlApp {
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| self.params.host.clone());
 
-                    egui::SidePanel::left("sidebar_v2")
-                        .default_width(200.0)
-                        .min_width(160.0)
-                        .show(ctx, |ui| {
+                    egui::Panel::left("sidebar_v2")
+                        .default_size(200.0)
+                        .min_size(160.0)
+                        .show(ui, |ui| {
                             sidebar_action = sidebar::show(
                                 ui,
                                 Some(backend.as_ref()),
@@ -1317,10 +1318,10 @@ impl eframe::App for RustqlApp {
                         }
                     }).collect();
 
-                    egui::TopBottomPanel::top("tab_bar")
-                        .min_height(30.0)
+                    egui::Panel::top("tab_bar")
+                        .min_size(30.0)
                         .resizable(false)
-                        .show(ctx, |ui| {
+                        .show(ui, |ui| {
                             ui.add_space(2.0);
                             tab_bar_result = tab_bar::show(
                                 ui,
@@ -1346,9 +1347,9 @@ impl eframe::App for RustqlApp {
                     let pk_missing = self.table_view.table_data.is_some()
                         && self.table_view.primary_keys.is_empty()
                         && !self.table_view.pending_edits.is_empty();
-                    egui::TopBottomPanel::bottom("apply_bar")
-                        .exact_height(36.0)
-                        .show(ctx, |ui| {
+                    egui::Panel::bottom("apply_bar")
+                        .exact_size(36.0)
+                        .show(ui, |ui| {
                             apply_bar_action = results_grid::show_apply_bar(
                                 ui,
                                 &self.table_view.pending_edits,
@@ -1361,7 +1362,7 @@ impl eframe::App for RustqlApp {
                 }
 
                 // ── Panel central ─────────────────────────────────────────
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     match self.active_tab {
                         ActiveTab::Servidor => {
                             let dbs = self.schema.databases_info.as_deref().unwrap_or(&[]);
@@ -1499,10 +1500,10 @@ impl eframe::App for RustqlApp {
                         .and_then(|i| self.profiles.get(i))
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| self.params.host.clone());
-                    egui::SidePanel::left("sidebar_v2")
-                        .default_width(200.0)
-                        .min_width(160.0)
-                        .show(ctx, |ui| {
+                    egui::Panel::left("sidebar_v2")
+                        .default_size(200.0)
+                        .min_size(160.0)
+                        .show(ui, |ui| {
                             sidebar_action = sidebar::show(
                                 ui,
                                 None,
@@ -1550,10 +1551,10 @@ impl eframe::App for RustqlApp {
                         if is_current { self.table_view.pending_edits.len() }
                         else { self.pinned_pending_edits.get(&key).map_or(0, |v| v.len()) }
                     }).collect();
-                    egui::TopBottomPanel::top("tab_bar")
-                        .min_height(30.0)
+                    egui::Panel::top("tab_bar")
+                        .min_size(30.0)
                         .resizable(false)
-                        .show(ctx, |ui| {
+                        .show(ui, |ui| {
                             ui.add_space(2.0);
                             tab_bar_result = tab_bar::show(
                                 ui,
@@ -1570,7 +1571,7 @@ impl eframe::App for RustqlApp {
                         });
                 }
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     match self.active_tab {
                         ActiveTab::Datos => {
                             let selected_table = match &self.schema.selected_node {
