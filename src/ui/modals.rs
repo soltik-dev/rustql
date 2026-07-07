@@ -1040,7 +1040,7 @@ fn show_export_data(
 
     egui::Window::new(title)
         .collapsible(false)
-        .resizable(true)
+        .resizable(false)
         .min_size([620.0, 380.0])
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
@@ -1089,7 +1089,11 @@ fn render_export_config(
     let selected_count = tables.iter().filter(|t| t.selected).count();
 
     // ── Layout 2 columnas ──────────────────────────────────────────────────
-    egui_extras::StripBuilder::new(ui)
+    // Altura acotada: el strip llenaría toda la altura disponible y, con el
+    // footer debajo, la ventana auto-crecería en cada frame sin límite.
+    ui.scope(|ui| {
+        ui.set_max_height(350.0);
+        egui_extras::StripBuilder::new(ui)
         .size(egui_extras::Size::exact(190.0))
         .size(egui_extras::Size::exact(8.0))
         .size(egui_extras::Size::remainder())
@@ -1224,6 +1228,7 @@ fn render_export_config(
                 ui.checkbox(&mut options.drop_if_exists, "DROP TABLE IF EXISTS");
             });
         });
+    });
 
     // ── Footer ─────────────────────────────────────────────────────────────
     ui.separator();
@@ -1293,7 +1298,9 @@ fn render_export_running(
         .desired_width(f32::INFINITY));
     ui.add_space(6.0);
 
-    egui_extras::StripBuilder::new(ui)
+    ui.scope(|ui| {
+        ui.set_max_height(260.0);
+        egui_extras::StripBuilder::new(ui)
         .size(egui_extras::Size::exact(220.0))
         .size(egui_extras::Size::exact(8.0))
         .size(egui_extras::Size::remainder())
@@ -1342,6 +1349,7 @@ fn render_export_running(
                 ui.label(format!("Filas exportadas:   {}", format_rows(running.rows_done)));
             });
         });
+    });
 
     ui.separator();
     ui.horizontal(|ui| {
@@ -1367,7 +1375,9 @@ fn render_export_done(
         .desired_width(f32::INFINITY));
     ui.add_space(6.0);
 
-    egui_extras::StripBuilder::new(ui)
+    ui.scope(|ui| {
+        ui.set_max_height(260.0);
+        egui_extras::StripBuilder::new(ui)
         .size(egui_extras::Size::exact(220.0))
         .size(egui_extras::Size::exact(8.0))
         .size(egui_extras::Size::remainder())
@@ -1406,6 +1416,7 @@ fn render_export_done(
                 ui.label(destination_label(destination));
             });
         });
+    });
 
     ui.separator();
     ui.horizontal(|ui| {
