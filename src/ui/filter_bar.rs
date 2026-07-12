@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::ui::theme;
+
 pub enum FilterAction {
     None,
     Apply,
@@ -38,26 +40,29 @@ pub fn show(
                 if filter_history.is_empty() {
                     ui.label("Sin historial");
                 } else {
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        for entry in filter_history {
-                            if ui.selectable_label(false, entry).clicked() {
-                                picked = Some(entry.clone());
-                                egui::Popup::close_id(ui.ctx(), popup_id);
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for entry in filter_history {
+                                if ui.selectable_label(false, entry).clicked() {
+                                    picked = Some(entry.clone());
+                                    egui::Popup::close_id(ui.ctx(), popup_id);
+                                }
                             }
-                        }
-                    });
+                        });
                 }
                 picked
             });
 
         if let Some(inner) = selected
-            && let Some(entry) = inner.inner {
-                *filter_text = entry;
-                action = FilterAction::Apply;
-            }
+            && let Some(entry) = inner.inner
+        {
+            *filter_text = entry;
+            action = FilterAction::Apply;
+        }
 
         // ── Etiqueta + campo de texto ────────────────────────────────────
-        ui.label("WHERE");
+        ui.monospace(egui::RichText::new("WHERE").color(theme::get(ui).sql_keyword));
 
         let resp = ui
             .add(
@@ -72,15 +77,19 @@ pub fn show(
             action = FilterAction::Apply;
         }
 
-        if ui.button("Aplicar  F9").clicked() || f9_pressed {
+        if theme::primary_button(ui, "Aplicar  F9").clicked() || f9_pressed {
             action = FilterAction::Apply;
         }
 
         if !filter_text.is_empty()
-            && ui.button("[x]").on_hover_text("Limpiar filtro").clicked() {
-                filter_text.clear();
-                action = FilterAction::Clear;
-            }
+            && ui
+                .add(egui::Button::new("×").frame(false))
+                .on_hover_text("Limpiar filtro")
+                .clicked()
+        {
+            filter_text.clear();
+            action = FilterAction::Clear;
+        }
     });
 
     action
