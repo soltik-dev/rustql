@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::settings::{self, AppSettings, CopyFormat, Theme};
+use crate::ui::theme;
 
 /// Devuelve true si algún ajuste cambió este frame.
 pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
@@ -11,7 +12,7 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     ui.separator();
     ui.add_space(8.0);
 
-    ui.label("Tema:");
+    theme::section_label(ui, "Tema");
     changed |= ui
         .radio_value(&mut settings.theme, Theme::System, "Sistema (SO)")
         .changed();
@@ -26,43 +27,43 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     ui.separator();
     ui.add_space(8.0);
 
-    ui.label("Fuente:");
+    theme::section_label(ui, "Fuente");
     let available_fonts = settings::available_system_fonts();
-    if available_fonts.is_empty() {
-        ui.label(egui::RichText::new("No se encontraron fuentes del sistema").weak());
-    } else {
-        egui::ComboBox::from_id_salt("font_family")
-            .selected_text(&settings.font_family)
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                for (name, _) in &available_fonts {
-                    changed |= ui
-                        .selectable_value(&mut settings.font_family, name.clone(), name)
-                        .changed();
-                }
-            });
-    }
+    egui::ComboBox::from_id_salt("font_family")
+        .selected_text(&settings.font_family)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(
+                    &mut settings.font_family,
+                    settings::EMBEDDED_FONT_NAME.to_owned(),
+                    settings::EMBEDDED_FONT_NAME,
+                )
+                .changed();
+            for (name, _) in &available_fonts {
+                changed |= ui
+                    .selectable_value(&mut settings.font_family, name.clone(), name)
+                    .changed();
+            }
+        });
 
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
-    ui.label("Tamaño de fuente:");
+    theme::section_label(ui, "Tamaño de fuente");
     changed |= ui
         .add(egui::Slider::new(&mut settings.font_size, 10.0..=22.0).step_by(0.5))
         .changed();
 
     ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new("Texto de muestra / Sample text")
-            .size(settings.font_size),
-    );
+    ui.label(egui::RichText::new("Texto de muestra / Sample text").size(settings.font_size));
 
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
-    ui.label("Formato de copia (multi-fila):");
+    theme::section_label(ui, "Formato de copia (multi-fila)");
     changed |= ui
         .radio_value(&mut settings.copy_format, CopyFormat::Csv, "CSV")
         .changed();
@@ -70,14 +71,18 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
         .radio_value(&mut settings.copy_format, CopyFormat::Tsv, "TSV")
         .changed();
     changed |= ui
-        .radio_value(&mut settings.copy_format, CopyFormat::SqlInserts, "SQL INSERT")
+        .radio_value(
+            &mut settings.copy_format,
+            CopyFormat::SqlInserts,
+            "SQL INSERT",
+        )
         .changed();
 
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
-    ui.label("Límite de filas por consulta:");
+    theme::section_label(ui, "Límite de filas por consulta");
     changed |= ui
         .add(egui::Slider::new(&mut settings.query_limit, 100..=10000).step_by(100.0))
         .changed();

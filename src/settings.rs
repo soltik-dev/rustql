@@ -33,8 +33,11 @@ fn default_query_limit() -> usize {
     500
 }
 
+/// Nombre mostrado para la fuente de UI embebida (Inter).
+pub const EMBEDDED_FONT_NAME: &str = "Inter (integrada)";
+
 fn default_font_family() -> String {
-    "Liberation Sans".to_owned()
+    EMBEDDED_FONT_NAME.to_owned()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -112,12 +115,32 @@ fn fc_list_fonts() -> Vec<(String, String)> {
             }
             // Excluir variantes: Bold, Italic, Oblique, Heavy, Black, Light, Thin, Medium, Condensed
             let low = path.to_lowercase();
-            for variant in &["bold", "italic", "oblique", "heavy", "black", "light", "thin", "medium", "condensed", "narrow", "semibold", "extrabold", "demi"] {
-                if low.contains(variant) { return None; }
+            for variant in &[
+                "bold",
+                "italic",
+                "oblique",
+                "heavy",
+                "black",
+                "light",
+                "thin",
+                "medium",
+                "condensed",
+                "narrow",
+                "semibold",
+                "extrabold",
+                "demi",
+            ] {
+                if low.contains(variant) {
+                    return None;
+                }
             }
             // Excluir fuentes de símbolo/emoji/icon que no son texto
-            for exclude in &["emoji", "symbol", "awesome", "nerd", "icon", "dingbat", "webdings", "wingding"] {
-                if low.contains(exclude) || name.to_lowercase().contains(exclude) { return None; }
+            for exclude in &[
+                "emoji", "symbol", "awesome", "nerd", "icon", "dingbat", "webdings", "wingding",
+            ] {
+                if low.contains(exclude) || name.to_lowercase().contains(exclude) {
+                    return None;
+                }
             }
             Some((name, path))
         })
@@ -132,18 +155,36 @@ fn fc_list_fonts() -> Vec<(String, String)> {
 #[cfg(target_os = "windows")]
 fn windows_fonts() -> Vec<(String, String)> {
     let fonts_dir = std::path::Path::new("C:\\Windows\\Fonts");
-    let Ok(entries) = std::fs::read_dir(fonts_dir) else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(fonts_dir) else {
+        return vec![];
+    };
 
     let mut fonts: Vec<(String, String)> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
             let ext = path.extension()?.to_str()?.to_lowercase();
-            if ext != "ttf" && ext != "otf" { return None; }
+            if ext != "ttf" && ext != "otf" {
+                return None;
+            }
             let filename = path.file_stem()?.to_str()?.to_string();
             let low = filename.to_lowercase();
-            for variant in &["bold", "italic", "oblique", "heavy", "black", "light", "thin", "medium", "condensed", "narrow", "semibold"] {
-                if low.contains(variant) { return None; }
+            for variant in &[
+                "bold",
+                "italic",
+                "oblique",
+                "heavy",
+                "black",
+                "light",
+                "thin",
+                "medium",
+                "condensed",
+                "narrow",
+                "semibold",
+            ] {
+                if low.contains(variant) {
+                    return None;
+                }
             }
             Some((filename, path.to_string_lossy().to_string()))
         })
@@ -153,10 +194,14 @@ fn windows_fonts() -> Vec<(String, String)> {
     fonts
 }
 
-/// Carga fuentes: iconos embebidos + fuente del sistema elegida + emoji fallback.
+/// Carga fuentes: iconos embebidos + Inter/JetBrains Mono embebidas +
+/// fuente del sistema elegida (override) + emoji fallback.
 /// Llamar al inicio y cada vez que el usuario cambie la fuente.
 pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
     static ICONS_TTF: &[u8] = include_bytes!("../assets/fonts/rustql.ttf");
+    static INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.otf");
+    static INTER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.otf");
+    static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
     let emoji_candidates: &[&str] = &[
         "/usr/share/fonts/google-noto-emoji-fonts/NotoEmoji-Regular.ttf",
@@ -181,16 +226,28 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         .unwrap()
         .insert(0, "rustql_icons".to_owned());
 
-    // 2. Fuente del sistema elegida por el usuario
-    let available = available_system_fonts();
-    let chosen_path = available
-        .iter()
-        .find(|(name, _)| name == &s.font_family)
-        .or_else(|| available.first())
-        .map(|(_, path)| path.clone());
+    // 2. Inter embebida como fuente de UI base
+    fonts.font_data.insert(
+        "inter_regular".to_owned(),
+        egui::FontData::from_static(INTER_REGULAR).into(),
+    );
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .unwrap()
+        .insert(1, "inter_regular".to_owned());
 
-    if let Some(path) = chosen_path
-        && let Ok(data) = std::fs::read(&path) {
+    // 3. Fuente del sistema elegida por el usuario (override, delante de Inter)
+    if s.font_family != EMBEDDED_FONT_NAME {
+        let available = available_system_fonts();
+        let chosen_path = available
+            .iter()
+            .find(|(name, _)| name == &s.font_family)
+            .map(|(_, path)| path.clone());
+
+        if let Some(path) = chosen_path
+            && let Ok(data) = std::fs::read(&path)
+        {
             fonts.font_data.insert(
                 "system_font".to_owned(),
                 egui::FontData::from_owned(data).into(),
@@ -201,8 +258,30 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
                 .unwrap()
                 .insert(1, "system_font".to_owned());
         }
+    }
 
-    // 3. Emoji/símbolo como último fallback
+    // 4. JetBrains Mono embebida como monospace principal (SQL, celdas de datos)
+    fonts.font_data.insert(
+        "jetbrains_mono".to_owned(),
+        egui::FontData::from_static(JETBRAINS_MONO).into(),
+    );
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Monospace)
+        .unwrap()
+        .insert(0, "jetbrains_mono".to_owned());
+
+    // 5. Familia con peso medio para etiquetas de sección (theme::section_label)
+    fonts.font_data.insert(
+        "inter_medium".to_owned(),
+        egui::FontData::from_static(INTER_MEDIUM).into(),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name(crate::ui::theme::MEDIUM_FAMILY.into()),
+        vec!["inter_medium".to_owned(), "inter_regular".to_owned()],
+    );
+
+    // 6. Emoji/símbolo como último fallback
     for path in emoji_candidates {
         if let Ok(data) = std::fs::read(path) {
             fonts.font_data.insert(
@@ -237,7 +316,13 @@ pub fn load() -> AppSettings {
     let Ok(data) = std::fs::read_to_string(path) else {
         return AppSettings::default();
     };
-    serde_json::from_str(&data).unwrap_or_default()
+    let mut s: AppSettings = serde_json::from_str(&data).unwrap_or_default();
+    // "Liberation Sans" era el default auto-inyectado antes de embeber Inter,
+    // no una elección del usuario: migrarlo a la fuente integrada.
+    if s.font_family == "Liberation Sans" {
+        s.font_family = EMBEDDED_FONT_NAME.to_owned();
+    }
+    s
 }
 
 pub fn save(s: &AppSettings) {
@@ -250,72 +335,22 @@ pub fn save(s: &AppSettings) {
     }
 }
 
-fn dark_visuals() -> egui::Visuals {
-    let mut v = egui::Visuals::dark();
-
-    // Fondo general más oscuro para mayor contraste
-    v.panel_fill = egui::Color32::from_rgb(18, 18, 18);
-    v.window_fill = egui::Color32::from_rgb(24, 24, 24);
-    v.faint_bg_color = egui::Color32::from_rgb(28, 28, 28);
-    v.extreme_bg_color = egui::Color32::from_rgb(10, 10, 10);
-
-    // Texto casi blanco (frente a los grises tenues por defecto)
-    let text_bright = egui::Color32::from_rgb(220, 220, 220);
-
-    // Widgets no interactivos (etiquetas, separadores…)
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_bright);
-    v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(28, 28, 28);
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 55, 55));
-
-    // Widgets inactivos (botones sin hover, campos sin foco)
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_bright);
-    v.widgets.inactive.bg_fill = egui::Color32::from_rgb(38, 38, 38);
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 65));
-
-    // Hover
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
-    v.widgets.hovered.bg_fill = egui::Color32::from_rgb(50, 52, 60);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 90, 110));
-
-    // Active (pulsado / toggle activado)
-    v.widgets.active.fg_stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
-    v.widgets.active.bg_fill = egui::Color32::from_rgb(42, 48, 64);
-
-    // Open (desplegables abiertos)
-    v.widgets.open.fg_stroke = egui::Stroke::new(1.0, text_bright);
-    v.widgets.open.bg_fill = egui::Color32::from_rgb(35, 37, 48);
-
-    // Selección (item seleccionado en sidebar, texto seleccionado)
-    v.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(60, 90, 160, 120);
-    v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 160, 220));
-
-    // Texto hyperlink
-    v.hyperlink_color = egui::Color32::from_rgb(100, 160, 255);
-
-    // Líneas tenues (separadores, bordes de panel)
-    v.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 55, 55));
-
-    // Stripe de tabla: fondo alterno más visible
-    v.faint_bg_color = egui::Color32::from_rgb(28, 28, 32);
-
-    v
-}
-
 /// Aplica el tema y el tamaño de fuente al contexto egui.
+/// Registra el estilo de ambos temas (set_visuals solo escribiría el activo)
+/// y luego selecciona cuál usar según los ajustes.
 pub fn apply(ctx: &egui::Context, s: &AppSettings) {
-    let visuals = match s.theme {
-        Theme::Dark => dark_visuals(),
-        Theme::Light => egui::Visuals::light(),
+    use crate::ui::theme;
+
+    ctx.set_style_of(egui::Theme::Dark, theme::style(true, s.font_size));
+    ctx.set_style_of(egui::Theme::Light, theme::style(false, s.font_size));
+
+    let pref = match s.theme {
+        Theme::Dark => egui::ThemePreference::Dark,
+        Theme::Light => egui::ThemePreference::Light,
         Theme::System => match dark_light::detect() {
-            Ok(dark_light::Mode::Light) => egui::Visuals::light(),
-            _ => dark_visuals(),
+            Ok(dark_light::Mode::Light) => egui::ThemePreference::Light,
+            _ => egui::ThemePreference::Dark,
         },
     };
-    ctx.set_visuals(visuals);
-
-    let mut style = (*ctx.global_style()).clone();
-    for font_id in style.text_styles.values_mut() {
-        font_id.size = s.font_size;
-    }
-    ctx.set_global_style(style);
+    ctx.set_theme(pref);
 }

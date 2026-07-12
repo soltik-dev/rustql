@@ -1,7 +1,7 @@
-pub mod icons;
 pub mod connection_panel;
 pub mod db_info;
 pub mod filter_bar;
+pub mod icons;
 pub mod log_panel;
 pub mod modals;
 pub mod results_grid;
@@ -12,3 +12,4 @@ pub mod sql_editor;
 pub mod statusbar;
 pub mod tab_bar;
 pub mod table_structure;
+pub mod theme;
