@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::ui::icons::*;
+use crate::ui::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActiveTab {
@@ -46,7 +47,7 @@ pub fn show(
 ) -> TabBarResult {
     let mut result = TabBarResult::default();
 
-    ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
     ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
 
     // Row 1: main context tabs + SQL tabs, all wrapping
@@ -64,7 +65,10 @@ pub fn show(
         }
 
         // Estructura tab
-        let struct_label = format!("{EDIT} {}", clip_text(table_name.unwrap_or("Estructura"), 18));
+        let struct_label = format!(
+            "{EDIT} {}",
+            clip_text(table_name.unwrap_or("Estructura"), 18)
+        );
         if tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table) {
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
@@ -133,39 +137,70 @@ pub fn show(
 fn tab_separator(ui: &mut egui::Ui) {
     let h = ui.spacing().interact_size.y * 0.6;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, h), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        ui.visuals().widgets.noninteractive.bg_stroke.color,
+    );
 }
 
-fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool {
+/// Pestaña: fondo transparente, hover en superficie y subrayado de acento si
+/// está activa. `tint` colorea fondo y texto (tabs fijados con cambios).
+fn tab_btn_impl(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    enabled: bool,
+    tint: Option<egui::Color32>,
+) -> bool {
+    let p = theme::get(ui);
     if !enabled {
-        let text = egui::RichText::new(label)
-            .color(ui.visuals().noninteractive().text_color());
-        ui.add_enabled(false, egui::Button::new(text).frame(true));
+        let text = egui::RichText::new(label).color(p.text_disabled);
+        ui.add_enabled(false, egui::Button::new(text).frame(false));
         return false;
     }
 
-    let text = if active {
-        egui::RichText::new(label).strong()
-    } else {
-        egui::RichText::new(label)
+    let text_color = match tint {
+        Some(t) => t,
+        None if active => p.text_primary,
+        None => p.text_muted,
+    };
+    let (fill, fill_hover) = match tint {
+        Some(t) => (t.gamma_multiply(0.18), t.gamma_multiply(0.28)),
+        None => (egui::Color32::TRANSPARENT, p.bg_surface),
     };
 
-    let fill = if active {
-        ui.visuals().widgets.active.bg_fill
-    } else {
-        ui.visuals().widgets.inactive.bg_fill
-    };
+    let resp = ui
+        .scope(|ui| {
+            let w = &mut ui.style_mut().visuals.widgets;
+            w.inactive.weak_bg_fill = fill;
+            w.hovered.weak_bg_fill = fill_hover;
+            w.active.weak_bg_fill = fill_hover;
+            for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+                state.bg_stroke = egui::Stroke::NONE;
+            }
+            ui.add(egui::Button::new(
+                egui::RichText::new(label).color(text_color),
+            ))
+        })
+        .inner;
 
-    let resp = ui.add(
-        egui::Button::new(text)
-            .fill(fill)
-            .frame(true)
-            .selected(active),
-    );
+    if active {
+        let rect = resp.rect;
+        ui.painter().hline(
+            egui::Rangef::new(rect.left() + 2.0, rect.right() - 2.0),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(2.0, p.accent),
+        );
+    }
     resp.clicked()
 }
 
-/// Variante para tabs fijados: muestra un color cálido cuando tiene cambios pendientes.
+fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool {
+    tab_btn_impl(ui, label, active, enabled, None)
+}
+
+/// Variante para tabs fijados: tinte cálido cuando tiene cambios pendientes.
 fn tab_btn_pinned(
     ui: &mut egui::Ui,
     label: &str,
@@ -173,37 +208,6 @@ fn tab_btn_pinned(
     enabled: bool,
     has_changes: bool,
 ) -> bool {
-    if !enabled {
-        let text = egui::RichText::new(label)
-            .color(ui.visuals().noninteractive().text_color());
-        ui.add_enabled(false, egui::Button::new(text).frame(true));
-        return false;
-    }
-
-    let text = if active {
-        egui::RichText::new(label).strong()
-    } else {
-        egui::RichText::new(label)
-    };
-
-    let fill = if has_changes {
-        // Tono ámbar para indicar cambios pendientes
-        if ui.visuals().dark_mode {
-            egui::Color32::from_rgb(100, 70, 10)
-        } else {
-            egui::Color32::from_rgb(255, 220, 100)
-        }
-    } else if active {
-        ui.visuals().widgets.active.bg_fill
-    } else {
-        ui.visuals().widgets.inactive.bg_fill
-    };
-
-    let resp = ui.add(
-        egui::Button::new(text)
-            .fill(fill)
-            .frame(true)
-            .selected(active),
-    );
-    resp.clicked()
+    let tint = has_changes.then(|| theme::get(ui).warning);
+    tab_btn_impl(ui, label, active, enabled, tint)
 }

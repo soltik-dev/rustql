@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::ui::theme;
+
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Barra inferior estilo VSCode con botones de panel, versión y estado de conexión.
@@ -8,9 +10,10 @@ pub fn show(
     show_sidebar: &mut bool,
     show_log: &mut bool,
     show_settings: &mut bool,
-    host: Option<&str>,   // Some("host:port") si hay conexión, None si no
+    host: Option<&str>,    // Some("host:port") si hay conexión, None si no
     db_name: Option<&str>, // BD activa si la hay
 ) {
+    let p = theme::get(ui);
     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.toggle_value(show_sidebar, "Esquema");
         ui.separator();
@@ -20,23 +23,29 @@ pub fn show(
             ui.toggle_value(show_settings, "Ajustes");
             ui.separator();
             // Versión
-            ui.label(format!("v{APP_VERSION}"));
+            ui.label(egui::RichText::new(format!("v{APP_VERSION}")).color(p.text_disabled));
             ui.separator();
-            // Estado de conexión
+            // Estado de conexión (texto primero: en RTL queda a la derecha del punto)
             match host {
                 Some(h) => {
-                    let color = egui::Color32::from_rgb(100, 210, 120);
                     let label = if let Some(db) = db_name {
-                        format!("🟢 {h}  /  {db}")
+                        format!("{h}  /  {db}")
                     } else {
-                        format!("🟢 {h}")
+                        h.to_owned()
                     };
-                    ui.colored_label(color, label);
+                    ui.label(egui::RichText::new(label).color(p.text_muted));
+                    status_dot(ui, p.success);
                 }
                 None => {
-                    ui.colored_label(egui::Color32::from_rgb(180, 80, 80), "● Sin conexión");
+                    ui.label(egui::RichText::new("Sin conexión").color(p.text_muted));
+                    status_dot(ui, p.danger);
                 }
             }
         });
     });
+}
+
+fn status_dot(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.5, color);
 }
