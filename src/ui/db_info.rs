@@ -2,6 +2,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::db::TableInfo;
+use crate::ui::theme;
 
 fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
@@ -27,7 +28,10 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
 
     ui.horizontal(|ui| {
         ui.strong(format!("Base de datos: {db}"));
-        ui.label(format!("— {} tablas", tables.len()));
+        ui.label(
+            egui::RichText::new(format!("— {} tablas", tables.len()))
+                .color(theme::get(ui).text_muted),
+        );
     });
     ui.separator();
 
@@ -45,14 +49,14 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::auto().at_least(150.0).clip(true)) // tabla
-        .column(Column::auto().at_least(70.0))  // motor
-        .column(Column::auto().at_least(80.0))  // filas
-        .column(Column::auto().at_least(80.0))  // tamaño
+        .column(Column::auto().at_least(70.0)) // motor
+        .column(Column::auto().at_least(80.0)) // filas
+        .column(Column::auto().at_least(80.0)) // tamaño
         .column(Column::remainder().at_least(140.0).clip(true)) // collation
         .header(24.0, |mut header| {
             for name in &["Tabla", "Motor", "Filas", "Tamaño", "Collation"] {
                 header.col(|ui| {
-                    ui.strong(*name);
+                    ui.label(egui::RichText::new(*name).color(theme::get(ui).text_muted));
                 });
             }
         })
@@ -70,10 +74,18 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
                     }
                     resp.on_hover_text("Doble click para abrir tabla");
                 });
-                row.col(|ui| { ui.label(&t.engine); });
-                row.col(|ui| { ui.label(t.row_count.to_string()); });
-                row.col(|ui| { ui.label(format_bytes(t.size_bytes)); });
-                row.col(|ui| { ui.add(egui::Label::new(&t.collation).truncate()); });
+                row.col(|ui| {
+                    ui.label(&t.engine);
+                });
+                row.col(|ui| {
+                    ui.label(t.row_count.to_string());
+                });
+                row.col(|ui| {
+                    ui.label(format_bytes(t.size_bytes));
+                });
+                row.col(|ui| {
+                    ui.add(egui::Label::new(&t.collation).truncate());
+                });
             });
         });
 

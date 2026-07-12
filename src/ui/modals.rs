@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::db::export::{ExportDestination, ExportEvent, ExportOptions};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
+use crate::ui::theme;
 
 // ── Tipos de datos para formularios ─────────────────────────────────────────
 
@@ -45,15 +46,15 @@ pub enum FilterOperator {
 impl FilterOperator {
     fn label(&self) -> &'static str {
         match self {
-            Self::Equals       => "= igual a",
-            Self::NotEquals    => "≠ distinto de",
-            Self::Contains     => "LIKE '%…%' contiene",
-            Self::StartsWith   => "LIKE '…%' empieza por",
-            Self::EndsWith     => "LIKE '%…' termina en",
-            Self::GreaterThan  => "> mayor que",
-            Self::LessThan     => "< menor que",
+            Self::Equals => "= igual a",
+            Self::NotEquals => "≠ distinto de",
+            Self::Contains => "LIKE '%…%' contiene",
+            Self::StartsWith => "LIKE '…%' empieza por",
+            Self::EndsWith => "LIKE '%…' termina en",
+            Self::GreaterThan => "> mayor que",
+            Self::LessThan => "< menor que",
             Self::GreaterOrEqual => ">= mayor o igual",
-            Self::LessOrEqual  => "<= menor o igual",
+            Self::LessOrEqual => "<= menor o igual",
         }
     }
 }
@@ -74,9 +75,9 @@ pub enum TruncateKind {
 
 #[derive(Debug, Clone)]
 pub struct TableExportEntry {
-    pub name:     String,
+    pub name: String,
     pub selected: bool,
-    pub state:    TableExportState,
+    pub state: TableExportState,
 }
 
 #[derive(Debug, Clone)]
@@ -90,15 +91,19 @@ pub enum TableExportState {
 /// Datos en vuelo cuando la exportación está en marcha.
 /// Receiver<ExportEvent> no implementa Debug, por lo que usamos un wrapper.
 pub struct ExportRunning {
-    pub receiver:    std::sync::mpsc::Receiver<ExportEvent>,
+    pub receiver: std::sync::mpsc::Receiver<ExportEvent>,
     pub cancel_flag: Arc<AtomicBool>,
-    pub rows_done:   u64,
-    pub done_count:  usize,
+    pub rows_done: u64,
+    pub done_count: usize,
 }
 
 impl std::fmt::Debug for ExportRunning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ExportRunning {{ done: {}, rows: {} }}", self.done_count, self.rows_done)
+        write!(
+            f,
+            "ExportRunning {{ done: {}, rows: {} }}",
+            self.done_count, self.rows_done
+        )
     }
 }
 
@@ -106,7 +111,11 @@ impl std::fmt::Debug for ExportRunning {
 pub enum ExportPhase {
     Configuring,
     Running(ExportRunning),
-    Done    { total_tables: usize, total_rows: u64, elapsed_ms: u64 },
+    Done {
+        total_tables: usize,
+        total_rows: u64,
+        elapsed_ms: u64,
+    },
     Cancelled,
     /// Error fatal que abortó la exportación completa.
     Failed(String),
@@ -181,16 +190,16 @@ pub enum ModalState {
         message: String,
     },
     ExportData {
-        source_db:      String,
-        source_table:   Option<String>,
-        tables:         Vec<TableExportEntry>,
-        databases:      Vec<String>,
-        profiles:       Vec<ConnectionProfile>,
-        destination:    ExportDestination,
+        source_db: String,
+        source_table: Option<String>,
+        tables: Vec<TableExportEntry>,
+        databases: Vec<String>,
+        profiles: Vec<ConnectionProfile>,
+        destination: ExportDestination,
         target_db_name: String,
-        profile_idx:    usize,
-        options:        ExportOptions,
-        phase:          ExportPhase,
+        profile_idx: usize,
+        options: ExportOptions,
+        phase: ExportPhase,
     },
 }
 
@@ -198,27 +207,63 @@ pub enum ModalState {
 
 pub enum ModalAction {
     None,
-    CreateDatabase { name: String, charset: String },
-    CreateTable { db: String, name: String, columns: Vec<NewColumnDef> },
+    CreateDatabase {
+        name: String,
+        charset: String,
+    },
+    CreateTable {
+        db: String,
+        name: String,
+        columns: Vec<NewColumnDef>,
+    },
     DropDatabase(String),
-    DropTable { db: String, table: String },
-    TruncateTable { db: String, table: String },
+    DropTable {
+        db: String,
+        table: String,
+    },
+    TruncateTable {
+        db: String,
+        table: String,
+    },
     TruncateAllTables(String),
-    ApplyFilter { sql_fragment: String },
+    ApplyFilter {
+        sql_fragment: String,
+    },
     Cancel,
     /// Guardar cambios y luego cambiar a la nueva tabla.
-    ApplyAndSwitch { new_db: String, new_table: String },
+    ApplyAndSwitch {
+        new_db: String,
+        new_table: String,
+    },
     /// Descartar cambios y cambiar a la nueva tabla.
-    DiscardAndSwitch { new_db: String, new_table: String },
-    DeleteRow { db: String, table: String, row_idx: usize },
-    InsertRow { db: String, table: String, col_names: Vec<String>, values: Vec<String>, nulls: Vec<bool> },
-    CloneTable { db: String, src_table: String, new_name: String, copy_data: bool },
+    DiscardAndSwitch {
+        new_db: String,
+        new_table: String,
+    },
+    DeleteRow {
+        db: String,
+        table: String,
+        row_idx: usize,
+    },
+    InsertRow {
+        db: String,
+        table: String,
+        col_names: Vec<String>,
+        values: Vec<String>,
+        nulls: Vec<bool>,
+    },
+    CloneTable {
+        db: String,
+        src_table: String,
+        new_name: String,
+        copy_data: bool,
+    },
     /// Lanza la exportación: app.rs crea la conexión y el hilo.
     StartExport {
-        source_db:   String,
-        tables:      Vec<String>,
+        source_db: String,
+        tables: Vec<String>,
         destination: ExportDestination,
-        options:     ExportOptions,
+        options: ExportOptions,
     },
     CancelExport,
     CloseExport,
@@ -228,19 +273,29 @@ pub enum ModalAction {
 
 const CHARSETS: &[&str] = &["utf8mb4", "utf8", "latin1", "ascii", "binary"];
 const COL_TYPES: &[&str] = &[
-    "INT", "BIGINT", "SMALLINT", "TINYINT",
-    "VARCHAR", "TEXT", "MEDIUMTEXT", "LONGTEXT", "CHAR",
-    "DECIMAL", "FLOAT", "DOUBLE",
-    "DATE", "DATETIME", "TIMESTAMP", "TIME",
-    "BOOLEAN", "JSON", "BLOB",
+    "INT",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "VARCHAR",
+    "TEXT",
+    "MEDIUMTEXT",
+    "LONGTEXT",
+    "CHAR",
+    "DECIMAL",
+    "FLOAT",
+    "DOUBLE",
+    "DATE",
+    "DATETIME",
+    "TIMESTAMP",
+    "TIME",
+    "BOOLEAN",
+    "JSON",
+    "BLOB",
 ];
 
 fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
-    ui.add(
-        egui::Button::new(text)
-            .fill(egui::Color32::from_rgb(180, 40, 40)),
-    )
-    .clicked()
+    theme::danger_button(ui, text).clicked()
 }
 
 // ── Función principal ─────────────────────────────────────────────────────────
@@ -250,45 +305,86 @@ fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
 pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
     match modal {
         ModalState::None => ModalAction::None,
-        ModalState::CreateDatabase { name, charset, error } => {
-            show_create_database(ctx, name, charset, error)
-        }
-        ModalState::CreateTable { db, name, columns, error } => {
-            show_create_table(ctx, db, name, columns, error)
-        }
-        ModalState::ConfirmDrop { kind, target, db, table } => {
-            show_confirm_drop(ctx, kind, target, db, table)
-        }
-        ModalState::ConfirmTruncate { kind, target, db, table } => {
-            show_confirm_truncate(ctx, kind, target, db, table)
-        }
-        ModalState::FilterInput { col_name, value, operator } => {
-            show_filter_input(ctx, col_name, value, operator)
-        }
-        ModalState::ConfirmSwitchTable { new_db, new_table, pending_count, current_table } => {
-            show_confirm_switch_table(ctx, new_db, new_table, *pending_count, current_table)
-        }
-        ModalState::ConfirmDeleteRow { db, table, row_idx, pk_desc } => {
-            show_confirm_delete_row(ctx, db, table, *row_idx, pk_desc)
-        }
-        ModalState::InsertRow { db, table, col_names, values, nulls, error } => {
-            show_insert_row(ctx, db, table, col_names, values, nulls, error)
-        }
-        ModalState::CloneTable { db, table, new_name, copy_data, error } => {
-            show_clone_table(ctx, db, table, new_name, copy_data, error)
-        }
-        ModalState::Error { title, message } => {
-            show_error(ctx, title, message)
-        }
+        ModalState::CreateDatabase {
+            name,
+            charset,
+            error,
+        } => show_create_database(ctx, name, charset, error),
+        ModalState::CreateTable {
+            db,
+            name,
+            columns,
+            error,
+        } => show_create_table(ctx, db, name, columns, error),
+        ModalState::ConfirmDrop {
+            kind,
+            target,
+            db,
+            table,
+        } => show_confirm_drop(ctx, kind, target, db, table),
+        ModalState::ConfirmTruncate {
+            kind,
+            target,
+            db,
+            table,
+        } => show_confirm_truncate(ctx, kind, target, db, table),
+        ModalState::FilterInput {
+            col_name,
+            value,
+            operator,
+        } => show_filter_input(ctx, col_name, value, operator),
+        ModalState::ConfirmSwitchTable {
+            new_db,
+            new_table,
+            pending_count,
+            current_table,
+        } => show_confirm_switch_table(ctx, new_db, new_table, *pending_count, current_table),
+        ModalState::ConfirmDeleteRow {
+            db,
+            table,
+            row_idx,
+            pk_desc,
+        } => show_confirm_delete_row(ctx, db, table, *row_idx, pk_desc),
+        ModalState::InsertRow {
+            db,
+            table,
+            col_names,
+            values,
+            nulls,
+            error,
+        } => show_insert_row(ctx, db, table, col_names, values, nulls, error),
+        ModalState::CloneTable {
+            db,
+            table,
+            new_name,
+            copy_data,
+            error,
+        } => show_clone_table(ctx, db, table, new_name, copy_data, error),
+        ModalState::Error { title, message } => show_error(ctx, title, message),
         ModalState::ExportData {
-            source_db, source_table, tables, databases, profiles,
-            destination, target_db_name, profile_idx, options, phase,
-        } => {
-            show_export_data(
-                ctx, source_db, source_table, tables, databases, profiles,
-                destination, target_db_name, profile_idx, options, phase,
-            )
-        }
+            source_db,
+            source_table,
+            tables,
+            databases,
+            profiles,
+            destination,
+            target_db_name,
+            profile_idx,
+            options,
+            phase,
+        } => show_export_data(
+            ctx,
+            source_db,
+            source_table,
+            tables,
+            databases,
+            profiles,
+            destination,
+            target_db_name,
+            profile_idx,
+            options,
+            phase,
+        ),
     }
 }
 
@@ -319,9 +415,7 @@ fn show_create_database(
                             .desired_width(200.0)
                             .hint_text("mi_base_de_datos"),
                     );
-                    if resp.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                    {
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         // handled below
                     }
                     ui.end_row();
@@ -339,12 +433,12 @@ fn show_create_database(
 
             if let Some(e) = error {
                 ui.separator();
-                ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+                theme::error_card(ui, &format!("Error: {e}"));
             }
 
             ui.separator();
             ui.horizontal(|ui| {
-                let create_clicked = ui.button("Crear").clicked();
+                let create_clicked = theme::primary_button(ui, "Crear").clicked();
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (create_clicked || enter_pressed) && !name.trim().is_empty() {
                     action = ModalAction::CreateDatabase {
@@ -414,13 +508,15 @@ fn show_create_table(
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(160.0)) // nombre
                 .column(Column::exact(110.0)) // tipo
-                .column(Column::exact(70.0))  // longitud
-                .column(Column::exact(60.0))  // not null
-                .column(Column::exact(40.0))  // PK
-                .column(Column::exact(30.0))  // borrar
+                .column(Column::exact(70.0)) // longitud
+                .column(Column::exact(60.0)) // not null
+                .column(Column::exact(40.0)) // PK
+                .column(Column::exact(30.0)) // borrar
                 .header(20.0, |mut header| {
                     for h in &["Nombre", "Tipo", "Longitud", "Not Null", "PK", ""] {
-                        header.col(|ui| { ui.strong(*h); });
+                        header.col(|ui| {
+                            ui.strong(*h);
+                        });
                     }
                 })
                 .body(|body| {
@@ -441,11 +537,7 @@ fn show_create_table(
                                 .width(100.0)
                                 .show_ui(ui, |ui| {
                                     for &t in COL_TYPES {
-                                        ui.selectable_value(
-                                            &mut col.col_type,
-                                            t.to_string(),
-                                            t,
-                                        );
+                                        ui.selectable_value(&mut col.col_type, t.to_string(), t);
                                     }
                                 });
                         });
@@ -483,12 +575,12 @@ fn show_create_table(
 
             if let Some(e) = error {
                 ui.separator();
-                ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+                theme::error_card(ui, &format!("Error: {e}"));
             }
 
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Crear tabla").clicked()
+                if theme::primary_button(ui, "Crear tabla").clicked()
                     && !name.trim().is_empty()
                     && !columns.is_empty()
                 {
@@ -539,7 +631,7 @@ fn show_confirm_drop(
             ui.strong(target);
             ui.add_space(4.0);
             ui.colored_label(
-                egui::Color32::from_rgb(220, 100, 50),
+                theme::get(ui).warning,
                 "⚠ Esta acción no se puede deshacer.",
             );
             ui.separator();
@@ -596,7 +688,7 @@ fn show_confirm_truncate(
             ui.strong(target);
             ui.add_space(4.0);
             ui.colored_label(
-                egui::Color32::from_rgb(220, 100, 50),
+                theme::get(ui).warning,
                 "⚠ Se eliminarán todos los datos. No se puede deshacer.",
             );
             ui.separator();
@@ -683,7 +775,7 @@ fn show_filter_input(
 
             ui.separator();
             ui.horizontal(|ui| {
-                let apply_clicked = ui.button("Aplicar").clicked();
+                let apply_clicked = theme::primary_button(ui, "Aplicar").clicked();
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if apply_clicked || enter_pressed {
                     let frag = build_filter_fragment(col_name, operator, value);
@@ -706,15 +798,15 @@ fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str)
     let esc_col = format!("`{}`", col_name.replace('`', "``"));
     let esc_val = value.replace('\\', "\\\\").replace('\'', "\\'");
     match operator {
-        FilterOperator::Equals       => format!("{esc_col} = '{esc_val}'"),
-        FilterOperator::NotEquals    => format!("{esc_col} != '{esc_val}'"),
-        FilterOperator::Contains     => format!("{esc_col} LIKE '%{esc_val}%'"),
-        FilterOperator::StartsWith   => format!("{esc_col} LIKE '{esc_val}%'"),
-        FilterOperator::EndsWith     => format!("{esc_col} LIKE '%{esc_val}'"),
-        FilterOperator::GreaterThan  => format!("{esc_col} > '{esc_val}'"),
-        FilterOperator::LessThan     => format!("{esc_col} < '{esc_val}'"),
+        FilterOperator::Equals => format!("{esc_col} = '{esc_val}'"),
+        FilterOperator::NotEquals => format!("{esc_col} != '{esc_val}'"),
+        FilterOperator::Contains => format!("{esc_col} LIKE '%{esc_val}%'"),
+        FilterOperator::StartsWith => format!("{esc_col} LIKE '{esc_val}%'"),
+        FilterOperator::EndsWith => format!("{esc_col} LIKE '%{esc_val}'"),
+        FilterOperator::GreaterThan => format!("{esc_col} > '{esc_val}'"),
+        FilterOperator::LessThan => format!("{esc_col} < '{esc_val}'"),
         FilterOperator::GreaterOrEqual => format!("{esc_col} >= '{esc_val}'"),
-        FilterOperator::LessOrEqual  => format!("{esc_col} <= '{esc_val}'"),
+        FilterOperator::LessOrEqual => format!("{esc_col} <= '{esc_val}'"),
     }
 }
 
@@ -729,8 +821,19 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
             continue;
         }
         let type_part = if col.length.trim().is_empty()
-            || matches!(col.col_type.as_str(), "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "BLOB" | "JSON" | "BOOLEAN" | "DATE" | "DATETIME" | "TIMESTAMP" | "TIME")
-        {
+            || matches!(
+                col.col_type.as_str(),
+                "TEXT"
+                    | "MEDIUMTEXT"
+                    | "LONGTEXT"
+                    | "BLOB"
+                    | "JSON"
+                    | "BOOLEAN"
+                    | "DATE"
+                    | "DATETIME"
+                    | "TIMESTAMP"
+                    | "TIME"
+            ) {
             col.col_type.clone()
         } else {
             format!("{}({})", col.col_type, col.length.trim())
@@ -782,20 +885,19 @@ fn show_confirm_switch_table(
                 pending_count, current_table
             ));
             ui.add_space(4.0);
-            ui.label(format!("¿Qué quieres hacer antes de abrir «{}.{}»?", new_db, new_table));
+            ui.label(format!(
+                "¿Qué quieres hacer antes de abrir «{}.{}»?",
+                new_db, new_table
+            ));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button(format!("{CLONE} Guardar y cambiar")).clicked() {
+                if theme::primary_button(ui, format!("{CLONE} Guardar y cambiar")).clicked() {
                     action = ModalAction::ApplyAndSwitch {
                         new_db: new_db.to_string(),
                         new_table: new_table.to_string(),
                     };
                 }
-                if ui
-                    .add(egui::Button::new(format!("{TRASH}  Descartar y cambiar"))
-                        .fill(egui::Color32::from_rgb(180, 120, 40)))
-                    .clicked()
-                {
+                if theme::warning_button(ui, format!("{TRASH}  Descartar y cambiar")).clicked() {
                     action = ModalAction::DiscardAndSwitch {
                         new_db: new_db.to_string(),
                         new_table: new_table.to_string(),
@@ -865,8 +967,12 @@ fn show_insert_row(
     nulls: &mut Vec<bool>,
     error: &mut Option<String>,
 ) -> ModalAction {
-    while values.len() < col_names.len() { values.push(String::new()); }
-    while nulls.len() < col_names.len() { nulls.push(false); }
+    while values.len() < col_names.len() {
+        values.push(String::new());
+    }
+    while nulls.len() < col_names.len() {
+        nulls.push(false);
+    }
 
     let mut action = ModalAction::None;
     let mut open = true;
@@ -877,37 +983,39 @@ fn show_insert_row(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
-                egui::Grid::new("insert_row_grid")
-                    .num_columns(3)
-                    .spacing([8.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.strong("Columna");
-                        ui.strong("Valor");
-                        ui.strong("NULL");
-                        ui.end_row();
-
-                        for i in 0..col_names.len() {
-                            ui.label(&col_names[i]);
-                            ui.add_enabled(
-                                !nulls[i],
-                                egui::TextEdit::singleline(&mut values[i]).desired_width(220.0),
-                            );
-                            ui.checkbox(&mut nulls[i], "");
-                            if nulls[i] {
-                                values[i].clear();
-                            }
+            egui::ScrollArea::vertical()
+                .max_height(400.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("insert_row_grid")
+                        .num_columns(3)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.strong("Columna");
+                            ui.strong("Valor");
+                            ui.strong("NULL");
                             ui.end_row();
-                        }
-                    });
-            });
+
+                            for i in 0..col_names.len() {
+                                ui.label(&col_names[i]);
+                                ui.add_enabled(
+                                    !nulls[i],
+                                    egui::TextEdit::singleline(&mut values[i]).desired_width(220.0),
+                                );
+                                ui.checkbox(&mut nulls[i], "");
+                                if nulls[i] {
+                                    values[i].clear();
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
 
             if let Some(err) = error {
-                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+                theme::error_card(ui, &format!("Error: {err}"));
             }
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button(format!("{PLUS}  Insertar")).clicked() {
+                if theme::primary_button(ui, format!("{PLUS}  Insertar")).clicked() {
                     action = ModalAction::InsertRow {
                         db: db.to_string(),
                         table: table.to_string(),
@@ -927,7 +1035,6 @@ fn show_insert_row(
     }
     action
 }
-
 
 // ── Clonar tabla ─────────────────────────────────────────────────────────────
 
@@ -966,11 +1073,16 @@ fn show_clone_table(
                 });
 
             if let Some(err) = error {
-                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+                theme::error_card(ui, &format!("Error: {err}"));
             }
             ui.separator();
             ui.horizontal(|ui| {
-                let ok = ui.add_enabled(!new_name.is_empty(), egui::Button::new(format!("{CLONE}  Clonar"))).clicked();
+                let ok = theme::primary_button_enabled(
+                    ui,
+                    !new_name.is_empty(),
+                    format!("{CLONE}  Clonar"),
+                )
+                .clicked();
                 if ok {
                     action = ModalAction::CloneTable {
                         db: db.to_string(),
@@ -1003,7 +1115,7 @@ fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.colored_label(egui::Color32::RED, message);
+            theme::error_card(ui, message);
             ui.separator();
             if ui.button("Cerrar").clicked() {
                 close = true;
@@ -1021,17 +1133,17 @@ fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
 
 #[allow(clippy::too_many_arguments)]
 fn show_export_data(
-    ctx:            &egui::Context,
-    source_db:      &str,
-    _source_table:  &Option<String>,
-    tables:         &mut [TableExportEntry],
-    databases:      &[String],
-    profiles:       &[ConnectionProfile],
-    destination:    &mut ExportDestination,
+    ctx: &egui::Context,
+    source_db: &str,
+    _source_table: &Option<String>,
+    tables: &mut [TableExportEntry],
+    databases: &[String],
+    profiles: &[ConnectionProfile],
+    destination: &mut ExportDestination,
     target_db_name: &mut String,
-    profile_idx:    &mut usize,
-    options:        &mut ExportOptions,
-    phase:          &mut ExportPhase,
+    profile_idx: &mut usize,
+    options: &mut ExportOptions,
+    phase: &mut ExportPhase,
 ) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
@@ -1051,15 +1163,33 @@ fn show_export_data(
             match phase {
                 ExportPhase::Configuring => {
                     action = render_export_config(
-                        ui, source_db, tables, databases, profiles,
-                        destination, target_db_name, profile_idx, options,
+                        ui,
+                        source_db,
+                        tables,
+                        databases,
+                        profiles,
+                        destination,
+                        target_db_name,
+                        profile_idx,
+                        options,
                     );
                 }
                 ExportPhase::Running(running) => {
                     action = render_export_running(ui, tables, running, destination);
                 }
-                ExportPhase::Done { total_tables, total_rows, elapsed_ms } => {
-                    action = render_export_done(ui, tables, *total_tables, *total_rows, *elapsed_ms, destination);
+                ExportPhase::Done {
+                    total_tables,
+                    total_rows,
+                    elapsed_ms,
+                } => {
+                    action = render_export_done(
+                        ui,
+                        tables,
+                        *total_tables,
+                        *total_rows,
+                        *elapsed_ms,
+                        destination,
+                    );
                 }
                 ExportPhase::Cancelled => {
                     action = render_export_cancelled(ui, tables);
@@ -1078,15 +1208,15 @@ fn show_export_data(
 
 #[allow(clippy::too_many_arguments)]
 fn render_export_config(
-    ui:             &mut egui::Ui,
-    source_db:      &str,
-    tables:         &mut [TableExportEntry],
-    databases:      &[String],
-    profiles:       &[ConnectionProfile],
-    destination:    &mut ExportDestination,
+    ui: &mut egui::Ui,
+    source_db: &str,
+    tables: &mut [TableExportEntry],
+    databases: &[String],
+    profiles: &[ConnectionProfile],
+    destination: &mut ExportDestination,
     target_db_name: &mut String,
-    profile_idx:    &mut usize,
-    options:        &mut ExportOptions,
+    profile_idx: &mut usize,
+    options: &mut ExportOptions,
 ) -> ModalAction {
     let mut action = ModalAction::None;
     let selected_count = tables.iter().filter(|t| t.selected).count();
@@ -1097,92 +1227,120 @@ fn render_export_config(
     ui.scope(|ui| {
         ui.set_max_height(350.0);
         egui_extras::StripBuilder::new(ui)
-        .size(egui_extras::Size::exact(190.0))
-        .size(egui_extras::Size::exact(8.0))
-        .size(egui_extras::Size::remainder())
-        .horizontal(|mut strip| {
-            // ── Columna izquierda: lista de tablas ─────────────────────────
-            strip.cell(|ui| {
-                ui.heading(format!("Tablas ({selected_count}/{})", tables.len()));
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    if ui.small_button("Todo").clicked() {
-                        tables.iter_mut().for_each(|t| t.selected = true);
-                    }
-                    if ui.small_button("Ninguno").clicked() {
-                        tables.iter_mut().for_each(|t| t.selected = false);
-                    }
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .show(ui, |ui| {
-                        for entry in tables.iter_mut() {
-                            ui.checkbox(&mut entry.selected, &entry.name);
+            .size(egui_extras::Size::exact(190.0))
+            .size(egui_extras::Size::exact(8.0))
+            .size(egui_extras::Size::remainder())
+            .horizontal(|mut strip| {
+                // ── Columna izquierda: lista de tablas ─────────────────────────
+                strip.cell(|ui| {
+                    ui.heading(format!("Tablas ({selected_count}/{})", tables.len()));
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Todo").clicked() {
+                            tables.iter_mut().for_each(|t| t.selected = true);
+                        }
+                        if ui.small_button("Ninguno").clicked() {
+                            tables.iter_mut().for_each(|t| t.selected = false);
                         }
                     });
-            });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for entry in tables.iter_mut() {
+                                ui.checkbox(&mut entry.selected, &entry.name);
+                            }
+                        });
+                });
 
-            // ── Separador ──────────────────────────────────────────────────
-            strip.cell(|ui| { ui.separator(); });
+                // ── Separador ──────────────────────────────────────────────────
+                strip.cell(|ui| {
+                    ui.separator();
+                });
 
-            // ── Columna derecha: destino + opciones ────────────────────────
-            strip.cell(|ui| {
-                ui.heading("Destino");
-                ui.add_space(4.0);
+                // ── Columna derecha: destino + opciones ────────────────────────
+                strip.cell(|ui| {
+                    ui.heading("Destino");
+                    ui.add_space(4.0);
 
-                // Botones de radio para el tipo de destino
-                let is_sqlfile = matches!(destination, ExportDestination::SqlFile { .. });
-                let is_folder  = matches!(destination, ExportDestination::Folder { .. });
-                let is_samedb  = matches!(destination, ExportDestination::SameServerDb { .. });
-                let is_remote  = matches!(destination, ExportDestination::RemoteServer { .. });
+                    // Botones de radio para el tipo de destino
+                    let is_sqlfile = matches!(destination, ExportDestination::SqlFile { .. });
+                    let is_folder = matches!(destination, ExportDestination::Folder { .. });
+                    let is_samedb = matches!(destination, ExportDestination::SameServerDb { .. });
+                    let is_remote = matches!(destination, ExportDestination::RemoteServer { .. });
 
-                if ui.radio(is_sqlfile, "Fichero SQL (.sql)").clicked() && !is_sqlfile {
-                    *destination = ExportDestination::SqlFile { path: String::new() };
-                }
-                if is_sqlfile {
-                    if let ExportDestination::SqlFile { path } = destination {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(path).hint_text("/ruta/archivo.sql").desired_width(200.0));
-                            if ui.small_button("…").clicked()
-                                && let Some(p) = rfd::FileDialog::new()
-                                    .add_filter("SQL", &["sql"])
-                                    .set_file_name(format!("{source_db}.sql"))
-                                    .save_file()
+                    if ui.radio(is_sqlfile, "Fichero SQL (.sql)").clicked() && !is_sqlfile {
+                        *destination = ExportDestination::SqlFile {
+                            path: String::new(),
+                        };
+                    }
+                    if is_sqlfile {
+                        if let ExportDestination::SqlFile { path } = destination {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(path)
+                                        .hint_text("/ruta/archivo.sql")
+                                        .desired_width(200.0),
+                                );
+                                if ui.small_button("…").clicked()
+                                    && let Some(p) = rfd::FileDialog::new()
+                                        .add_filter("SQL", &["sql"])
+                                        .set_file_name(format!("{source_db}.sql"))
+                                        .save_file()
                                 {
                                     *path = p.to_string_lossy().to_string();
                                 }
-                        });
+                            });
+                        }
+                        ui.add_space(4.0);
                     }
-                    ui.add_space(4.0);
-                }
 
-                if ui.radio(is_folder, "Carpeta (un .sql por tabla)").clicked() && !is_folder {
-                    *destination = ExportDestination::Folder { path: String::new() };
-                }
-                if is_folder {
-                    if let ExportDestination::Folder { path } = destination {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(path).hint_text("/ruta/carpeta/").desired_width(200.0));
-                            if ui.small_button("…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    if ui.radio(is_folder, "Carpeta (un .sql por tabla)").clicked() && !is_folder {
+                        *destination = ExportDestination::Folder {
+                            path: String::new(),
+                        };
+                    }
+                    if is_folder {
+                        if let ExportDestination::Folder { path } = destination {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(path)
+                                        .hint_text("/ruta/carpeta/")
+                                        .desired_width(200.0),
+                                );
+                                if ui.small_button("…").clicked()
+                                    && let Some(p) = rfd::FileDialog::new().pick_folder()
+                                {
                                     *path = p.to_string_lossy().to_string();
                                 }
-                        });
+                            });
+                        }
+                        ui.add_space(4.0);
                     }
-                    ui.add_space(4.0);
-                }
 
-                if ui.radio(is_samedb, "Otra base de datos (mismo servidor)").clicked() && !is_samedb {
-                    // Preseleccionar la primera BBDD distinta si existe
-                    let first_other = databases.iter().find(|d| d.as_str() != source_db)
-                        .cloned().unwrap_or_default();
-                    *destination = ExportDestination::SameServerDb { target_db: first_other };
-                }
-                if is_samedb
-                    && let ExportDestination::SameServerDb { target_db } = destination {
+                    if ui
+                        .radio(is_samedb, "Otra base de datos (mismo servidor)")
+                        .clicked()
+                        && !is_samedb
+                    {
+                        // Preseleccionar la primera BBDD distinta si existe
+                        let first_other = databases
+                            .iter()
+                            .find(|d| d.as_str() != source_db)
+                            .cloned()
+                            .unwrap_or_default();
+                        *destination = ExportDestination::SameServerDb {
+                            target_db: first_other,
+                        };
+                    }
+                    if is_samedb && let ExportDestination::SameServerDb { target_db } = destination
+                    {
                         egui::ComboBox::from_id_salt("export_dest_db")
-                            .selected_text(if target_db.is_empty() { "Seleccionar…" } else { target_db.as_str() })
+                            .selected_text(if target_db.is_empty() {
+                                "Seleccionar…"
+                            } else {
+                                target_db.as_str()
+                            })
                             .show_ui(ui, |ui| {
                                 for db in databases.iter().filter(|d| d.as_str() != source_db) {
                                     ui.selectable_value(target_db, db.clone(), db);
@@ -1191,46 +1349,53 @@ fn render_export_config(
                         ui.add_space(4.0);
                     }
 
-                if ui.radio(is_remote, "Otro servidor (favoritos)").clicked() && !is_remote {
-                    let params = profiles.first().map(|p| p.to_params()).unwrap_or_default();
-                    *destination = ExportDestination::RemoteServer {
-                        params,
-                        target_db: source_db.to_string(),
-                    };
-                    *profile_idx = 0;
-                    *target_db_name = source_db.to_string();
-                }
-                if is_remote {
-                    egui::ComboBox::from_id_salt("export_dest_profile")
-                        .selected_text(profiles.get(*profile_idx).map_or("Sin perfiles", |p| p.name.as_str()))
-                        .show_ui(ui, |ui| {
-                            for (i, prof) in profiles.iter().enumerate() {
-                                if ui.selectable_label(*profile_idx == i, &prof.name).clicked() {
-                                    *profile_idx = i;
-                                    if let ExportDestination::RemoteServer { params, .. } = destination {
-                                        *params = prof.to_params();
+                    if ui.radio(is_remote, "Otro servidor (favoritos)").clicked() && !is_remote {
+                        let params = profiles.first().map(|p| p.to_params()).unwrap_or_default();
+                        *destination = ExportDestination::RemoteServer {
+                            params,
+                            target_db: source_db.to_string(),
+                        };
+                        *profile_idx = 0;
+                        *target_db_name = source_db.to_string();
+                    }
+                    if is_remote {
+                        egui::ComboBox::from_id_salt("export_dest_profile")
+                            .selected_text(
+                                profiles
+                                    .get(*profile_idx)
+                                    .map_or("Sin perfiles", |p| p.name.as_str()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (i, prof) in profiles.iter().enumerate() {
+                                    if ui.selectable_label(*profile_idx == i, &prof.name).clicked()
+                                    {
+                                        *profile_idx = i;
+                                        if let ExportDestination::RemoteServer { params, .. } =
+                                            destination
+                                        {
+                                            *params = prof.to_params();
+                                        }
                                     }
                                 }
-                            }
+                            });
+                        ui.horizontal(|ui| {
+                            ui.label("BBDD destino:");
+                            ui.add(egui::TextEdit::singleline(target_db_name).desired_width(130.0));
                         });
-                    ui.horizontal(|ui| {
-                        ui.label("BBDD destino:");
-                        ui.add(egui::TextEdit::singleline(target_db_name).desired_width(130.0));
-                    });
-                    if let ExportDestination::RemoteServer { target_db, .. } = destination {
-                        *target_db = target_db_name.clone();
+                        if let ExportDestination::RemoteServer { target_db, .. } = destination {
+                            *target_db = target_db_name.clone();
+                        }
+                        ui.add_space(4.0);
                     }
-                    ui.add_space(4.0);
-                }
 
-                ui.separator();
-                ui.heading("Opciones");
-                ui.add_space(2.0);
-                ui.checkbox(&mut options.include_create, "Incluir CREATE TABLE");
-                ui.checkbox(&mut options.include_data,   "Incluir datos (INSERT INTO)");
-                ui.checkbox(&mut options.drop_if_exists, "DROP TABLE IF EXISTS");
+                    ui.separator();
+                    ui.heading("Opciones");
+                    ui.add_space(2.0);
+                    ui.checkbox(&mut options.include_create, "Incluir CREATE TABLE");
+                    ui.checkbox(&mut options.include_data, "Incluir datos (INSERT INTO)");
+                    ui.checkbox(&mut options.drop_if_exists, "DROP TABLE IF EXISTS");
+                });
             });
-        });
     });
 
     // ── Footer ─────────────────────────────────────────────────────────────
@@ -1241,24 +1406,27 @@ fn render_export_config(
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can_export = selected_count > 0 && is_destination_valid(destination);
-            let btn = ui.add_enabled(
-                can_export,
-                egui::Button::new(format!("{EXPORT}  Exportar →")),
-            );
+            let btn =
+                theme::primary_button_enabled(ui, can_export, format!("{EXPORT}  Exportar →"));
             if btn.clicked() {
-                let sel_tables = tables.iter()
+                let sel_tables = tables
+                    .iter()
                     .filter(|t| t.selected)
                     .map(|t| t.name.clone())
                     .collect();
                 action = ModalAction::StartExport {
-                    source_db:   source_db.to_string(),
-                    tables:      sel_tables,
+                    source_db: source_db.to_string(),
+                    tables: sel_tables,
                     destination: destination.clone(),
-                    options:     options.clone(),
+                    options: options.clone(),
                 };
             }
             if !can_export && selected_count == 0 {
-                ui.label(egui::RichText::new("Selecciona al menos una tabla").color(egui::Color32::GRAY).small());
+                ui.label(
+                    egui::RichText::new("Selecciona al menos una tabla")
+                        .color(theme::get(ui).text_muted)
+                        .small(),
+                );
             }
         });
     });
@@ -1268,8 +1436,8 @@ fn render_export_config(
 
 fn is_destination_valid(dest: &ExportDestination) -> bool {
     match dest {
-        ExportDestination::SqlFile { path }  => !path.is_empty(),
-        ExportDestination::Folder  { path }  => !path.is_empty(),
+        ExportDestination::SqlFile { path } => !path.is_empty(),
+        ExportDestination::Folder { path } => !path.is_empty(),
         ExportDestination::SameServerDb { target_db } => !target_db.is_empty(),
         ExportDestination::RemoteServer { target_db, .. } => !target_db.is_empty(),
     }
@@ -1277,80 +1445,102 @@ fn is_destination_valid(dest: &ExportDestination) -> bool {
 
 fn destination_label(dest: &ExportDestination) -> String {
     match dest {
-        ExportDestination::SqlFile { path }  => path.clone(),
-        ExportDestination::Folder  { path }  => path.clone(),
+        ExportDestination::SqlFile { path } => path.clone(),
+        ExportDestination::Folder { path } => path.clone(),
         ExportDestination::SameServerDb { target_db } => format!("Base de datos: {target_db}"),
-        ExportDestination::RemoteServer { target_db, params } =>
-            format!("{}:{} → {target_db}", params.host, params.port),
+        ExportDestination::RemoteServer { target_db, params } => {
+            format!("{}:{} → {target_db}", params.host, params.port)
+        }
     }
 }
 
 fn render_export_running(
-    ui:          &mut egui::Ui,
-    tables:      &[TableExportEntry],
-    running:     &ExportRunning,
+    ui: &mut egui::Ui,
+    tables: &[TableExportEntry],
+    running: &ExportRunning,
     destination: &ExportDestination,
 ) -> ModalAction {
     let mut action = ModalAction::None;
     let total = tables.iter().filter(|t| t.selected).count();
-    let fraction = if total > 0 { running.done_count as f32 / total as f32 } else { 0.0 };
+    let fraction = if total > 0 {
+        running.done_count as f32 / total as f32
+    } else {
+        0.0
+    };
 
     // Barra de progreso
-    ui.add(egui::ProgressBar::new(fraction)
-        .text(format!("{}/{} tablas", running.done_count, total)));
+    ui.add(
+        egui::ProgressBar::new(fraction).text(format!("{}/{} tablas", running.done_count, total)),
+    );
     ui.add_space(6.0);
 
     ui.scope(|ui| {
         ui.set_max_height(260.0);
         egui_extras::StripBuilder::new(ui)
-        .size(egui_extras::Size::exact(220.0))
-        .size(egui_extras::Size::exact(8.0))
-        .size(egui_extras::Size::remainder())
-        .horizontal(|mut strip| {
-            // Lista de tablas con estado
-            strip.cell(|ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(240.0)
-                    .show(ui, |ui| {
-                        for entry in tables.iter().filter(|t| t.selected) {
-                            let (icon, color) = match &entry.state {
-                                TableExportState::Pending    => ("◌", egui::Color32::GRAY),
-                                TableExportState::InProgress => ("⟳", egui::Color32::YELLOW),
-                                TableExportState::Done { .. } => ("✓", egui::Color32::GREEN),
-                                TableExportState::Error(_)   => ("✗", egui::Color32::RED),
-                            };
-                            ui.horizontal(|ui| {
-                                ui.colored_label(color, icon);
-                                let name = egui::RichText::new(&entry.name);
-                                ui.label(match &entry.state {
-                                    TableExportState::Done { .. } =>
-                                        name.color(egui::Color32::from_rgb(180, 220, 180)),
-                                    _ => name,
-                                });
-                                if let TableExportState::Done { rows } = &entry.state {
-                                    ui.label(egui::RichText::new(format_rows(*rows))
-                                        .color(egui::Color32::GRAY).small());
-                                }
-                                if let TableExportState::Error(e) = &entry.state {
-                                    ui.label(egui::RichText::new(e).color(egui::Color32::RED).small())
+            .size(egui_extras::Size::exact(220.0))
+            .size(egui_extras::Size::exact(8.0))
+            .size(egui_extras::Size::remainder())
+            .horizontal(|mut strip| {
+                // Lista de tablas con estado
+                strip.cell(|ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for entry in tables.iter().filter(|t| t.selected) {
+                                let (icon, color) = match &entry.state {
+                                    TableExportState::Pending => ("◌", theme::get(ui).text_muted),
+                                    TableExportState::InProgress => ("⟳", theme::get(ui).warning),
+                                    TableExportState::Done { .. } => ("✓", theme::get(ui).success),
+                                    TableExportState::Error(_) => ("✗", theme::get(ui).danger),
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(color, icon);
+                                    let name = egui::RichText::new(&entry.name);
+                                    ui.label(match &entry.state {
+                                        TableExportState::Done { .. } => {
+                                            name.color(theme::get(ui).success)
+                                        }
+                                        _ => name,
+                                    });
+                                    if let TableExportState::Done { rows } = &entry.state {
+                                        ui.label(
+                                            egui::RichText::new(format_rows(*rows))
+                                                .color(theme::get(ui).text_muted)
+                                                .small(),
+                                        );
+                                    }
+                                    if let TableExportState::Error(e) = &entry.state {
+                                        ui.label(
+                                            egui::RichText::new(e)
+                                                .color(theme::get(ui).danger)
+                                                .small(),
+                                        )
                                         .on_hover_text(e);
-                                }
-                            });
-                        }
-                    });
-            });
+                                    }
+                                });
+                            }
+                        });
+                });
 
-            strip.cell(|ui| { ui.separator(); });
+                strip.cell(|ui| {
+                    ui.separator();
+                });
 
-            // Panel derecho: estadísticas
-            strip.cell(|ui| {
-                ui.label(egui::RichText::new("Destino:").strong());
-                ui.label(destination_label(destination));
-                ui.add_space(8.0);
-                ui.label(format!("Tablas completadas: {} / {}", running.done_count, total));
-                ui.label(format!("Filas exportadas:   {}", format_rows(running.rows_done)));
+                // Panel derecho: estadísticas
+                strip.cell(|ui| {
+                    ui.label(egui::RichText::new("Destino:").strong());
+                    ui.label(destination_label(destination));
+                    ui.add_space(8.0);
+                    ui.label(format!(
+                        "Tablas completadas: {} / {}",
+                        running.done_count, total
+                    ));
+                    ui.label(format!(
+                        "Filas exportadas:   {}",
+                        format_rows(running.rows_done)
+                    ));
+                });
             });
-        });
     });
 
     ui.separator();
@@ -1363,80 +1553,105 @@ fn render_export_running(
 }
 
 fn render_export_done(
-    ui:           &mut egui::Ui,
-    tables:       &[TableExportEntry],
+    ui: &mut egui::Ui,
+    tables: &[TableExportEntry],
     total_tables: usize,
-    total_rows:   u64,
-    elapsed_ms:   u64,
-    destination:  &ExportDestination,
+    total_rows: u64,
+    elapsed_ms: u64,
+    destination: &ExportDestination,
 ) -> ModalAction {
     let mut action = ModalAction::None;
-    let error_count = tables.iter()
+    let error_count = tables
+        .iter()
         .filter(|t| t.selected && matches!(t.state, TableExportState::Error(_)))
         .count();
 
     if error_count == 0 {
         ui.add(egui::ProgressBar::new(1.0).text("✓ Completado"));
     } else {
-        ui.add(egui::ProgressBar::new(1.0)
-            .text(format!("⚠ Completado con {error_count} errores"))
-            .fill(egui::Color32::from_rgb(160, 110, 30)));
+        ui.add(
+            egui::ProgressBar::new(1.0)
+                .text(format!("⚠ Completado con {error_count} errores"))
+                .fill(theme::get(ui).warning),
+        );
     }
     ui.add_space(6.0);
 
     ui.scope(|ui| {
         ui.set_max_height(260.0);
         egui_extras::StripBuilder::new(ui)
-        .size(egui_extras::Size::exact(220.0))
-        .size(egui_extras::Size::exact(8.0))
-        .size(egui_extras::Size::remainder())
-        .horizontal(|mut strip| {
-            strip.cell(|ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(240.0)
-                    .show(ui, |ui| {
-                        for entry in tables.iter().filter(|t| t.selected) {
-                            let (icon, color) = match &entry.state {
-                                TableExportState::Done { .. }  => ("✓", egui::Color32::GREEN),
-                                TableExportState::Error(_)     => ("✗", egui::Color32::RED),
-                                _ => ("◌", egui::Color32::GRAY),
-                            };
-                            ui.horizontal(|ui| {
-                                ui.colored_label(color, icon);
-                                ui.label(&entry.name);
-                                if let TableExportState::Done { rows } = &entry.state {
-                                    ui.label(egui::RichText::new(format_rows(*rows)).color(egui::Color32::GRAY).small());
-                                }
-                                if let TableExportState::Error(e) = &entry.state {
-                                    ui.label(egui::RichText::new(e).color(egui::Color32::RED).small())
+            .size(egui_extras::Size::exact(220.0))
+            .size(egui_extras::Size::exact(8.0))
+            .size(egui_extras::Size::remainder())
+            .horizontal(|mut strip| {
+                strip.cell(|ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for entry in tables.iter().filter(|t| t.selected) {
+                                let (icon, color) = match &entry.state {
+                                    TableExportState::Done { .. } => ("✓", theme::get(ui).success),
+                                    TableExportState::Error(_) => ("✗", theme::get(ui).danger),
+                                    _ => ("◌", theme::get(ui).text_muted),
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(color, icon);
+                                    ui.label(&entry.name);
+                                    if let TableExportState::Done { rows } = &entry.state {
+                                        ui.label(
+                                            egui::RichText::new(format_rows(*rows))
+                                                .color(theme::get(ui).text_muted)
+                                                .small(),
+                                        );
+                                    }
+                                    if let TableExportState::Error(e) = &entry.state {
+                                        ui.label(
+                                            egui::RichText::new(e)
+                                                .color(theme::get(ui).danger)
+                                                .small(),
+                                        )
                                         .on_hover_text(e);
-                                }
-                            });
-                        }
-                    });
-            });
+                                    }
+                                });
+                            }
+                        });
+                });
 
-            strip.cell(|ui| { ui.separator(); });
+                strip.cell(|ui| {
+                    ui.separator();
+                });
 
-            strip.cell(|ui| {
-                if error_count == 0 {
-                    ui.label(egui::RichText::new("Exportación completada").color(egui::Color32::GREEN).strong());
-                } else {
-                    ui.label(egui::RichText::new("Exportación completada con errores").color(egui::Color32::ORANGE).strong());
-                }
-                ui.add_space(8.0);
-                ui.label(format!("Tablas: {total_tables}"));
-                if error_count > 0 {
-                    ui.label(egui::RichText::new(format!("Con error: {error_count} (detalle en el log)"))
-                        .color(egui::Color32::RED));
-                }
-                ui.label(format!("Filas:  {}", format_rows(total_rows)));
-                ui.label(format!("Tiempo: {:.1}s", elapsed_ms as f64 / 1000.0));
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Destino:").strong());
-                ui.label(destination_label(destination));
+                strip.cell(|ui| {
+                    if error_count == 0 {
+                        ui.label(
+                            egui::RichText::new("Exportación completada")
+                                .color(theme::get(ui).success)
+                                .strong(),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Exportación completada con errores")
+                                .color(theme::get(ui).warning)
+                                .strong(),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.label(format!("Tablas: {total_tables}"));
+                    if error_count > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Con error: {error_count} (detalle en el log)"
+                            ))
+                            .color(theme::get(ui).danger),
+                        );
+                    }
+                    ui.label(format!("Filas:  {}", format_rows(total_rows)));
+                    ui.label(format!("Tiempo: {:.1}s", elapsed_ms as f64 / 1000.0));
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Destino:").strong());
+                    ui.label(destination_label(destination));
+                });
             });
-        });
     });
 
     ui.separator();
@@ -1448,14 +1663,10 @@ fn render_export_done(
     action
 }
 
-fn render_export_cancelled(
-    ui:     &mut egui::Ui,
-    tables: &[TableExportEntry],
-) -> ModalAction {
+fn render_export_cancelled(ui: &mut egui::Ui, tables: &[TableExportEntry]) -> ModalAction {
     let mut action = ModalAction::None;
 
-    ui.add(egui::ProgressBar::new(0.0)
-        .text("✗ Cancelado"));
+    ui.add(egui::ProgressBar::new(0.0).text("✗ Cancelado"));
     ui.add_space(6.0);
 
     egui::ScrollArea::vertical()
@@ -1463,9 +1674,9 @@ fn render_export_cancelled(
         .show(ui, |ui| {
             for entry in tables.iter().filter(|t| t.selected) {
                 let (icon, color) = match &entry.state {
-                    TableExportState::Done { .. } => ("✓", egui::Color32::GREEN),
-                    TableExportState::Error(_)    => ("✗", egui::Color32::RED),
-                    _                             => ("◌", egui::Color32::GRAY),
+                    TableExportState::Done { .. } => ("✓", theme::get(ui).success),
+                    TableExportState::Error(_) => ("✗", theme::get(ui).danger),
+                    _ => ("◌", theme::get(ui).text_muted),
                 };
                 ui.horizontal(|ui| {
                     ui.colored_label(color, icon);
@@ -1486,11 +1697,14 @@ fn render_export_cancelled(
 fn render_export_failed(ui: &mut egui::Ui, error: &str) -> ModalAction {
     let mut action = ModalAction::None;
 
-    ui.add(egui::ProgressBar::new(0.0)
-        .text("✗ Error"));
+    ui.add(egui::ProgressBar::new(0.0).text("✗ Error"));
     ui.add_space(6.0);
 
-    ui.label(egui::RichText::new("La exportación falló:").color(egui::Color32::RED).strong());
+    ui.label(
+        egui::RichText::new("La exportación falló:")
+            .color(theme::get(ui).danger)
+            .strong(),
+    );
     ui.add_space(4.0);
     ui.label(error.to_string());
 
