@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use eframe::egui;
 
 use crate::db::QueryResult;
+use crate::ui::{sql_highlight, theme};
 
 #[derive(Default, Clone)]
 pub struct SqlTab {
@@ -29,10 +32,17 @@ pub fn show(
     ui.horizontal(|ui| {
         ui.label("BD:");
         egui::ComboBox::from_id_salt("sql_db_context")
-            .selected_text(if db_context.is_empty() { "(ninguna)" } else { db_context.as_str() })
+            .selected_text(if db_context.is_empty() {
+                "(ninguna)"
+            } else {
+                db_context.as_str()
+            })
             .width(140.0)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(db_context.is_empty(), "(ninguna)").clicked() {
+                if ui
+                    .selectable_label(db_context.is_empty(), "(ninguna)")
+                    .clicked()
+                {
                     db_context.clear();
                 }
                 for db in databases {
@@ -44,7 +54,9 @@ pub fn show(
 
         ui.separator();
         ui.label("SQL libre:");
-        if ui.button(format!("{} Ejecutar  F9", crate::ui::icons::CODE)).clicked() || f9_pressed {
+        if theme::primary_button(ui, format!("{} Ejecutar  F9", crate::ui::icons::CODE)).clicked()
+            || f9_pressed
+        {
             let sql = sql_text.trim().to_string();
             if !sql.is_empty() {
                 action = SqlEditorAction::Execute {
@@ -59,16 +71,36 @@ pub fn show(
     });
     ui.separator();
 
-    // Editor
+    // Editor con resaltado de sintaxis en superficie enmarcada
+    let p = theme::get(ui);
     let available = ui.available_size();
     let editor_height = (available.y * 0.35).clamp(80.0, 300.0);
 
-    ui.add_sized(
-        [available.x, editor_height],
-        egui::TextEdit::multiline(sql_text)
-            .font(egui::TextStyle::Monospace)
-            .hint_text("SELECT * FROM tabla LIMIT 100"),
-    );
+    let dark = ui.visuals().dark_mode;
+    let font_size = egui::TextStyle::Monospace.resolve(ui.style()).size;
+    let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut job = sql_highlight::highlight(ui.ctx(), dark, font_size, buf.as_str());
+        job.wrap.max_width = wrap_width;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    let layouter: &mut dyn FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> =
+        &mut layouter;
+
+    egui::Frame::NONE
+        .fill(p.bg_sunken)
+        .stroke(egui::Stroke::new(1.0, p.border_subtle))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.add_sized(
+                [ui.available_width(), editor_height],
+                egui::TextEdit::multiline(sql_text)
+                    .code_editor()
+                    .layouter(layouter)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("SELECT * FROM tabla LIMIT 100"),
+            );
+        });
 
     ui.separator();
 
@@ -76,15 +108,25 @@ pub fn show(
     match last_result {
         None => {
             ui.centered_and_justified(|ui| {
-                ui.label("Escribe una consulta y pulsa F9 o el botón Ejecutar");
+                ui.label(
+                    egui::RichText::new("Escribe una consulta y pulsa F9 o el botón Ejecutar")
+                        .color(p.text_muted),
+                );
             });
         }
         Some(Err(e)) => {
-            ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+            theme::error_card(ui, &format!("Error: {e}"));
         }
         Some(Ok(data)) => {
             ui.horizontal(|ui| {
-                ui.label(format!("{} filas, {} columnas", data.rows.len(), data.columns.len()));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} filas, {} columnas",
+                        data.rows.len(),
+                        data.columns.len()
+                    ))
+                    .color(p.text_muted),
+                );
             });
             ui.separator();
 
@@ -109,7 +151,9 @@ pub fn show(
                             let row_data = &data.rows[row.index()];
                             for cell in row_data {
                                 row.col(|ui| {
-                                    ui.add(egui::Label::new(cell.as_deref().unwrap_or("")).truncate());
+                                    ui.add(
+                                        egui::Label::new(cell.as_deref().unwrap_or("")).truncate(),
+                                    );
                                 });
                             }
                         });

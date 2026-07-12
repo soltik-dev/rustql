@@ -9,6 +9,7 @@ pub mod server_info;
 pub mod settings_panel;
 pub mod sidebar;
 pub mod sql_editor;
+pub mod sql_highlight;
 pub mod statusbar;
 pub mod tab_bar;
 pub mod table_structure;
