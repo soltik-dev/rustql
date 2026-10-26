@@ -746,10 +746,11 @@ impl Session {
                 self.save_table_state(sh);
             }
             Reload::Refresh => {
-                // Invalidar caché de columnas para reflejar cambios estructurales
-                self.schema
-                    .columns_info
-                    .remove(&(db.clone(), table.clone()));
+                // Releer la estructura: el grid la usa para las claves, los
+                // NULL y el AUTO_INCREMENT de las filas nuevas. Antes de la
+                // query, que cede el backend a su hilo.
+                self.load_columns_info(&db, &table);
+                self.load_primary_keys(&db, &table);
             }
         }
         let sql = self.build_sql(sh, &db, &table);
