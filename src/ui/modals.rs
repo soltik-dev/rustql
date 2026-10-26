@@ -836,7 +836,7 @@ fn show_filter_input(
 
 fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str) -> String {
     let esc_col = format!("`{}`", col_name.replace('`', "``"));
-    let esc_val = value.replace('\\', "\\\\").replace('\'', "\\'");
+    let esc_val = crate::db::escape_sql(value);
     match operator {
         FilterOperator::Equals => format!("{esc_col} = '{esc_val}'"),
         FilterOperator::NotEquals => format!("{esc_col} != '{esc_val}'"),

@@ -250,11 +250,6 @@ fn paint_text_truncated(
     painter.galley(pos, galley, color);
 }
 
-/// Escapa un valor para usarlo en una literal de string SQL ('…').
-fn esc_sql_val(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
 /// Escapa un identificador SQL entre backticks.
 fn esc_ident(s: &str) -> String {
     format!("`{}`", s.replace('`', "``"))
@@ -1138,7 +1133,7 @@ pub fn show(
                                             // Filtrar
                                             let esc_col = esc_ident(&col_name);
                                             let val_display = trunc_display(&cell_text, 22);
-                                            let val_escaped = esc_sql_val(&cell_text);
+                                            let val_escaped = crate::db::escape_sql(&cell_text);
 
                                             if ui.button(format!("🔍  = '{val_display}'")).clicked()
                                             {

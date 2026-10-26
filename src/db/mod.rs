@@ -87,14 +87,18 @@ pub struct ColumnInfo {
 }
 
 /// Escapa un valor para uso dentro de comillas simples en SQL.
-/// Cubre todas las secuencias de escape requeridas por MySQL.
+/// Cubre todas las secuencias de escape requeridas por MySQL. La comilla se
+/// dobla (`''`) en vez de escaparse con `\'`: si el servidor tiene
+/// NO_BACKSLASH_ESCAPES en el sql_mode, `\'` cerraría la cadena y el resto
+/// del valor se ejecutaría como SQL. Con `''` lo peor que pasa en ese modo es
+/// que las barras se lean literalmente.
 pub fn escape_sql(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\0', "\\0")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\x1a', "\\Z")
-        .replace('\'', "\\'")
+        .replace('\'', "''")
 }
 
 /// Escapa un identificador para uso dentro de backticks en SQL.
@@ -218,5 +222,61 @@ pub mod test_server {
 
     pub fn backend() -> super::mysql::MysqlBackend {
         super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::mysql::prelude::Queryable;
+
+    use super::*;
+
+    /// Con NO_BACKSLASH_ESCAPES, escapando la comilla como `\'`, este valor
+    /// convertía `v = '…'` en `v = '\\\' OR 1=1 -- '`.
+    const ATTACK: &str = "\\' OR 1=1 -- ";
+
+    #[test]
+    fn escape_sql_dobla_las_comillas() {
+        assert_eq!(escape_sql("it's"), "it''s");
+        assert_eq!(escape_sql(ATTACK), "\\\\'' OR 1=1 -- ");
+        assert_eq!(escape_sql("a\nb\\c"), "a\\nb\\\\c");
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn escape_sql_no_permite_inyectar_en_ningun_sql_mode() {
+        let backend = test_server::backend();
+        // Una sola conexión: sql_mode es de sesión
+        let mut conn = backend.conn().unwrap();
+        conn.query_drop("DROP DATABASE IF EXISTS rustql_test_escape")
+            .unwrap();
+        conn.query_drop("CREATE DATABASE rustql_test_escape")
+            .unwrap();
+        conn.query_drop("CREATE TABLE rustql_test_escape.t (v TEXT)")
+            .unwrap();
+        conn.query_drop("INSERT INTO rustql_test_escape.t VALUES ('a'), ('b')")
+            .unwrap();
+
+        let tricky = ["it's", "a\\b", "x\\'y", "line\nbreak", ATTACK];
+        for mode in ["", "NO_BACKSLASH_ESCAPES"] {
+            conn.query_drop(format!("SET SESSION sql_mode = '{mode}'"))
+                .unwrap();
+            let matches: Option<u64> = conn
+                .query_first(format!(
+                    "SELECT COUNT(*) FROM rustql_test_escape.t WHERE v = '{}'",
+                    escape_sql(ATTACK)
+                ))
+                .unwrap();
+            assert_eq!(matches, Some(0), "inyección con sql_mode={mode:?}");
+            if mode.is_empty() {
+                for value in tricky {
+                    let back: Option<String> = conn
+                        .query_first(format!("SELECT '{}'", escape_sql(value)))
+                        .unwrap();
+                    assert_eq!(back.as_deref(), Some(value));
+                }
+            }
+        }
+        conn.query_drop("DROP DATABASE rustql_test_escape").unwrap();
     }
 }
