@@ -51,6 +51,14 @@ impl Default for ConnectionParams {
 
 pub type DbResult<T> = Result<T, String>;
 
+/// Sentencia con parámetros posicionales (`?`). Los valores viajan aparte
+/// del SQL: no hace falta escaparlos y llegan intactos (`None` = NULL).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statement {
+    pub sql: String,
+    pub params: Vec<Option<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
@@ -142,7 +150,7 @@ pub trait DbBackend: Send {
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
-    fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()>;
+    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()>;
 
     // ── Helpers con implementación por defecto ─────────────────────────────────
 

@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::db::{
     ColumnInfo, ConnectEvent, ConnectionParams, DatabaseInfo, DbBackend, ExportDestination,
-    ExportEvent, ExportOptions, QueryResult, TableInfo, connect_mysql_progress, escape_ident,
-    escape_sql,
+    ExportEvent, ExportOptions, QueryResult, Statement, TableInfo, connect_mysql_progress,
+    escape_ident, escape_sql,
 };
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
@@ -489,206 +489,130 @@ impl Session {
         }
     }
 
-    /// Ejecuta deletes, edits e inserts pendientes (cada grupo en su transacción).
-    /// Devuelve true si no queda ninguno. No recarga: el llamante decide, porque
-    /// la recarga cede el backend a un hilo y bloquearía otras operaciones.
+    /// Ejecuta deletes, edits e inserts pendientes en una sola transacción:
+    /// o se guardan todos o ninguno. Devuelve true si no queda ninguno. No
+    /// recarga: el llamante decide, porque la recarga cede el backend a un
+    /// hilo y bloquearía otras operaciones.
     fn commit_pending_changes(&mut self) -> bool {
-        let (db, table) = match &self.schema.selected_node {
-            Some(SelectedNode::Table { db, table }) => (db.clone(), table.clone()),
+        if self.pending_count() == 0 {
+            return true;
+        }
+        let stmts = match self.pending_statements() {
+            Ok(stmts) => stmts,
+            Err(message) => {
+                self.modal = ModalState::Error {
+                    title: "No se pueden guardar los cambios".into(),
+                    message,
+                };
+                return false;
+            }
+        };
+        let start = Instant::now();
+        let result = match &mut self.state {
+            ConnState::Connected(b) => b.execute_transaction(&stmts),
             _ => return false,
         };
-
-        // 1. Apply deletes (en transacción para garantizar atomicidad)
-        if !self.table_view.pending_deletes.is_empty() {
-            if self.table_view.primary_keys.is_empty() {
-                self.modal = modals::ModalState::Error {
-                    title: "Error al eliminar".into(),
-                    message: "No se puede eliminar: tabla sin clave primaria".into(),
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let summary = format!(
+            "Guardar cambios: {} eliminación(es), {} edición(es), {} inserción(es) (transacción)",
+            self.table_view.pending_deletes.len(),
+            self.table_view.pending_edits.len(),
+            self.table_view.pending_inserts.len()
+        );
+        match result {
+            Ok(()) => {
+                self.push_log(LogEntry::ok(summary, duration_ms, stmts.len()));
+                self.discard_pending();
+                true
+            }
+            Err(e) => {
+                self.push_log(LogEntry::err(summary, duration_ms, &e));
+                self.modal = ModalState::Error {
+                    title: "Error al guardar".into(),
+                    message: e,
                 };
-                return false;
-            }
-            let data = match &self.table_view.table_data {
-                Some(d) => d.clone(),
-                None => return false,
-            };
-            let pks = self.table_view.primary_keys.clone();
-            let deletes: Vec<usize> = self.table_view.pending_deletes.iter().cloned().collect();
-            let mut stmts: Vec<String> = Vec::new();
-            for row_idx in &deletes {
-                let where_parts: Vec<String> = pks
-                    .iter()
-                    .filter_map(|pk| {
-                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
-                        let pk_val = data.rows.get(*row_idx)?.get(pk_idx)?;
-                        Some(format!(
-                            "`{}` = '{}'",
-                            pk.replace('`', "``"),
-                            escape_sql(pk_val.as_deref().unwrap_or(""))
-                        ))
-                    })
-                    .collect();
-                if where_parts.is_empty() {
-                    continue;
-                }
-                stmts.push(format!(
-                    "DELETE FROM `{}`.`{}` WHERE {}",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    where_parts.join(" AND ")
-                ));
-            }
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return false,
-            };
-            match result {
-                Ok(()) => {
-                    let n = stmts.len();
-                    self.push_log(LogEntry::ok(format!("DELETE x{n} (transacción)"), 0, n));
-                    self.table_view.pending_deletes.clear();
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err("DELETE (transacción)", 0, &e));
-                    self.modal = modals::ModalState::Error {
-                        title: "Error al eliminar".into(),
-                        message: e,
-                    };
-                }
+                false
             }
         }
+    }
 
-        // 2. Apply edits (en transacción para garantizar atomicidad)
-        if !self.table_view.pending_edits.is_empty() {
-            if self.table_view.primary_keys.is_empty() {
-                self.modal = modals::ModalState::Error {
-                    title: "Error al editar".into(),
-                    message: "No se puede editar: la tabla no tiene clave primaria".into(),
-                };
-                return false;
-            }
-            let data = match &self.table_view.table_data {
-                Some(d) => d.clone(),
-                None => return false,
-            };
-            let edits = self.table_view.pending_edits.clone();
-            let pks = self.table_view.primary_keys.clone();
-            let mut stmts: Vec<String> = Vec::new();
+    /// Sentencias de los cambios pendientes: DELETE, UPDATE (uno por fila,
+    /// con todas sus celdas editadas) e INSERT, con los valores como
+    /// parámetros. Las filas existentes se identifican por su clave primaria.
+    fn pending_statements(&self) -> Result<Vec<Statement>, String> {
+        let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node else {
+            return Err("No hay ninguna tabla abierta.".into());
+        };
+        let tv = &self.table_view;
+        let data = tv.table_data.as_ref().ok_or("No hay datos cargados.")?;
+        let target = format!("`{}`.`{}`", escape_ident(db), escape_ident(table));
+        let edits_rows = !tv.pending_deletes.is_empty() || !tv.pending_edits.is_empty();
+        if edits_rows && tv.primary_keys.is_empty() {
+            return Err(
+                "La tabla no tiene clave primaria: no se pueden editar ni eliminar filas.".into(),
+            );
+        }
+        let row_key = |row_idx: usize| {
+            pk_condition(data, &tv.primary_keys, row_idx)
+                .ok_or_else(|| format!("No se encuentra la clave primaria de la fila {row_idx}."))
+        };
 
-            for edit in &edits {
-                let col_name = match data.columns.get(edit.col_idx) {
-                    Some(c) => c.clone(),
-                    None => continue,
-                };
-                let where_parts: Vec<String> = pks
-                    .iter()
-                    .filter_map(|pk| {
-                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
-                        let pk_val = data.rows.get(edit.row_idx)?.get(pk_idx)?;
-                        Some(format!(
-                            "`{}` = '{}'",
-                            pk.replace('`', "``"),
-                            escape_sql(pk_val.as_deref().unwrap_or(""))
-                        ))
-                    })
-                    .collect();
-                if where_parts.is_empty() {
-                    continue;
-                }
-                let set_clause = if edit.is_null {
-                    format!("`{}` = NULL", col_name.replace('`', "``"))
-                } else {
-                    format!(
-                        "`{}` = '{}'",
-                        col_name.replace('`', "``"),
-                        escape_sql(&edit.new_value)
-                    )
-                };
-                stmts.push(format!(
-                    "UPDATE `{}`.`{}` SET {} WHERE {}",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    set_clause,
-                    where_parts.join(" AND ")
-                ));
-            }
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return false,
-            };
-            match result {
-                Ok(()) => {
-                    let n = stmts.len();
-                    self.push_log(LogEntry::ok(format!("UPDATE x{n} (transacción)"), 0, n));
-                    self.table_view.pending_edits.clear();
-                    self.table_view.editing_cell = None;
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err("UPDATE (transacción)", 0, &e));
-                    self.modal = modals::ModalState::Error {
-                        title: "Error al guardar".into(),
-                        message: e,
-                    };
-                }
-            }
+        let mut stmts = Vec::new();
+        for &row_idx in &tv.pending_deletes {
+            let (condition, params) = row_key(row_idx)?;
+            stmts.push(Statement {
+                sql: format!("DELETE FROM {target} WHERE {condition}"),
+                params,
+            });
         }
 
-        // 3. Apply inserts (en transacción para garantizar atomicidad)
-        if !self.table_view.pending_inserts.is_empty() {
-            let col_names = self
-                .table_view
-                .table_data
-                .as_ref()
-                .map(|d| d.columns.clone())
-                .unwrap_or_default();
-            let inserts = self.table_view.pending_inserts.clone();
-            let mut stmts: Vec<String> = Vec::new();
-            for ins in &inserts {
-                let (cols, vals): (Vec<_>, Vec<_>) = col_names
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !ins.auto_cols.get(*i).copied().unwrap_or(false))
-                    .map(|(i, col)| {
-                        let val = ins.values.get(i).and_then(|v| v.as_deref());
-                        let col_sql = format!("`{}`", col.replace('`', "``"));
-                        let val_sql = match val {
-                            None => "NULL".to_string(),
-                            Some(v) => format!("'{}'", escape_sql(v)),
-                        };
-                        (col_sql, val_sql)
-                    })
-                    .unzip();
-                if cols.is_empty() {
-                    continue;
-                }
-                stmts.push(format!(
-                    "INSERT INTO `{}`.`{}` ({}) VALUES ({})",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    cols.join(", "),
-                    vals.join(", ")
-                ));
+        // Un UPDATE por fila: si se edita la clave primaria, el WHERE (que ve
+        // la fila original) sigue encontrando la fila para el resto de celdas.
+        let mut edits_by_row: std::collections::BTreeMap<usize, Vec<&PendingEdit>> =
+            Default::default();
+        for edit in &tv.pending_edits {
+            edits_by_row.entry(edit.row_idx).or_default().push(edit);
+        }
+        for (row_idx, edits) in edits_by_row {
+            let mut sets = Vec::new();
+            let mut params = Vec::new();
+            for edit in edits {
+                let col = data
+                    .columns
+                    .get(edit.col_idx)
+                    .ok_or_else(|| format!("No existe la columna {}.", edit.col_idx))?;
+                sets.push(format!("`{}` = ?", escape_ident(col)));
+                params.push((!edit.is_null).then(|| edit.new_value.clone()));
             }
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return false,
-            };
-            match result {
-                Ok(()) => {
-                    let n = stmts.len();
-                    self.push_log(LogEntry::ok(format!("INSERT x{n} (transacción)"), 0, n));
-                    self.table_view.pending_inserts.clear();
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err("INSERT (transacción)", 0, &e));
-                    self.modal = modals::ModalState::Error {
-                        title: "Error al insertar".into(),
-                        message: e,
-                    };
-                }
-            }
+            let (condition, key) = row_key(row_idx)?;
+            params.extend(key);
+            stmts.push(Statement {
+                sql: format!("UPDATE {target} SET {} WHERE {condition}", sets.join(", ")),
+                params,
+            });
         }
 
-        self.pending_count() == 0
+        for ins in &tv.pending_inserts {
+            let (cols, params): (Vec<String>, Vec<Option<String>>) = data
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !ins.auto_cols.get(*i).copied().unwrap_or(false))
+                .map(|(i, col)| {
+                    let value = ins.values.get(i).cloned().flatten();
+                    (format!("`{}`", escape_ident(col)), value)
+                })
+                .unzip();
+            let placeholders = vec!["?"; cols.len()].join(", ");
+            stmts.push(Statement {
+                sql: format!(
+                    "INSERT INTO {target} ({}) VALUES ({placeholders})",
+                    cols.join(", ")
+                ),
+                params,
+            });
+        }
+        Ok(stmts)
     }
 
     /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
@@ -915,6 +839,25 @@ impl Session {
         }
         self.query_log.clear();
     }
+}
+
+/// Condición `WHERE` que identifica la fila `row_idx` por su clave primaria,
+/// con sus valores como parámetros. `None` si falta la fila o alguna columna
+/// de la clave: una condición parcial podría afectar a varias filas.
+fn pk_condition(
+    data: &QueryResult,
+    primary_keys: &[String],
+    row_idx: usize,
+) -> Option<(String, Vec<Option<String>>)> {
+    let row = data.rows.get(row_idx)?;
+    let mut parts = Vec::new();
+    let mut params = Vec::new();
+    for pk in primary_keys {
+        let col_idx = data.columns.iter().position(|c| c == pk)?;
+        parts.push(format!("`{}` = ?", escape_ident(pk)));
+        params.push(row.get(col_idx)?.clone());
+    }
+    Some((parts.join(" AND "), params))
 }
 
 // ── Loop principal ────────────────────────────────────────────────────────────
@@ -2675,7 +2618,7 @@ mod tests {
         fn truncate_table(&mut self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn execute_transaction(&mut self, _: &[String]) -> DbResult<()> {
+        fn execute_transaction(&mut self, _: &[Statement]) -> DbResult<()> {
             Ok(())
         }
     }
@@ -2852,5 +2795,113 @@ mod tests {
         assert_eq!(open_table(&s), Some(("db", "t")));
         assert_eq!(s.pending_count(), 0);
         assert!(matches!(s.state, ConnState::QueryRunning));
+    }
+
+    fn edit(row_idx: usize, col_idx: usize, value: Option<&str>) -> PendingEdit {
+        PendingEdit {
+            row_idx,
+            col_idx,
+            original: None,
+            new_value: value.unwrap_or_default().into(),
+            is_null: value.is_none(),
+        }
+    }
+
+    #[test]
+    fn cambios_pendientes_como_sentencias_con_parametros() {
+        let mut s = session_with_table();
+        s.table_view.table_data = Some(QueryResult {
+            columns: vec!["id".into(), "v".into()],
+            rows: vec![
+                vec![Some("1".into()), Some("a".into())],
+                vec![Some("2".into()), None],
+            ],
+        });
+        s.table_view.pending_deletes.insert(1);
+        // Clave primaria y otra columna de la misma fila: un único UPDATE
+        s.table_view.pending_edits = vec![edit(0, 0, Some("10")), edit(0, 1, None)];
+        s.table_view.pending_inserts.push(PendingInsert {
+            values: vec![Some("3".into()), Some("x'y".into())],
+            auto_cols: vec![false, false],
+        });
+
+        let stmts = s.pending_statements().unwrap();
+        let p = |v: &[Option<&str>]| v.iter().map(|x| x.map(String::from)).collect::<Vec<_>>();
+        assert_eq!(
+            stmts,
+            [
+                Statement {
+                    sql: "DELETE FROM `db`.`t` WHERE `id` = ?".into(),
+                    params: p(&[Some("2")]),
+                },
+                Statement {
+                    sql: "UPDATE `db`.`t` SET `id` = ?, `v` = ? WHERE `id` = ?".into(),
+                    params: p(&[Some("10"), None, Some("1")]),
+                },
+                Statement {
+                    sql: "INSERT INTO `db`.`t` (`id`, `v`) VALUES (?, ?)".into(),
+                    params: p(&[Some("3"), Some("x'y")]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sin_clave_primaria_no_se_editan_filas() {
+        let mut s = session_with_table();
+        s.table_view.primary_keys.clear();
+        s.table_view.pending_deletes.insert(0);
+        assert!(!s.commit_pending_changes());
+        assert!(matches!(s.modal, ModalState::Error { .. }));
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn guardar_cambios_contra_el_servidor() {
+        let mut b = crate::db::test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_grid")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_grid").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_grid.t (id VARCHAR(20) PRIMARY KEY, v TEXT)")
+            .unwrap();
+        b.execute_write(
+            "INSERT INTO rustql_test_grid.t VALUES ('a','uno'),('b','dos'),('c','tres')",
+        )
+        .unwrap();
+        let select = "SELECT * FROM rustql_test_grid.t ORDER BY id";
+
+        let mut s = Session::new(0);
+        s.table_view.table_data = Some(b.execute_query(select).unwrap());
+        s.state = ConnState::Connected(Box::new(b));
+        s.schema.selected_node = Some(SelectedNode::Table {
+            db: "rustql_test_grid".into(),
+            table: "t".into(),
+        });
+        s.table_view.primary_keys = vec!["id".into()];
+        s.table_view.pending_deletes.insert(2);
+        s.table_view.pending_edits = vec![edit(0, 0, Some("a'\\x")), edit(0, 1, None)];
+        s.table_view.pending_inserts.push(PendingInsert {
+            values: vec![Some("d".into()), Some("it's \\ fine".into())],
+            auto_cols: vec![false, false],
+        });
+
+        let saved = s.commit_pending_changes();
+        let ConnState::Connected(b) = &mut s.state else {
+            unreachable!()
+        };
+        let rows = b.execute_query(select).map(|r| r.rows);
+        b.execute_write("DROP DATABASE rustql_test_grid").unwrap();
+
+        assert!(saved, "{:?}", s.modal);
+        let row = |id: &str, v: Option<&str>| vec![Some(id.to_string()), v.map(String::from)];
+        assert_eq!(
+            rows.unwrap(),
+            [
+                row("a'\\x", None),
+                row("b", Some("dos")),
+                row("d", Some("it's \\ fine")),
+            ]
+        );
     }
 }

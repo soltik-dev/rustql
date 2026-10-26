@@ -1,8 +1,8 @@
 use mysql::{Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
 
 use super::{
-    ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, TableInfo,
-    escape_ident, escape_sql, validate_charset,
+    ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
+    TableInfo, escape_ident, validate_charset,
 };
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -102,6 +102,15 @@ impl MysqlBackend {
             .get_conn()
             .map_err(|e| format!("Sin conexión con el servidor: {e}"))
     }
+
+    /// Lectura con parámetros posicionales (`?`).
+    fn query_with(&self, sql: &str, params: Vec<Option<String>>) -> DbResult<QueryResult> {
+        let raw_rows: Vec<mysql::Row> = self
+            .conn()?
+            .exec(sql, params)
+            .map_err(|e| format!("Error en query: {e}"))?;
+        Ok(rows_to_result(raw_rows))
+    }
 }
 
 impl DbBackend for MysqlBackend {
@@ -158,18 +167,15 @@ impl DbBackend for MysqlBackend {
     }
 
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>> {
-        let sql = format!(
-            "SELECT TABLE_NAME, \
-                    COALESCE(ENGINE,''), \
-                    COALESCE(TABLE_ROWS,0), \
-                    COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0), \
-                    COALESCE(TABLE_COLLATION,'') \
-             FROM information_schema.TABLES \
-             WHERE TABLE_SCHEMA='{}' AND TABLE_TYPE='BASE TABLE' \
-             ORDER BY TABLE_NAME",
-            escape_sql(db)
-        );
-        let r = self.execute_query(&sql)?;
+        let sql = "SELECT TABLE_NAME, \
+                          COALESCE(ENGINE,''), \
+                          COALESCE(TABLE_ROWS,0), \
+                          COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0), \
+                          COALESCE(TABLE_COLLATION,'') \
+                   FROM information_schema.TABLES \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_TYPE='BASE TABLE' \
+                   ORDER BY TABLE_NAME";
+        let r = self.query_with(sql, vec![Some(db.into())])?;
         Ok(r.rows
             .iter()
             .map(|row| TableInfo {
@@ -183,15 +189,11 @@ impl DbBackend for MysqlBackend {
     }
 
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>> {
-        let sql = format!(
-            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA \
-             FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' \
-             ORDER BY ORDINAL_POSITION",
-            escape_sql(db),
-            escape_sql(table)
-        );
-        let r = self.execute_query(&sql)?;
+        let sql = "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA \
+                   FROM information_schema.COLUMNS \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                   ORDER BY ORDINAL_POSITION";
+        let r = self.query_with(sql, vec![Some(db.into()), Some(table.into())])?;
         Ok(r.rows
             .iter()
             .map(|row| {
@@ -213,15 +215,11 @@ impl DbBackend for MysqlBackend {
     }
 
     fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>> {
-        let sql = format!(
-            "SELECT COLUMN_NAME \
-             FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' AND COLUMN_KEY='PRI' \
-             ORDER BY ORDINAL_POSITION",
-            escape_sql(db),
-            escape_sql(table)
-        );
-        let r = self.execute_query(&sql)?;
+        let sql = "SELECT COLUMN_NAME \
+                   FROM information_schema.COLUMNS \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY='PRI' \
+                   ORDER BY ORDINAL_POSITION";
+        let r = self.query_with(sql, vec![Some(db.into()), Some(table.into())])?;
         Ok(r.rows.iter().map(|row| col(row, 0)).collect())
     }
 
@@ -258,17 +256,58 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()> {
+    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
             .map_err(|e| format!("Error iniciando transacción: {e}"))?;
-        for sql in stmts {
-            if let Err(e) = conn.query_drop(sql.as_str()) {
+        for stmt in stmts {
+            if let Err(e) = conn.exec_drop(stmt.sql.as_str(), stmt.params.clone()) {
                 let _ = conn.query_drop("ROLLBACK");
                 return Err(format!("Error en transacción (ROLLBACK): {e}"));
             }
         }
         conn.query_drop("COMMIT")
             .map_err(|e| format!("Error en COMMIT: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_server;
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn metadatos_con_parametros() {
+        let mut b = test_server::backend();
+        // Nombres con comilla y barra: con el escape a mano eran frágiles
+        let db = "rustql_test_meta'\\x";
+        let qdb = format!("`{}`", escape_ident(db));
+        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}")).unwrap();
+        b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();
+        b.execute_write(&format!(
+            "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
+             v VARCHAR(10) NOT NULL DEFAULT 'x', n INT NULL)"
+        ))
+        .unwrap();
+        b.execute_write(&format!("INSERT INTO {qdb}.t (v) VALUES ('a'), ('b')"))
+            .unwrap();
+        b.execute_write(&format!("ANALYZE TABLE {qdb}.t")).unwrap();
+
+        let tables = b.get_tables_info(db);
+        let columns = b.get_columns_info(db, "t");
+        let pks = b.get_primary_keys(db, "t");
+        b.execute_write(&format!("DROP DATABASE {qdb}")).unwrap();
+
+        let tables = tables.unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "t");
+        assert_eq!(tables[0].row_count, 2);
+        let columns = columns.unwrap();
+        let names: Vec<_> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "v", "n"]);
+        assert!(columns[0].extra.contains("auto_increment"));
+        assert!(!columns[1].is_nullable && columns[2].is_nullable);
+        assert_eq!(pks.unwrap(), ["id"]);
     }
 }
