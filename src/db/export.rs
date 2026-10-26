@@ -1,4 +1,4 @@
-use std::io::Write as IoWrite;
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -187,6 +187,40 @@ fn run_export(
     }
 }
 
+/// Recorre `tables` avisando del progreso; `export` exporta una y devuelve
+/// sus filas. Se detiene al cancelar. Devuelve (tablas exportadas, filas).
+fn for_each_table(
+    tables: &[String],
+    cancel: &AtomicBool,
+    tx: &Sender<ExportEvent>,
+    mut export: impl FnMut(&str) -> Result<u64, String>,
+) -> (usize, u64) {
+    let mut total_rows = 0u64;
+    let mut done = 0usize;
+    for table in tables {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let _ = tx.send(ExportEvent::TableStarted(table.clone()));
+        let table = table.clone();
+        match export(&table) {
+            Ok(rows) => {
+                total_rows += rows;
+                done += 1;
+                let _ = tx.send(ExportEvent::TableDone { table, rows });
+            }
+            Err(error) => {
+                let _ = tx.send(ExportEvent::TableError { table, error });
+            }
+        }
+    }
+    (done, total_rows)
+}
+
+fn write_error(e: std::io::Error) -> String {
+    format!("Error escribiendo fichero: {e}")
+}
+
 // ── Exportar a un único fichero .sql ──────────────────────────────────────────
 
 fn export_to_file(
@@ -198,40 +232,15 @@ fn export_to_file(
     cancel: &Arc<AtomicBool>,
     tx: &Sender<ExportEvent>,
 ) -> Result<(usize, u64), String> {
-    let mut file = std::fs::File::create(path)
+    let file = std::fs::File::create(path)
         .map_err(|e| format!("No se pudo crear el fichero '{path}': {e}"))?;
-
-    write_sql_header(&mut file, source_db)?;
-
-    let mut total_rows = 0u64;
-    let mut done = 0usize;
-
-    for table in tables {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok((done, total_rows));
-        }
-
-        let _ = tx.send(ExportEvent::TableStarted(table.clone()));
-
-        match export_table_to_writer(&mut file, backend, source_db, table, options) {
-            Ok(rows) => {
-                total_rows += rows;
-                done += 1;
-                let _ = tx.send(ExportEvent::TableDone {
-                    table: table.clone(),
-                    rows,
-                });
-            }
-            Err(e) => {
-                let _ = tx.send(ExportEvent::TableError {
-                    table: table.clone(),
-                    error: e,
-                });
-            }
-        }
-    }
-
-    Ok((done, total_rows))
+    let mut out = BufWriter::new(file);
+    write_sql_header(&mut out, source_db)?;
+    let totals = for_each_table(tables, cancel, tx, |table| {
+        export_table_to_writer(&mut out, backend, source_db, table, options)
+    });
+    out.flush().map_err(write_error)?;
+    Ok(totals)
 }
 
 fn export_to_folder(
@@ -245,50 +254,16 @@ fn export_to_folder(
 ) -> Result<(usize, u64), String> {
     std::fs::create_dir_all(folder)
         .map_err(|e| format!("No se pudo crear la carpeta '{folder}': {e}"))?;
-
-    let mut total_rows = 0u64;
-    let mut done = 0usize;
-
-    for table in tables {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok((done, total_rows));
-        }
-
-        let _ = tx.send(ExportEvent::TableStarted(table.clone()));
-
+    Ok(for_each_table(tables, cancel, tx, |table| {
         let file_path = format!("{folder}/{table}.sql");
-        let mut file = match std::fs::File::create(&file_path) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = tx.send(ExportEvent::TableError {
-                    table: table.clone(),
-                    error: format!("No se pudo crear '{file_path}': {e}"),
-                });
-                continue;
-            }
-        };
-
-        write_sql_header(&mut file, source_db)?;
-
-        match export_table_to_writer(&mut file, backend, source_db, table, options) {
-            Ok(rows) => {
-                total_rows += rows;
-                done += 1;
-                let _ = tx.send(ExportEvent::TableDone {
-                    table: table.clone(),
-                    rows,
-                });
-            }
-            Err(e) => {
-                let _ = tx.send(ExportEvent::TableError {
-                    table: table.clone(),
-                    error: e,
-                });
-            }
-        }
-    }
-
-    Ok((done, total_rows))
+        let file = std::fs::File::create(&file_path)
+            .map_err(|e| format!("No se pudo crear '{file_path}': {e}"))?;
+        let mut out = BufWriter::new(file);
+        write_sql_header(&mut out, source_db)?;
+        let rows = export_table_to_writer(&mut out, backend, source_db, table, options)?;
+        out.flush().map_err(write_error)?;
+        Ok(rows)
+    }))
 }
 
 // ── Exportar a otra BBDD en el mismo servidor ──────────────────────────────────
@@ -315,36 +290,9 @@ fn export_to_same_server_db(
     conn.query_drop("SET FOREIGN_KEY_CHECKS = 0")
         .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
 
-    let mut total_rows = 0u64;
-    let mut done = 0usize;
-
-    for table in tables {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok((done, total_rows));
-        }
-
-        let _ = tx.send(ExportEvent::TableStarted(table.clone()));
-
-        let result = copy_table_same_server(&mut conn, source_db, table, target_db, options);
-        match result {
-            Ok(rows) => {
-                total_rows += rows;
-                done += 1;
-                let _ = tx.send(ExportEvent::TableDone {
-                    table: table.clone(),
-                    rows,
-                });
-            }
-            Err(e) => {
-                let _ = tx.send(ExportEvent::TableError {
-                    table: table.clone(),
-                    error: e,
-                });
-            }
-        }
-    }
-
-    Ok((done, total_rows))
+    Ok(for_each_table(tables, cancel, tx, |table| {
+        copy_table_same_server(&mut conn, source_db, table, target_db, options)
+    }))
 }
 
 fn copy_table_same_server(
@@ -404,43 +352,16 @@ fn export_to_remote(
         .query_drop("SET FOREIGN_KEY_CHECKS = 0")
         .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
 
-    let mut total_rows = 0u64;
-    let mut done = 0usize;
-
-    for table in tables {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok((done, total_rows));
-        }
-
-        let _ = tx.send(ExportEvent::TableStarted(table.clone()));
-
-        let result = copy_table_remote(
+    Ok(for_each_table(tables, cancel, tx, |table| {
+        copy_table_remote(
             src_backend,
             &mut dst_conn,
             source_db,
             table,
             target_db,
             options,
-        );
-        match result {
-            Ok(rows) => {
-                total_rows += rows;
-                done += 1;
-                let _ = tx.send(ExportEvent::TableDone {
-                    table: table.clone(),
-                    rows,
-                });
-            }
-            Err(e) => {
-                let _ = tx.send(ExportEvent::TableError {
-                    table: table.clone(),
-                    error: e,
-                });
-            }
-        }
-    }
-
-    Ok((done, total_rows))
+        )
+    }))
 }
 
 fn copy_table_remote(
@@ -555,25 +476,23 @@ fn get_create_table_ddl(
 }
 
 /// Escribe el encabezado estándar de un fichero SQL de exportación.
-fn write_sql_header(file: &mut std::fs::File, source_db: &str) -> Result<(), String> {
+fn write_sql_header(file: &mut impl Write, source_db: &str) -> Result<(), String> {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    writeln!(file, "-- RustQL Export — Base de datos: {source_db}")
-        .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
-    writeln!(file, "-- Generado: {now}").map_err(|e| format!("Error escribiendo fichero: {e}"))?;
+    writeln!(file, "-- RustQL Export — Base de datos: {source_db}").map_err(write_error)?;
+    writeln!(file, "-- Generado: {now}").map_err(write_error)?;
     writeln!(
         file,
         "-- ──────────────────────────────────────────────────────────────────────\n"
     )
-    .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
-    writeln!(file, "SET NAMES utf8mb4;").map_err(|e| format!("Error escribiendo fichero: {e}"))?;
-    writeln!(file, "SET FOREIGN_KEY_CHECKS = 0;\n")
-        .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
+    .map_err(write_error)?;
+    writeln!(file, "SET NAMES utf8mb4;").map_err(write_error)?;
+    writeln!(file, "SET FOREIGN_KEY_CHECKS = 0;\n").map_err(write_error)?;
     Ok(())
 }
 
 /// Exporta una tabla al writer proporcionado generando CREATE TABLE + INSERTs.
 fn export_table_to_writer(
-    file: &mut std::fs::File,
+    file: &mut impl Write,
     backend: &MysqlBackend,
     source_db: &str,
     table: &str,
@@ -583,16 +502,15 @@ fn export_table_to_writer(
         file,
         "\n-- ── Tabla: `{table}` ─────────────────────────────────────────────────────\n"
     )
-    .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
+    .map_err(write_error)?;
 
     if options.drop_if_exists {
-        writeln!(file, "DROP TABLE IF EXISTS {};", quote_ident(table))
-            .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
+        writeln!(file, "DROP TABLE IF EXISTS {};", quote_ident(table)).map_err(write_error)?;
     }
 
     if options.include_create {
         let ddl = get_create_table_ddl(backend, source_db, table)?;
-        writeln!(file, "{ddl};\n").map_err(|e| format!("Error escribiendo fichero: {e}"))?;
+        writeln!(file, "{ddl};\n").map_err(write_error)?;
     }
 
     if !options.include_data {
@@ -638,7 +556,7 @@ fn export_table_to_writer(
             "INSERT INTO {} ({col_list}) VALUES\n{values_list};",
             quote_ident(table)
         )
-        .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
+        .map_err(write_error)?;
     }
 
     Ok(total_rows)
@@ -699,5 +617,70 @@ mod tests {
     fn misma_conexion_es_el_mismo_servidor() {
         let (a, b) = (test_server::backend(), test_server::backend());
         assert!(same_server(&a, &b).unwrap());
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn el_fichero_sql_se_puede_volver_a_cargar() {
+        use mysql::prelude::Queryable;
+
+        let b = test_server::backend();
+        for sql in [
+            "DROP DATABASE IF EXISTS rustql_test_dump",
+            "DROP DATABASE IF EXISTS rustql_test_dump2",
+            "CREATE DATABASE rustql_test_dump",
+            "CREATE DATABASE rustql_test_dump2",
+            "CREATE TABLE rustql_test_dump.t (id INT PRIMARY KEY, v TEXT)",
+            "INSERT INTO rustql_test_dump.t VALUES \
+             (1, 'it''s'), (2, 'barra \\\\ y salto\\n'), (3, NULL), (4, '')",
+        ] {
+            b.execute_write(sql).unwrap();
+        }
+        let path = std::env::temp_dir().join(format!("rustql-test-{}.sql", std::process::id()));
+        let rx = spawn_export(
+            test_server::params(),
+            "rustql_test_dump".into(),
+            vec!["t".into()],
+            ExportDestination::SqlFile {
+                path: path.to_string_lossy().into_owned(),
+            },
+            ExportOptions {
+                batch_size: 2,
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let events: Vec<ExportEvent> = rx.iter().collect();
+        let dump = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // Cargarlo en otra BBDD, como haría el cliente mysql
+        let mut conn = b.conn().unwrap();
+        let loaded = conn.query_drop(format!("USE rustql_test_dump2; {dump}"));
+        let select = "SELECT id, v FROM t ORDER BY id";
+        let copy: Vec<(i32, Option<String>)> = conn.query(select).unwrap();
+        let mut conn = b.conn().unwrap();
+        conn.query_drop("USE rustql_test_dump").unwrap();
+        let source: Vec<(i32, Option<String>)> = conn.query(select).unwrap();
+        b.execute_write("DROP DATABASE rustql_test_dump").unwrap();
+        b.execute_write("DROP DATABASE rustql_test_dump2").unwrap();
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(ExportEvent::Finished { total_rows: 4, .. })
+            ),
+            "{:?}",
+            events
+                .iter()
+                .map(|e| match e {
+                    ExportEvent::Failed(e) | ExportEvent::TableError { error: e, .. } => e.clone(),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+        );
+        loaded.unwrap();
+        assert_eq!(copy, source);
+        assert_eq!(source[1].1.as_deref(), Some("barra \\ y salto\n"));
     }
 }
