@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui;
 
 use super::schema::SchemaResult;
+use super::writes::WriteResult;
 use crate::db::{DbBackend, DbResult, QueryResult};
 
 /// Resultado de un trabajo, con lo necesario para aplicarlo a la sesión.
@@ -24,12 +25,15 @@ pub enum JobResult {
         result: DbResult<QueryResult>,
     },
     Schema(SchemaResult),
+    Write(WriteResult),
 }
 
 pub struct Jobs {
     tx: Sender<(u64, JobResult)>,
     rx: Receiver<(u64, JobResult)>,
     epoch: u64,
+    /// Lanzados en esta época y aún sin recoger.
+    pending: usize,
     /// Para repintar en cuanto termina un trabajo (se actualiza en cada poll).
     repaint: egui::Context,
 }
@@ -41,6 +45,7 @@ impl Default for Jobs {
             tx,
             rx,
             epoch: 0,
+            pending: 0,
             repaint: egui::Context::default(),
         }
     }
@@ -49,7 +54,7 @@ impl Default for Jobs {
 impl Jobs {
     /// Lanza `job` en un hilo con su propia referencia al backend.
     pub fn spawn(
-        &self,
+        &mut self,
         backend: &Arc<dyn DbBackend>,
         job: impl FnOnce(&dyn DbBackend) -> JobResult + Send + 'static,
     ) {
@@ -57,6 +62,7 @@ impl Jobs {
         let tx = self.tx.clone();
         let repaint = self.repaint.clone();
         let epoch = self.epoch;
+        self.pending += 1;
         std::thread::spawn(move || {
             let result = job(backend.as_ref());
             let _ = tx.send((epoch, result));
@@ -70,6 +76,7 @@ impl Jobs {
         loop {
             let (epoch, result) = self.rx.try_recv().ok()?;
             if epoch == self.epoch {
+                self.pending -= 1;
                 return Some(result);
             }
         }
@@ -79,5 +86,12 @@ impl Jobs {
     /// desconectar).
     pub fn new_epoch(&mut self) {
         self.epoch += 1;
+        self.pending = 0;
+    }
+
+    /// Trabajos de esta época aún sin terminar.
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.pending
     }
 }

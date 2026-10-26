@@ -64,11 +64,6 @@ impl SchemaCache {
         self.last_ticket
     }
 
-    /// Tablas de `db`, si ya están cargadas.
-    pub fn tables(&self, db: &str) -> Option<&Vec<String>> {
-        self.tables_cache.get(db).and_then(Loadable::ready)
-    }
-
     /// Columnas de `db.table`, si ya están cargadas.
     pub fn columns(&self, db: &str, table: &str) -> Option<&Vec<ColumnInfo>> {
         self.columns_info
@@ -112,7 +107,7 @@ pub fn show_loading<T>(ui: &mut egui::Ui, value: &Loadable<T>) {
 
 impl Session {
     fn spawn_schema_job(
-        &self,
+        &mut self,
         job: impl FnOnce(&dyn DbBackend) -> SchemaResult + Send + 'static,
     ) -> bool {
         self.spawn_job(move |b| JobResult::Schema(job(b)))
