@@ -137,8 +137,10 @@ pub enum ExportPhase {
 
 // ── Estado de modal ──────────────────────────────────────────────────────────
 
+/// Hay uno por sesión: que la exportación ocupe más que las demás variantes
+/// no compensa la indirección de una Box.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 pub enum ModalState {
     #[default]
     None,
@@ -188,26 +190,11 @@ pub enum ModalState {
         title: String,
         pending_count: usize,
     },
-    ConfirmDeleteRow {
-        db: String,
-        table: String,
-        row_idx: usize,
-        /// Descripción corta de la fila (valores PK) para mostrar al usuario.
-        pk_desc: String,
-    },
     CloneTable {
         db: String,
         table: String,
         new_name: String,
         copy_data: bool,
-        error: Option<String>,
-    },
-    InsertRow {
-        db: String,
-        table: String,
-        col_names: Vec<String>,
-        values: Vec<String>,
-        nulls: Vec<bool>,
         error: Option<String>,
     },
     Error {
@@ -271,18 +258,6 @@ pub enum ModalAction {
     DiscardAndReload(Reload),
     /// Cerrar la pestaña de conexión descartando los cambios pendientes.
     CloseSession,
-    DeleteRow {
-        db: String,
-        table: String,
-        row_idx: usize,
-    },
-    InsertRow {
-        db: String,
-        table: String,
-        col_names: Vec<String>,
-        values: Vec<String>,
-        nulls: Vec<bool>,
-    },
     CloneTable {
         db: String,
         src_table: String,
@@ -392,20 +367,6 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             title,
             pending_count,
         } => show_confirm_close_session(ctx, title, *pending_count),
-        ModalState::ConfirmDeleteRow {
-            db,
-            table,
-            row_idx,
-            pk_desc,
-        } => show_confirm_delete_row(ctx, db, table, *row_idx, pk_desc),
-        ModalState::InsertRow {
-            db,
-            table,
-            col_names,
-            values,
-            nulls,
-            error,
-        } => show_insert_row(ctx, db, table, col_names, values, nulls, error),
         ModalState::CloneTable {
             db,
             table,
@@ -1031,130 +992,6 @@ fn show_confirm_close_session(
             });
         });
 
-    action
-}
-
-// ── Confirmar eliminación de fila ─────────────────────────────────────────────
-
-fn show_confirm_delete_row(
-    ctx: &egui::Context,
-    db: &str,
-    table: &str,
-    row_idx: usize,
-    pk_desc: &str,
-) -> ModalAction {
-    let mut action = ModalAction::None;
-    let mut open = true;
-
-    egui::Window::new("Eliminar fila")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label(format!("¿Eliminar esta fila de {db}.{table}?"));
-            if !pk_desc.is_empty() {
-                ui.monospace(pk_desc);
-            }
-            ui.label("Esta acción no se puede deshacer.");
-            ui.separator();
-            ui.horizontal(|ui| {
-                if red_btn(ui, &format!("{TRASH}  Eliminar")) {
-                    action = ModalAction::DeleteRow {
-                        db: db.to_string(),
-                        table: table.to_string(),
-                        row_idx,
-                    };
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
-        });
-
-    if !open {
-        action = ModalAction::Cancel;
-    }
-    action
-}
-
-// ── Insertar fila ─────────────────────────────────────────────────────────────
-
-fn show_insert_row(
-    ctx: &egui::Context,
-    db: &str,
-    table: &str,
-    col_names: &[String],
-    values: &mut Vec<String>,
-    nulls: &mut Vec<bool>,
-    error: &mut Option<String>,
-) -> ModalAction {
-    while values.len() < col_names.len() {
-        values.push(String::new());
-    }
-    while nulls.len() < col_names.len() {
-        nulls.push(false);
-    }
-
-    let mut action = ModalAction::None;
-    let mut open = true;
-
-    egui::Window::new(format!("Insertar fila — {db}.{table}"))
-        .collapsible(false)
-        .resizable(true)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(400.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("insert_row_grid")
-                        .num_columns(3)
-                        .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.strong("Columna");
-                            ui.strong("Valor");
-                            ui.strong("NULL");
-                            ui.end_row();
-
-                            for i in 0..col_names.len() {
-                                ui.label(&col_names[i]);
-                                ui.add_enabled(
-                                    !nulls[i],
-                                    egui::TextEdit::singleline(&mut values[i]).desired_width(220.0),
-                                );
-                                ui.checkbox(&mut nulls[i], "");
-                                if nulls[i] {
-                                    values[i].clear();
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
-
-            if let Some(err) = error {
-                theme::error_card(ui, &format!("Error: {err}"));
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if theme::primary_button(ui, format!("{PLUS}  Insertar")).clicked() {
-                    action = ModalAction::InsertRow {
-                        db: db.to_string(),
-                        table: table.to_string(),
-                        col_names: col_names.to_vec(),
-                        values: values.clone(),
-                        nulls: nulls.clone(),
-                    };
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
-        });
-
-    if !open {
-        action = ModalAction::Cancel;
-    }
     action
 }
 

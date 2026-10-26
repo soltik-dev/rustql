@@ -78,7 +78,6 @@ pub fn show(
     table_search: &mut String,
     fav_tables: &std::collections::HashSet<String>,
     show_only_fav: &mut bool,
-    host: &str,
     server_name: &str,
     conn_color: Option<egui::Color32>,
 ) -> SidebarOutput {
@@ -153,7 +152,6 @@ pub fn show(
     let filter = table_search.to_lowercase();
     let filtering = !filter.is_empty();
 
-    let _ = host;
     let server_label = format!("{} {}", PLUG, clip_text(server_name, 28));
 
     ui.spacing_mut().indent = 10.0;
@@ -197,7 +195,6 @@ pub fn show(
                                 continue;
                             }
 
-                            let open: Option<bool> = None;
                             let is_db_selected = selected_db == Some(db.as_str());
                             let db_label = clip_text(db, 24);
 
@@ -206,7 +203,6 @@ pub fn show(
                             )
                             .id_salt(db)
                             .default_open(false)
-                            .open(open)
                             .show(ui, |ui: &mut egui::Ui| {
                                 let tables: Vec<String> = {
                                     let base = if filtering {

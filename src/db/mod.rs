@@ -173,33 +173,6 @@ pub trait DbBackend: Send + Sync {
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
     fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
-
-    // ── Helpers con implementación por defecto ─────────────────────────────────
-
-    /// SELECT * con LIMIT opcional WHERE.
-    #[allow(dead_code)]
-    fn query_table(&self, db: &str, table: &str, limit: usize) -> DbResult<QueryResult> {
-        self.execute_query(&format!(
-            "SELECT * FROM `{}`.`{}` LIMIT {limit}",
-            escape_ident(db),
-            escape_ident(table)
-        ))
-    }
-
-    #[allow(dead_code)]
-    fn query_filtered(
-        &self,
-        db: &str,
-        table: &str,
-        filter: &str,
-        limit: usize,
-    ) -> DbResult<QueryResult> {
-        self.execute_query(&format!(
-            "SELECT * FROM `{}`.`{}` WHERE {filter} LIMIT {limit}",
-            escape_ident(db),
-            escape_ident(table)
-        ))
-    }
 }
 
 pub enum ConnectEvent {

@@ -394,16 +394,13 @@ pub fn show(
     result: &Option<QueryResult>,
     error: &Option<String>,
     sorts: &mut Vec<SortSpec>,
-    sort_indices: &[usize],
     pending_edits: &[PendingEdit],
     pending_deletes: &BTreeSet<usize>,
     pending_inserts: &[PendingInsert],
     editing_cell: &mut Option<EditingCell>,
     selected_cell: &mut Option<(usize, usize)>,
     selected_rows: &mut BTreeSet<usize>,
-    _last_selected_row: &mut Option<usize>,
     drag_select_from: &mut Option<usize>,
-    _primary_keys: &[String],
     column_info: &[ColumnInfo],
     query_loading: bool,
 ) -> GridAction {
@@ -510,11 +507,9 @@ pub fn show(
     }
 
     let col_count = data.columns.len();
-    let real_row_count = if sort_indices.is_empty() {
-        data.rows.len()
-    } else {
-        sort_indices.len()
-    };
+    // El servidor devuelve los datos ya ordenados: la fila mostrada N es la
+    // fila N de los datos.
+    let real_row_count = data.rows.len();
     let total_row_count = real_row_count + pending_inserts.len();
 
     // Señales fuera de closures para evitar conflictos de borrow
@@ -548,22 +543,16 @@ pub fn show(
     if copy_requested {
         if !selected_rows.is_empty() {
             keyboard_action = GridAction::CopySelectedRows;
-        } else if let Some((sel_row, sel_col)) = *selected_cell {
-            let real_idx = if sort_indices.is_empty() {
-                sel_row
-            } else {
-                sort_indices.get(sel_row).copied().unwrap_or(sel_row)
-            };
-            if let Some(row) = data.rows.get(real_idx)
-                && let Some(cell) = row.get(sel_col)
-            {
-                ui.ctx()
-                    .copy_text(cell.as_deref().unwrap_or("").to_string());
-            }
+        } else if let Some((sel_row, sel_col)) = *selected_cell
+            && let Some(row) = data.rows.get(sel_row)
+            && let Some(cell) = row.get(sel_col)
+        {
+            ui.ctx()
+                .copy_text(cell.as_deref().unwrap_or("").to_string());
         }
     }
 
-    if no_widget_focused && editing_cell.is_none() {
+    if no_widget_focused && edit_cell_rc.borrow().is_none() {
         let arrow_up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
         let arrow_down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
         let arrow_left = ui.input(|i| i.key_pressed(egui::Key::ArrowLeft));
@@ -770,11 +759,7 @@ pub fn show(
 
                         if row_display_idx < real_row_count {
                             // ── Real data row ─────────────────────────────────────
-                            let real_idx = if sort_indices.is_empty() {
-                                row_display_idx
-                            } else {
-                                sort_indices[row_display_idx]
-                            };
+                            let real_idx = row_display_idx;
                             let row_data = &data.rows[real_idx];
 
                             let is_pending_delete = pending_deletes.contains(&real_idx);

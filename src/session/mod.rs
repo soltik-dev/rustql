@@ -68,7 +68,6 @@ pub struct TableViewState {
     pub table_data: Option<QueryResult>,
     pub table_error: Option<String>,
     pub sort_specs: Vec<SortSpec>,
-    pub sort_indices: Vec<usize>,
     pub filter_text: String,
     pub filter_history: Vec<String>,
     pub pending_edits: Vec<PendingEdit>,
@@ -331,20 +330,6 @@ impl Session {
                 result,
             }
         });
-    }
-
-    fn run_write(&mut self, sql: &str) -> Result<u64, String> {
-        let start = Instant::now();
-        let result = match &mut self.state {
-            ConnState::Connected(b) => b.execute_write(sql),
-            _ => return Err("No conectado".into()),
-        };
-        let duration_ms = start.elapsed().as_millis() as u64;
-        match &result {
-            Ok(n) => self.push_log(LogEntry::ok(sql, duration_ms, *n as usize)),
-            Err(e) => self.push_log(LogEntry::err(sql, duration_ms, e.as_str())),
-        }
-        result
     }
 
     fn push_log(&mut self, entry: LogEntry) {
@@ -822,7 +807,6 @@ impl Session {
         // 6. Ejecutar query (server-side sort + filter restaurados)
         let sql = self.build_sql(sh, &db, &table);
         self.run_query_async(sql);
-        // sort_indices es identidad tras run_query (datos ya ordenados por servidor)
     }
 
     fn save_tabs_state(&mut self, sh: &mut Shared) {
@@ -853,7 +837,6 @@ impl Session {
         self.table_view.query_loading = false;
         self.table_view.table_error = None;
         self.table_view.sort_specs.clear();
-        self.table_view.sort_indices.clear();
         self.table_view.filter_text.clear();
         self.table_view.pending_edits.clear();
         self.table_view.editing_cell = None;
@@ -1002,7 +985,6 @@ impl Session {
                 }
                 let rows = data.rows.len();
                 self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
-                self.table_view.sort_indices = (0..rows).collect();
                 self.table_view.table_data = Some(data);
                 self.table_view.table_error = None;
             }
@@ -1010,7 +992,6 @@ impl Session {
                 self.push_log(LogEntry::err(sql, elapsed_ms, &e));
                 self.table_view.table_data = None;
                 self.table_view.table_error = Some(e);
-                self.table_view.sort_indices.clear();
             }
         }
     }
@@ -1220,91 +1201,12 @@ impl Session {
                 self.modal = ModalState::None;
                 self.request_reload(sh, Reload::Filter(sql_fragment));
             }
-            ModalAction::DeleteRow { db, table, row_idx } => {
-                self.modal = ModalState::None;
-                let Some(data) = self.table_view.table_data.clone() else {
-                    return;
-                };
-                let pks = self.table_view.primary_keys.clone();
-                let where_parts: Vec<String> = pks
-                    .iter()
-                    .filter_map(|pk| {
-                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
-                        let pk_val = data.rows.get(row_idx)?.get(pk_idx)?;
-                        Some(format!(
-                            "`{}` = '{}'",
-                            pk.replace('`', "``"),
-                            escape_sql(pk_val.as_deref().unwrap_or(""))
-                        ))
-                    })
-                    .collect();
-                if !where_parts.is_empty() {
-                    let sql = format!(
-                        "DELETE FROM `{}`.`{}` WHERE {}",
-                        db.replace('`', "``"),
-                        table.replace('`', "``"),
-                        where_parts.join(" AND ")
-                    );
-                    if self.run_write(&sql).is_ok() {
-                        self.table_view
-                            .pending_edits
-                            .retain(|e| e.row_idx != row_idx);
-                        let sql = self.build_sql(sh, &db, &table);
-                        self.run_query_async(sql);
-                    }
-                }
-            }
             ModalAction::CloneTable {
                 db,
                 src_table,
                 new_name,
                 copy_data,
             } => self.clone_table(db, src_table, new_name, copy_data),
-            ModalAction::InsertRow {
-                db,
-                table,
-                col_names,
-                values,
-                nulls,
-            } => {
-                if self.table_view.table_data.is_none() {
-                    return;
-                }
-                let col_list: Vec<String> = col_names
-                    .iter()
-                    .map(|c| format!("`{}`", c.replace('`', "``")))
-                    .collect();
-                let val_list: Vec<String> = values
-                    .iter()
-                    .zip(nulls.iter())
-                    .map(|(val, is_null)| {
-                        if *is_null {
-                            "NULL".to_string()
-                        } else {
-                            format!("'{}'", escape_sql(val))
-                        }
-                    })
-                    .collect();
-                let sql = format!(
-                    "INSERT INTO `{}`.`{}` ({}) VALUES ({})",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    col_list.join(", "),
-                    val_list.join(", ")
-                );
-                match self.run_write(&sql) {
-                    Ok(_) => {
-                        self.modal = ModalState::None;
-                        let sql = self.build_sql(sh, &db, &table);
-                        self.run_query_async(sql);
-                    }
-                    Err(e) => {
-                        if let ModalState::InsertRow { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
             ModalAction::StartExport {
                 source_db,
                 tables,
@@ -1531,7 +1433,6 @@ impl Session {
                                     &mut self.schema.table_search,
                                     &sh.settings.fav_tables,
                                     &mut self.show_only_fav,
-                                    &self.params.host,
                                     &self.title,
                                     conn_color,
                                 )
@@ -1655,16 +1556,13 @@ impl Session {
                                 &self.table_view.table_data,
                                 &self.table_view.table_error,
                                 &mut self.table_view.sort_specs,
-                                &self.table_view.sort_indices,
                                 &self.table_view.pending_edits,
                                 &self.table_view.pending_deletes,
                                 &self.table_view.pending_inserts,
                                 &mut self.table_view.editing_cell,
                                 &mut self.table_view.selected_cell,
                                 &mut self.table_view.selected_rows,
-                                &mut self.table_view.last_selected_row,
                                 &mut self.table_view.drag_select_from,
-                                &self.table_view.primary_keys,
                                 col_info_slice,
                                 // Con query en curso: spinner en el grid
                                 running,
