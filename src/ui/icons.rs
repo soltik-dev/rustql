@@ -12,3 +12,8 @@ pub const COPY: &str = "\u{F0C5}"; // copiar
 pub const CLONE: &str = "\u{F0EA}"; // clonar
 pub const PLUS: &str = "\u{E808}"; // crear
 pub const EXPORT: &str = "\u{F093}"; // exportar / subir
+// Añadidos de Font Awesome 4.7 (assets/fonts/add_fontawesome_glyphs.py)
+pub const SEARCH: &str = "\u{F002}"; // filtrar / buscar
+pub const KEY: &str = "\u{F084}"; // clave primaria
+pub const CLOCK: &str = "\u{F017}"; // fecha/hora actual
+pub const UNDO: &str = "\u{F0E2}"; // deshacer

@@ -6,6 +6,7 @@ use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{ColumnInfo, QueryResult, quote_ident};
+use crate::ui::icons::{CLOCK, CLONE, COPY, EDIT, KEY, PLUS, SEARCH, TRASH, UNDO};
 use crate::ui::{CMD, ellipsize, theme};
 
 // ── Tipos de ordenación ───────────────────────────────────────────────────────
@@ -176,22 +177,14 @@ pub fn show_apply_bar(
             if pending_deletes > 0 {
                 theme::badge(
                     ui,
-                    &format!(
-                        "{} {} eliminación(es)",
-                        crate::ui::icons::TRASH,
-                        pending_deletes
-                    ),
+                    &format!("{} {} eliminación(es)", TRASH, pending_deletes),
                     p.danger,
                 );
             }
             if pending_inserts > 0 {
                 theme::badge(
                     ui,
-                    &format!(
-                        "{} {} inserción(es)",
-                        crate::ui::icons::PLUS,
-                        pending_inserts
-                    ),
+                    &format!("{} {} inserción(es)", PLUS, pending_inserts),
                     p.success,
                 );
             }
@@ -729,18 +722,17 @@ pub fn show(
                             let sort_pos = sorts.iter().position(|s| s.col_idx == col_i);
 
                             // Build header label with icons
-                            let icon = if let Some(ci) = column_info.get(col_i) {
-                                match ci.column_key.as_str() {
-                                    "PRI" => "🔑 ",
-                                    "UNI" => "U ",
-                                    "MUL" => "I ",
-                                    _ => "",
-                                }
-                            } else {
-                                ""
+                            let icon = match column_info.get(col_i).map(|c| c.column_key.as_str()) {
+                                Some("PRI") => Some(KEY),
+                                Some("UNI") => Some("U"),
+                                Some("MUL") => Some("I"),
+                                _ => None,
                             };
 
-                            let mut label = format!("{}{}", icon, col_name);
+                            let mut label = match icon {
+                                Some(icon) => format!("{icon} {col_name}"),
+                                None => col_name.clone(),
+                            };
                             if let Some(pos) = sort_pos {
                                 let arrow = if sorts[pos].dir == SortDir::Asc {
                                     " ↑"
@@ -1086,19 +1078,28 @@ pub fn show(
                                         let has_multi_selection = !selected_rows.is_empty();
                                         resp.context_menu(|ui| {
                                             if has_multi_selection {
-                                                if ui.button("📋  Copiar en CSV").clicked() {
+                                                if ui
+                                                    .button(format!("{COPY}  Copiar en CSV"))
+                                                    .clicked()
+                                                {
                                                     *ga_rc.borrow_mut() = GridAction::CopyRowsAs {
                                                         fmt: crate::settings::CopyFormat::Csv,
                                                     };
                                                     ui.close();
                                                 }
-                                                if ui.button("📋  Copiar en TSV").clicked() {
+                                                if ui
+                                                    .button(format!("{COPY}  Copiar en TSV"))
+                                                    .clicked()
+                                                {
                                                     *ga_rc.borrow_mut() = GridAction::CopyRowsAs {
                                                         fmt: crate::settings::CopyFormat::Tsv,
                                                     };
                                                     ui.close();
                                                 }
-                                                if ui.button("📋  Copiar SQL Insert").clicked() {
+                                                if ui
+                                                    .button(format!("{COPY}  Copiar SQL Insert"))
+                                                    .clicked()
+                                                {
                                                     *ga_rc.borrow_mut() = GridAction::CopyRowsAs {
                                                         fmt:
                                                             crate::settings::CopyFormat::SqlInserts,
@@ -1106,14 +1107,20 @@ pub fn show(
                                                     ui.close();
                                                 }
                                             } else {
-                                                if ui.button("📋  Copiar valor").clicked() {
+                                                if ui
+                                                    .button(format!("{COPY}  Copiar valor"))
+                                                    .clicked()
+                                                {
                                                     ui.ctx().copy_text(cell_text.to_string());
                                                     ui.close();
                                                 }
                                             }
                                             ui.separator();
                                             if !is_pending_delete {
-                                                if ui.button("✏  Editar celda").clicked() {
+                                                if ui
+                                                    .button(format!("{EDIT}  Editar celda"))
+                                                    .clicked()
+                                                {
                                                     *ga_rc.borrow_mut() =
                                                         GridAction::CellEditStarted {
                                                             row: RowRef::Existing(real_idx),
@@ -1139,7 +1146,11 @@ pub fn show(
                                                     ui.close();
                                                 }
                                                 if is_dt
-                                                    && ui.button("🕐  Fecha/hora actual").clicked()
+                                                    && ui
+                                                        .button(format!(
+                                                            "{CLOCK}  Fecha/hora actual"
+                                                        ))
+                                                        .clicked()
                                                 {
                                                     *ga_rc.borrow_mut() =
                                                         GridAction::CellEditCommitted {
@@ -1157,7 +1168,9 @@ pub fn show(
                                             let val_display = ellipsize(cell_text, 22);
                                             let val_escaped = crate::db::escape_sql(cell_text);
 
-                                            if ui.button(format!("🔍  = '{val_display}'")).clicked()
+                                            if ui
+                                                .button(format!("{SEARCH}  = '{val_display}'"))
+                                                .clicked()
                                             {
                                                 *ga_rc.borrow_mut() = GridAction::FilterBy {
                                                     sql_fragment: format!(
@@ -1166,7 +1179,9 @@ pub fn show(
                                                 };
                                                 ui.close();
                                             }
-                                            if ui.button(format!("🔍  ≠ '{val_display}'")).clicked()
+                                            if ui
+                                                .button(format!("{SEARCH}  ≠ '{val_display}'"))
+                                                .clicked()
                                             {
                                                 *ga_rc.borrow_mut() = GridAction::FilterBy {
                                                     sql_fragment: format!(
@@ -1176,7 +1191,7 @@ pub fn show(
                                                 ui.close();
                                             }
                                             if ui
-                                                .button(format!("🔍  LIKE '%{val_display}%'"))
+                                                .button(format!("{SEARCH}  LIKE '%{val_display}%'"))
                                                 .clicked()
                                             {
                                                 *ga_rc.borrow_mut() = GridAction::FilterBy {
@@ -1187,7 +1202,7 @@ pub fn show(
                                                 ui.close();
                                             }
                                             if ui
-                                                .button(format!("🔍  IS NULL ({col_name})"))
+                                                .button(format!("{SEARCH}  IS NULL ({col_name})"))
                                                 .clicked()
                                             {
                                                 *ga_rc.borrow_mut() = GridAction::FilterBy {
@@ -1196,7 +1211,9 @@ pub fn show(
                                                 ui.close();
                                             }
                                             if ui
-                                                .button(format!("🔍  IS NOT NULL ({col_name})"))
+                                                .button(format!(
+                                                    "{SEARCH}  IS NOT NULL ({col_name})"
+                                                ))
                                                 .clicked()
                                             {
                                                 *ga_rc.borrow_mut() = GridAction::FilterBy {
@@ -1204,14 +1221,20 @@ pub fn show(
                                                 };
                                                 ui.close();
                                             }
-                                            if ui.button("🔍  Por portapapeles").clicked() {
+                                            if ui
+                                                .button(format!("{SEARCH}  Por portapapeles"))
+                                                .clicked()
+                                            {
                                                 *ga_rc.borrow_mut() =
                                                     GridAction::FilterByClipboard {
                                                         col_name: col_name.clone(),
                                                     };
                                                 ui.close();
                                             }
-                                            if ui.button("🔍  Por texto...").clicked() {
+                                            if ui
+                                                .button(format!("{SEARCH}  Por texto..."))
+                                                .clicked()
+                                            {
                                                 *ga_rc.borrow_mut() = GridAction::FilterUserInput {
                                                     col_name: col_name.clone(),
                                                 };
@@ -1221,14 +1244,14 @@ pub fn show(
                                             // Fila
                                             ui.separator();
                                             if ui
-                                                .button(format!("➕  Insertar fila  {CMD}Ins"))
+                                                .button(format!("{PLUS}  Insertar fila  {CMD}Ins"))
                                                 .clicked()
                                             {
                                                 *ga_rc.borrow_mut() = GridAction::InsertRow;
                                                 ui.close();
                                             }
                                             if ui
-                                                .button(format!("📋  Clonar fila  {CMD}D"))
+                                                .button(format!("{CLONE}  Clonar fila  {CMD}D"))
                                                 .clicked()
                                             {
                                                 *ga_rc.borrow_mut() =
@@ -1236,9 +1259,9 @@ pub fn show(
                                                 ui.close();
                                             }
                                             let del_label = if pending_deletes.contains(&real_idx) {
-                                                "↩  Desmarcar eliminación".to_string()
+                                                format!("{UNDO}  Desmarcar eliminación")
                                             } else {
-                                                format!("🗑  Eliminar fila  {CMD}Supr")
+                                                format!("{TRASH}  Eliminar fila  {CMD}Supr")
                                             };
                                             if theme::danger_button(ui, del_label).clicked() {
                                                 *ga_rc.borrow_mut() =
