@@ -1,8 +1,10 @@
-use mysql::{Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use mysql::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
 
 use super::{
-    ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, TableInfo,
-    escape_ident, escape_sql, validate_charset,
+    ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
+    TableInfo, escape_ident, validate_charset,
 };
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -59,6 +61,12 @@ fn col(row: &[Option<String>], i: usize) -> String {
 /// al solicitar una nueva conexión mediante get_conn().
 pub struct MysqlBackend {
     pool: Pool,
+    opts: Opts,
+    /// Conexión propia del editor SQL, fuera del pool: el pool resetea cada
+    /// conexión al devolverla (COM_RESET_CONNECTION), lo que deshace
+    /// transacciones, variables y tablas temporales entre ejecuciones.
+    /// Se abre al primer uso.
+    session: Arc<Mutex<Option<Conn>>>,
 }
 
 impl MysqlBackend {
@@ -83,14 +91,18 @@ impl MysqlBackend {
             .pool_opts(pool_opts)
             .into();
 
-        let pool = Pool::new(opts).map_err(|e| format!("Error de conexión: {e}"))?;
+        let pool = Pool::new(opts.clone()).map_err(|e| format!("Error de conexión: {e}"))?;
 
         on_status("Autenticando...");
         pool.get_conn()
             .map_err(|e| format!("No se pudo conectar: {e}"))?;
 
         on_status("Conexión establecida.");
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            opts,
+            session: Arc::default(),
+        })
     }
 
     /// Obtiene una conexión del pool. Si la conexión previa había muerto,
@@ -101,6 +113,15 @@ impl MysqlBackend {
         self.pool
             .get_conn()
             .map_err(|e| format!("Sin conexión con el servidor: {e}"))
+    }
+
+    /// Lectura con parámetros posicionales (`?`).
+    fn query_with(&self, sql: &str, params: Vec<Option<String>>) -> DbResult<QueryResult> {
+        let raw_rows: Vec<mysql::Row> = self
+            .conn()?
+            .exec(sql, params)
+            .map_err(|e| format!("Error en query: {e}"))?;
+        Ok(rows_to_result(raw_rows))
     }
 }
 
@@ -125,6 +146,34 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("Error en query: {e}"))?;
 
         Ok(rows_to_result(raw_rows))
+    }
+
+    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+        let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        let conn = match &mut *session {
+            Some(conn) => conn,
+            None => session.insert(
+                Conn::new(self.opts.clone())
+                    .map_err(|e| format!("No se pudo abrir la sesión del editor: {e}"))?,
+            ),
+        };
+        let result = (|| {
+            if let Some(db) = db {
+                conn.query_drop(format!("USE `{}`", escape_ident(db)))?;
+            }
+            conn.query::<mysql::Row, _>(sql)
+        })();
+        match result {
+            Ok(raw_rows) => Ok(rows_to_result(raw_rows)),
+            Err(e) => {
+                // Conexión perdida (servidor reiniciado, timeout…): la próxima
+                // ejecución abre otra; el estado de la sesión ya se ha perdido.
+                if conn.ping().is_err() {
+                    *session = None;
+                }
+                Err(format!("Error en query: {e}"))
+            }
+        }
     }
 
     fn execute_write(&mut self, sql: &str) -> DbResult<u64> {
@@ -158,18 +207,15 @@ impl DbBackend for MysqlBackend {
     }
 
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>> {
-        let sql = format!(
-            "SELECT TABLE_NAME, \
-                    COALESCE(ENGINE,''), \
-                    COALESCE(TABLE_ROWS,0), \
-                    COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0), \
-                    COALESCE(TABLE_COLLATION,'') \
-             FROM information_schema.TABLES \
-             WHERE TABLE_SCHEMA='{}' AND TABLE_TYPE='BASE TABLE' \
-             ORDER BY TABLE_NAME",
-            escape_sql(db)
-        );
-        let r = self.execute_query(&sql)?;
+        let sql = "SELECT TABLE_NAME, \
+                          COALESCE(ENGINE,''), \
+                          COALESCE(TABLE_ROWS,0), \
+                          COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0), \
+                          COALESCE(TABLE_COLLATION,'') \
+                   FROM information_schema.TABLES \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_TYPE='BASE TABLE' \
+                   ORDER BY TABLE_NAME";
+        let r = self.query_with(sql, vec![Some(db.into())])?;
         Ok(r.rows
             .iter()
             .map(|row| TableInfo {
@@ -183,15 +229,11 @@ impl DbBackend for MysqlBackend {
     }
 
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>> {
-        let sql = format!(
-            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA \
-             FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' \
-             ORDER BY ORDINAL_POSITION",
-            escape_sql(db),
-            escape_sql(table)
-        );
-        let r = self.execute_query(&sql)?;
+        let sql = "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA \
+                   FROM information_schema.COLUMNS \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                   ORDER BY ORDINAL_POSITION";
+        let r = self.query_with(sql, vec![Some(db.into()), Some(table.into())])?;
         Ok(r.rows
             .iter()
             .map(|row| {
@@ -213,15 +255,11 @@ impl DbBackend for MysqlBackend {
     }
 
     fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>> {
-        let sql = format!(
-            "SELECT COLUMN_NAME \
-             FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' AND COLUMN_KEY='PRI' \
-             ORDER BY ORDINAL_POSITION",
-            escape_sql(db),
-            escape_sql(table)
-        );
-        let r = self.execute_query(&sql)?;
+        let sql = "SELECT COLUMN_NAME \
+                   FROM information_schema.COLUMNS \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY='PRI' \
+                   ORDER BY ORDINAL_POSITION";
+        let r = self.query_with(sql, vec![Some(db.into()), Some(table.into())])?;
         Ok(r.rows.iter().map(|row| col(row, 0)).collect())
     }
 
@@ -258,17 +296,91 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()> {
+    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
             .map_err(|e| format!("Error iniciando transacción: {e}"))?;
-        for sql in stmts {
-            if let Err(e) = conn.query_drop(sql.as_str()) {
+        for stmt in stmts {
+            if let Err(e) = conn.exec_drop(stmt.sql.as_str(), stmt.params.clone()) {
                 let _ = conn.query_drop("ROLLBACK");
                 return Err(format!("Error en transacción (ROLLBACK): {e}"));
             }
         }
         conn.query_drop("COMMIT")
             .map_err(|e| format!("Error en COMMIT: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_server;
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn metadatos_con_parametros() {
+        let mut b = test_server::backend();
+        // Nombres con comilla y barra: con el escape a mano eran frágiles
+        let db = "rustql_test_meta'\\x";
+        let qdb = format!("`{}`", escape_ident(db));
+        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}")).unwrap();
+        b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();
+        b.execute_write(&format!(
+            "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
+             v VARCHAR(10) NOT NULL DEFAULT 'x', n INT NULL)"
+        ))
+        .unwrap();
+        b.execute_write(&format!("INSERT INTO {qdb}.t (v) VALUES ('a'), ('b')"))
+            .unwrap();
+        b.execute_write(&format!("ANALYZE TABLE {qdb}.t")).unwrap();
+
+        let tables = b.get_tables_info(db);
+        let columns = b.get_columns_info(db, "t");
+        let pks = b.get_primary_keys(db, "t");
+        b.execute_write(&format!("DROP DATABASE {qdb}")).unwrap();
+
+        let tables = tables.unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "t");
+        assert_eq!(tables[0].row_count, 2);
+        let columns = columns.unwrap();
+        let names: Vec<_> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "v", "n"]);
+        assert!(columns[0].extra.contains("auto_increment"));
+        assert!(!columns[1].is_nullable && columns[2].is_nullable);
+        assert_eq!(pks.unwrap(), ["id"]);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
+        let mut b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session").unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
+        let db = Some("rustql_test_session");
+        let run = |sql: &str| b.execute_in_session(db, sql).unwrap().rows;
+        let count = || {
+            b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
+                .unwrap()
+                .rows[0][0]
+                .clone()
+        };
+
+        // Cada línea es una ejecución (F9) distinta
+        run("SET @x = 42");
+        run("START TRANSACTION");
+        run("INSERT INTO t VALUES (1)");
+        assert_eq!(run("SELECT @x, COUNT(*) FROM t")[0], [Some("42".into()), Some("1".into())]);
+        assert_eq!(count(), Some("0".into()), "sin COMMIT, el resto no la ve");
+        run("ROLLBACK");
+        assert_eq!(run("SELECT COUNT(*) FROM t")[0], [Some("0".into())]);
+
+        run("START TRANSACTION");
+        run("INSERT INTO t VALUES (2)");
+        run("COMMIT");
+        assert_eq!(count(), Some("1".into()));
+
+        b.execute_write("DROP DATABASE rustql_test_session").unwrap();
     }
 }

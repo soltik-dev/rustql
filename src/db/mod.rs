@@ -51,6 +51,14 @@ impl Default for ConnectionParams {
 
 pub type DbResult<T> = Result<T, String>;
 
+/// Sentencia con parámetros posicionales (`?`). Los valores viajan aparte
+/// del SQL: no hace falta escaparlos y llegan intactos (`None` = NULL).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statement {
+    pub sql: String,
+    pub params: Vec<Option<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
@@ -87,14 +95,18 @@ pub struct ColumnInfo {
 }
 
 /// Escapa un valor para uso dentro de comillas simples en SQL.
-/// Cubre todas las secuencias de escape requeridas por MySQL.
+/// Cubre todas las secuencias de escape requeridas por MySQL. La comilla se
+/// dobla (`''`) en vez de escaparse con `\'`: si el servidor tiene
+/// NO_BACKSLASH_ESCAPES en el sql_mode, `\'` cerraría la cadena y el resto
+/// del valor se ejecutaría como SQL. Con `''` lo peor que pasa en ese modo es
+/// que las barras se lean literalmente.
 pub fn escape_sql(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\0', "\\0")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\x1a', "\\Z")
-        .replace('\'', "\\'")
+        .replace('\'', "''")
 }
 
 /// Escapa un identificador para uso dentro de backticks en SQL.
@@ -121,6 +133,11 @@ pub trait DbBackend: Send {
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
 
+    /// SQL del editor, en una conexión propia que se mantiene entre
+    /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
+    /// tablas temporales siguen vivas en la siguiente. Con `db`, antes `USE`.
+    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
+
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;
@@ -138,7 +155,7 @@ pub trait DbBackend: Send {
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
-    fn execute_transaction(&mut self, stmts: &[String]) -> DbResult<()>;
+    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()>;
 
     // ── Helpers con implementación por defecto ─────────────────────────────────
 
@@ -192,4 +209,87 @@ pub fn connect_mysql_progress(
     let result = mysql::MysqlBackend::connect_with_progress(params, send_status)
         .map(|b| -> Box<dyn DbBackend> { Box::new(b) });
     let _ = tx.send(ConnectEvent::Done(result));
+}
+
+/// Servidor real para los tests marcados `#[ignore]`:
+/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto cargo test -- --ignored`.
+/// Crean y borran sus propias BBDD `rustql_test_*`.
+#[cfg(test)]
+pub mod test_server {
+    use super::ConnectionParams;
+
+    pub fn params() -> ConnectionParams {
+        let url = std::env::var("RUSTQL_TEST_MYSQL")
+            .expect("RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto");
+        let (auth, addr) = url.rsplit_once('@').expect("falta @");
+        let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
+        let (host, port) = addr.rsplit_once(':').expect("falta :puerto");
+        ConnectionParams {
+            host: host.into(),
+            port: port.parse().expect("puerto"),
+            user: user.into(),
+            password: password.into(),
+            keyring_id: None,
+        }
+    }
+
+    pub fn backend() -> super::mysql::MysqlBackend {
+        super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::mysql::prelude::Queryable;
+
+    use super::*;
+
+    /// Con NO_BACKSLASH_ESCAPES, escapando la comilla como `\'`, este valor
+    /// convertía `v = '…'` en `v = '\\\' OR 1=1 -- '`.
+    const ATTACK: &str = "\\' OR 1=1 -- ";
+
+    #[test]
+    fn escape_sql_dobla_las_comillas() {
+        assert_eq!(escape_sql("it's"), "it''s");
+        assert_eq!(escape_sql(ATTACK), "\\\\'' OR 1=1 -- ");
+        assert_eq!(escape_sql("a\nb\\c"), "a\\nb\\\\c");
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn escape_sql_no_permite_inyectar_en_ningun_sql_mode() {
+        let backend = test_server::backend();
+        // Una sola conexión: sql_mode es de sesión
+        let mut conn = backend.conn().unwrap();
+        conn.query_drop("DROP DATABASE IF EXISTS rustql_test_escape")
+            .unwrap();
+        conn.query_drop("CREATE DATABASE rustql_test_escape")
+            .unwrap();
+        conn.query_drop("CREATE TABLE rustql_test_escape.t (v TEXT)")
+            .unwrap();
+        conn.query_drop("INSERT INTO rustql_test_escape.t VALUES ('a'), ('b')")
+            .unwrap();
+
+        let tricky = ["it's", "a\\b", "x\\'y", "line\nbreak", ATTACK];
+        for mode in ["", "NO_BACKSLASH_ESCAPES"] {
+            conn.query_drop(format!("SET SESSION sql_mode = '{mode}'"))
+                .unwrap();
+            let matches: Option<u64> = conn
+                .query_first(format!(
+                    "SELECT COUNT(*) FROM rustql_test_escape.t WHERE v = '{}'",
+                    escape_sql(ATTACK)
+                ))
+                .unwrap();
+            assert_eq!(matches, Some(0), "inyección con sql_mode={mode:?}");
+            if mode.is_empty() {
+                for value in tricky {
+                    let back: Option<String> = conn
+                        .query_first(format!("SELECT '{}'", escape_sql(value)))
+                        .unwrap();
+                    assert_eq!(back.as_deref(), Some(value));
+                }
+            }
+        }
+        conn.query_drop("DROP DATABASE rustql_test_escape").unwrap();
+    }
 }

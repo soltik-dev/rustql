@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::db::{
     ColumnInfo, ConnectEvent, ConnectionParams, DatabaseInfo, DbBackend, ExportDestination,
-    ExportEvent, ExportOptions, QueryResult, TableInfo, connect_mysql_progress, escape_ident,
-    escape_sql,
+    ExportEvent, ExportOptions, QueryResult, Statement, TableInfo, connect_mysql_progress,
+    escape_ident, escape_sql,
 };
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
@@ -19,11 +19,11 @@ use crate::settings::{self, AppSettings, SavedSqlTab};
 use crate::table_state::{self, TableStates};
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::modals::{
-    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef,
+    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
     TableExportEntry, TableExportState, TruncateKind,
 };
 use crate::ui::results_grid::{
-    EditingCell, GridAction, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec,
+    EditingCell, GridAction, InsertValue, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec,
 };
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
@@ -416,52 +416,66 @@ impl Session {
         }
     }
 
-    fn invalidate_after_write(&mut self, db: Option<&str>, table: Option<&str>) {
-        // Invalidar bases de datos info
+    /// Tras escribir en `db` (crear, clonar, vaciar…): descarta sus cachés de
+    /// esquema para que se vuelvan a leer. No toca la tabla abierta.
+    fn invalidate_schema(&mut self, db: &str) {
         self.schema.databases_info = None;
+        // Recargar lista de bases de datos del sidebar
+        self.schema.databases.clear();
+        self.schema.tables_cache.remove(db);
+        self.schema.tables_info.remove(db);
+    }
 
-        if let Some(db) = db {
-            // Invalidar caché de tablas de esa BD
-            self.schema.tables_cache.remove(db);
-            self.schema.tables_info.remove(db);
-            // Recargar lista de bases de datos del sidebar
-            self.schema.databases.clear();
-
-            if let Some(table) = table {
-                let key = (db.to_string(), table.to_string());
-                self.schema.columns_info.remove(&key);
-
-                // Si la tabla eliminada era la seleccionada, limpiar
-                if matches!(
-                    &self.schema.selected_node,
-                    Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
-                ) {
-                    self.schema.selected_node = Some(SelectedNode::Database(db.to_string()));
-                    self.table_view.table_data = None;
-                    self.table_view.table_error = None;
-                    self.table_view.pending_edits.clear();
-                    self.table_view.pending_deletes.clear();
-                    self.table_view.pending_inserts.clear();
-                    self.table_view.editing_cell = None;
-                    self.table_view.primary_keys.clear();
-                }
-            } else {
-                // BD entera eliminada
-                if matches!(
-                    &self.schema.selected_node,
-                    Some(SelectedNode::Database(d) | SelectedNode::Table { db: d, .. }) if d == db
-                ) {
-                    self.schema.selected_node = Some(SelectedNode::Server);
-                    self.active_tab = ActiveTab::Servidor;
-                    self.table_view.table_data = None;
-                    self.table_view.table_error = None;
-                    self.table_view.pending_edits.clear();
-                    self.table_view.pending_deletes.clear();
-                    self.table_view.pending_inserts.clear();
-                    self.table_view.editing_cell = None;
-                    self.table_view.primary_keys.clear();
-                }
+    /// Tras borrar `db` o, con `table`, solo esa tabla: además de invalidar
+    /// las cachés, cierra lo borrado si estaba abierto.
+    fn on_dropped(&mut self, db: &str, table: Option<&str>) {
+        self.invalidate_schema(db);
+        let (open_db, open_table) = match &self.schema.selected_node {
+            Some(SelectedNode::Database(d)) => (Some(d.as_str()), None),
+            Some(SelectedNode::Table { db, table }) => (Some(db.as_str()), Some(table.as_str())),
+            _ => (None, None),
+        };
+        let closes_view = open_db == Some(db) && (table.is_none() || table == open_table);
+        match table {
+            Some(t) => {
+                self.schema
+                    .columns_info
+                    .remove(&(db.to_string(), t.to_string()));
             }
+            None => self.schema.columns_info.retain(|(d, _), _| d != db),
+        }
+        if !closes_view {
+            return;
+        }
+        // Las pestañas SQL no dependen de la selección: se quedan donde están.
+        if table.is_some() {
+            self.schema.selected_node = Some(SelectedNode::Database(db.to_string()));
+            if matches!(self.active_tab, ActiveTab::Datos | ActiveTab::Tabla) {
+                self.active_tab = ActiveTab::Bbdd;
+            }
+        } else {
+            self.schema.selected_node = Some(SelectedNode::Server);
+            if !matches!(self.active_tab, ActiveTab::Sql(_)) {
+                self.active_tab = ActiveTab::Servidor;
+            }
+        }
+        self.table_view.table_data = None;
+        self.table_view.table_error = None;
+        self.table_view.primary_keys.clear();
+        self.discard_pending();
+        self.clear_row_selection();
+    }
+
+    /// Tras vaciar tablas de `db`: si la abierta es una de ellas, sus cambios
+    /// pendientes ya no tienen filas a las que aplicarse; se recarga vacía.
+    fn after_truncate(&mut self, sh: &mut Shared, db: &str, tables: &[String]) {
+        self.invalidate_schema(db);
+        if let Some(SelectedNode::Table { db: d, table: t }) = &self.schema.selected_node
+            && d == db
+            && tables.contains(t)
+        {
+            self.discard_pending();
+            self.reload_now(sh, Reload::Refresh);
         }
     }
 
@@ -475,206 +489,256 @@ impl Session {
         }
     }
 
-    /// Ejecuta deletes, edits e inserts pendientes (cada grupo en su transacción).
-    /// Devuelve true si no queda ninguno. No recarga: el llamante decide, porque
-    /// la recarga cede el backend a un hilo y bloquearía otras operaciones.
+    /// Ejecuta deletes, edits e inserts pendientes en una sola transacción:
+    /// o se guardan todos o ninguno. Devuelve true si no queda ninguno. No
+    /// recarga: el llamante decide, porque la recarga cede el backend a un
+    /// hilo y bloquearía otras operaciones.
     fn commit_pending_changes(&mut self) -> bool {
-        let (db, table) = match &self.schema.selected_node {
-            Some(SelectedNode::Table { db, table }) => (db.clone(), table.clone()),
+        if self.pending_count() == 0 {
+            return true;
+        }
+        let stmts = match self.pending_statements() {
+            Ok(stmts) => stmts,
+            Err(message) => {
+                self.modal = ModalState::Error {
+                    title: "No se pueden guardar los cambios".into(),
+                    message,
+                };
+                return false;
+            }
+        };
+        let start = Instant::now();
+        let result = match &mut self.state {
+            ConnState::Connected(b) => b.execute_transaction(&stmts),
             _ => return false,
         };
-
-        // 1. Apply deletes (en transacción para garantizar atomicidad)
-        if !self.table_view.pending_deletes.is_empty() {
-            if self.table_view.primary_keys.is_empty() {
-                self.modal = modals::ModalState::Error {
-                    title: "Error al eliminar".into(),
-                    message: "No se puede eliminar: tabla sin clave primaria".into(),
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let summary = format!(
+            "Guardar cambios: {} eliminación(es), {} edición(es), {} inserción(es) (transacción)",
+            self.table_view.pending_deletes.len(),
+            self.table_view.pending_edits.len(),
+            self.table_view.pending_inserts.len()
+        );
+        match result {
+            Ok(()) => {
+                self.push_log(LogEntry::ok(summary, duration_ms, stmts.len()));
+                self.discard_pending();
+                true
+            }
+            Err(e) => {
+                self.push_log(LogEntry::err(summary, duration_ms, &e));
+                self.modal = ModalState::Error {
+                    title: "Error al guardar".into(),
+                    message: e,
                 };
-                return false;
+                false
             }
-            let data = match &self.table_view.table_data {
-                Some(d) => d.clone(),
-                None => return false,
-            };
-            let pks = self.table_view.primary_keys.clone();
-            let deletes: Vec<usize> = self.table_view.pending_deletes.iter().cloned().collect();
-            let mut stmts: Vec<String> = Vec::new();
-            for row_idx in &deletes {
-                let where_parts: Vec<String> = pks
-                    .iter()
-                    .filter_map(|pk| {
-                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
-                        let pk_val = data.rows.get(*row_idx)?.get(pk_idx)?;
-                        Some(format!(
-                            "`{}` = '{}'",
-                            pk.replace('`', "``"),
-                            escape_sql(pk_val.as_deref().unwrap_or(""))
-                        ))
-                    })
-                    .collect();
-                if where_parts.is_empty() {
-                    continue;
-                }
-                stmts.push(format!(
-                    "DELETE FROM `{}`.`{}` WHERE {}",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    where_parts.join(" AND ")
-                ));
+        }
+    }
+
+    /// Sentencias de los cambios pendientes: DELETE, UPDATE (uno por fila,
+    /// con todas sus celdas editadas) e INSERT, con los valores como
+    /// parámetros. Las filas existentes se identifican por su clave primaria.
+    fn pending_statements(&self) -> Result<Vec<Statement>, String> {
+        let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node else {
+            return Err("No hay ninguna tabla abierta.".into());
+        };
+        let tv = &self.table_view;
+        let data = tv.table_data.as_ref().ok_or("No hay datos cargados.")?;
+        let target = format!("`{}`.`{}`", escape_ident(db), escape_ident(table));
+        let edits_rows = !tv.pending_deletes.is_empty() || !tv.pending_edits.is_empty();
+        if edits_rows && tv.primary_keys.is_empty() {
+            return Err(
+                "La tabla no tiene clave primaria: no se pueden editar ni eliminar filas.".into(),
+            );
+        }
+        let row_key = |row_idx: usize| {
+            pk_condition(data, &tv.primary_keys, row_idx)
+                .ok_or_else(|| format!("No se encuentra la clave primaria de la fila {row_idx}."))
+        };
+
+        let mut stmts = Vec::new();
+        for &row_idx in &tv.pending_deletes {
+            let (condition, params) = row_key(row_idx)?;
+            stmts.push(Statement {
+                sql: format!("DELETE FROM {target} WHERE {condition}"),
+                params,
+            });
+        }
+
+        // Un UPDATE por fila: si se edita la clave primaria, el WHERE (que ve
+        // la fila original) sigue encontrando la fila para el resto de celdas.
+        let mut edits_by_row: std::collections::BTreeMap<usize, Vec<&PendingEdit>> =
+            Default::default();
+        for edit in &tv.pending_edits {
+            edits_by_row.entry(edit.row_idx).or_default().push(edit);
+        }
+        for (row_idx, edits) in edits_by_row {
+            let mut sets = Vec::new();
+            let mut params = Vec::new();
+            for edit in edits {
+                let col = data
+                    .columns
+                    .get(edit.col_idx)
+                    .ok_or_else(|| format!("No existe la columna {}.", edit.col_idx))?;
+                sets.push(format!("`{}` = ?", escape_ident(col)));
+                params.push((!edit.is_null).then(|| edit.new_value.clone()));
             }
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return false,
-            };
-            match result {
-                Ok(()) => {
-                    let n = stmts.len();
-                    self.push_log(LogEntry::ok(format!("DELETE x{n} (transacción)"), 0, n));
-                    self.table_view.pending_deletes.clear();
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err("DELETE (transacción)", 0, &e));
-                    self.modal = modals::ModalState::Error {
-                        title: "Error al eliminar".into(),
-                        message: e,
+            let (condition, key) = row_key(row_idx)?;
+            params.extend(key);
+            stmts.push(Statement {
+                sql: format!("UPDATE {target} SET {} WHERE {condition}", sets.join(", ")),
+                params,
+            });
+        }
+
+        // Las columnas en DEFAULT se omiten para que el servidor ponga su
+        // valor por defecto; si son todas, `INSERT INTO t () VALUES ()`.
+        for ins in &tv.pending_inserts {
+            let (cols, params): (Vec<String>, Vec<Option<String>>) = data
+                .columns
+                .iter()
+                .zip(&ins.values)
+                .filter_map(|(col, value)| {
+                    let param = match value {
+                        InsertValue::Default => return None,
+                        InsertValue::Null => None,
+                        InsertValue::Value(v) => Some(v.clone()),
                     };
+                    Some((format!("`{}`", escape_ident(col)), param))
+                })
+                .unzip();
+            let placeholders = vec!["?"; cols.len()].join(", ");
+            stmts.push(Statement {
+                sql: format!(
+                    "INSERT INTO {target} ({}) VALUES ({placeholders})",
+                    cols.join(", ")
+                ),
+                params,
+            });
+        }
+        Ok(stmts)
+    }
+
+    /// Fila nueva para el grid: vacía (todo DEFAULT, que el servidor
+    /// completa) o copia de `source_row`. Las AUTO_INCREMENT, siempre DEFAULT.
+    fn new_insert_row(&self, source_row: Option<usize>) -> Option<PendingInsert> {
+        let data = self.table_view.table_data.as_ref()?;
+        if data.columns.is_empty() {
+            return None;
+        }
+        let columns_info = match &self.schema.selected_node {
+            Some(SelectedNode::Table { db, table }) => {
+                self.schema.columns_info.get(&(db.clone(), table.clone()))
+            }
+            _ => None,
+        };
+        let auto_cols: Vec<bool> = (0..data.columns.len())
+            .map(|i| {
+                columns_info
+                    .and_then(|ci| ci.get(i))
+                    .is_some_and(|c| c.extra.contains("auto_increment"))
+            })
+            .collect();
+        let source = source_row.and_then(|r| data.rows.get(r));
+        let values = auto_cols
+            .iter()
+            .enumerate()
+            .map(|(i, &auto)| match source {
+                Some(row) if !auto => InsertValue::from(row.get(i).cloned().flatten()),
+                _ => InsertValue::Default,
+            })
+            .collect();
+        Some(PendingInsert { values, auto_cols })
+    }
+
+    /// Registra el valor nuevo de una celda (`None` = NULL). En una fila
+    /// existente, volver al valor original quita el cambio pendiente.
+    fn record_edit(&mut self, row: RowRef, col_idx: usize, value: Option<String>) {
+        let tv = &mut self.table_view;
+        match row {
+            RowRef::Insert(insert_idx) => {
+                if let Some(slot) = tv
+                    .pending_inserts
+                    .get_mut(insert_idx)
+                    .and_then(|ins| ins.values.get_mut(col_idx))
+                {
+                    *slot = InsertValue::from(value);
+                }
+            }
+            RowRef::Existing(row_idx) => {
+                let original = tv
+                    .table_data
+                    .as_ref()
+                    .and_then(|d| d.rows.get(row_idx))
+                    .and_then(|r| r.get(col_idx))
+                    .cloned()
+                    .flatten();
+                tv.pending_edits
+                    .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
+                if value != original {
+                    tv.pending_edits.push(PendingEdit {
+                        row_idx,
+                        col_idx,
+                        is_null: value.is_none(),
+                        new_value: value.unwrap_or_default(),
+                    });
                 }
             }
         }
+    }
 
-        // 2. Apply edits (en transacción para garantizar atomicidad)
-        if !self.table_view.pending_edits.is_empty() {
-            if self.table_view.primary_keys.is_empty() {
-                self.modal = modals::ModalState::Error {
-                    title: "Error al editar".into(),
-                    message: "No se puede editar: la tabla no tiene clave primaria".into(),
-                };
-                return false;
-            }
-            let data = match &self.table_view.table_data {
-                Some(d) => d.clone(),
-                None => return false,
-            };
-            let edits = self.table_view.pending_edits.clone();
-            let pks = self.table_view.primary_keys.clone();
-            let mut stmts: Vec<String> = Vec::new();
-
-            for edit in &edits {
-                let col_name = match data.columns.get(edit.col_idx) {
-                    Some(c) => c.clone(),
-                    None => continue,
-                };
-                let where_parts: Vec<String> = pks
+    /// Texto que muestra el grid en una celda: el del cambio pendiente si lo
+    /// hay, si no el de los datos. NULL se edita como texto vacío.
+    fn cell_text(&self, row: RowRef, col_idx: usize) -> String {
+        let tv = &self.table_view;
+        let value = match row {
+            RowRef::Insert(insert_idx) => match tv
+                .pending_inserts
+                .get(insert_idx)
+                .and_then(|ins| ins.values.get(col_idx))
+            {
+                Some(InsertValue::Value(v)) => Some(v.clone()),
+                _ => None,
+            },
+            RowRef::Existing(row_idx) => {
+                match tv
+                    .pending_edits
                     .iter()
-                    .filter_map(|pk| {
-                        let pk_idx = data.columns.iter().position(|c| c == pk)?;
-                        let pk_val = data.rows.get(edit.row_idx)?.get(pk_idx)?;
-                        Some(format!(
-                            "`{}` = '{}'",
-                            pk.replace('`', "``"),
-                            escape_sql(pk_val.as_deref().unwrap_or(""))
-                        ))
-                    })
-                    .collect();
-                if where_parts.is_empty() {
-                    continue;
-                }
-                let set_clause = if edit.is_null {
-                    format!("`{}` = NULL", col_name.replace('`', "``"))
-                } else {
-                    format!(
-                        "`{}` = '{}'",
-                        col_name.replace('`', "``"),
-                        escape_sql(&edit.new_value)
-                    )
-                };
-                stmts.push(format!(
-                    "UPDATE `{}`.`{}` SET {} WHERE {}",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    set_clause,
-                    where_parts.join(" AND ")
-                ));
-            }
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return false,
-            };
-            match result {
-                Ok(()) => {
-                    let n = stmts.len();
-                    self.push_log(LogEntry::ok(format!("UPDATE x{n} (transacción)"), 0, n));
-                    self.table_view.pending_edits.clear();
-                    self.table_view.editing_cell = None;
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err("UPDATE (transacción)", 0, &e));
-                    self.modal = modals::ModalState::Error {
-                        title: "Error al guardar".into(),
-                        message: e,
-                    };
+                    .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
+                {
+                    Some(edit) => (!edit.is_null).then(|| edit.new_value.clone()),
+                    None => tv
+                        .table_data
+                        .as_ref()
+                        .and_then(|d| d.rows.get(row_idx))
+                        .and_then(|r| r.get(col_idx))
+                        .cloned()
+                        .flatten(),
                 }
             }
-        }
+        };
+        value.unwrap_or_default()
+    }
 
-        // 3. Apply inserts (en transacción para garantizar atomicidad)
-        if !self.table_view.pending_inserts.is_empty() {
-            let col_names = self
-                .table_view
-                .table_data
-                .as_ref()
-                .map(|d| d.columns.clone())
-                .unwrap_or_default();
-            let inserts = self.table_view.pending_inserts.clone();
-            let mut stmts: Vec<String> = Vec::new();
-            for ins in &inserts {
-                let (cols, vals): (Vec<_>, Vec<_>) = col_names
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !ins.auto_cols.get(*i).copied().unwrap_or(false))
-                    .map(|(i, col)| {
-                        let val = ins.values.get(i).and_then(|v| v.as_deref());
-                        let col_sql = format!("`{}`", col.replace('`', "``"));
-                        let val_sql = match val {
-                            None => "NULL".to_string(),
-                            Some(v) => format!("'{}'", escape_sql(v)),
-                        };
-                        (col_sql, val_sql)
-                    })
-                    .unzip();
-                if cols.is_empty() {
-                    continue;
-                }
-                stmts.push(format!(
-                    "INSERT INTO `{}`.`{}` ({}) VALUES ({})",
-                    db.replace('`', "``"),
-                    table.replace('`', "``"),
-                    cols.join(", "),
-                    vals.join(", ")
-                ));
-            }
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return false,
-            };
-            match result {
-                Ok(()) => {
-                    let n = stmts.len();
-                    self.push_log(LogEntry::ok(format!("INSERT x{n} (transacción)"), 0, n));
-                    self.table_view.pending_inserts.clear();
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err("INSERT (transacción)", 0, &e));
-                    self.modal = modals::ModalState::Error {
-                        title: "Error al insertar".into(),
-                        message: e,
-                    };
-                }
-            }
-        }
-
-        self.pending_count() == 0
+    /// Columna a la que salta Tab: la siguiente editable (en una fila nueva,
+    /// las AUTO_INCREMENT no lo son), volviendo a la primera al final.
+    fn next_editable_col(&self, row: RowRef, col_idx: usize) -> usize {
+        let tv = &self.table_view;
+        let col_count = tv.table_data.as_ref().map_or(1, |d| d.columns.len().max(1));
+        let is_auto = |c: usize| match row {
+            RowRef::Insert(insert_idx) => tv
+                .pending_inserts
+                .get(insert_idx)
+                .and_then(|ins| ins.auto_cols.get(c))
+                .copied()
+                .unwrap_or(false),
+            RowRef::Existing(_) => false,
+        };
+        (1..=col_count)
+            .map(|step| (col_idx + step) % col_count)
+            .find(|&c| !is_auto(c))
+            .unwrap_or(col_idx)
     }
 
     /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
@@ -694,6 +758,74 @@ impl Session {
         self.table_view.pending_edits.len()
             + self.table_view.pending_deletes.len()
             + self.table_view.pending_inserts.len()
+    }
+
+    fn discard_pending(&mut self) {
+        self.table_view.pending_edits.clear();
+        self.table_view.pending_deletes.clear();
+        self.table_view.pending_inserts.clear();
+        self.table_view.editing_cell = None;
+    }
+
+    /// Recarga la tabla abierta. Si hay cambios pendientes pregunta antes qué
+    /// hacer con ellos: van por posición de fila y con los datos nuevos
+    /// apuntarían a otras filas.
+    fn request_reload(&mut self, sh: &mut Shared, reload: Reload) {
+        let Some(SelectedNode::Table { table, .. }) = &self.schema.selected_node else {
+            return;
+        };
+        let pending_count = self.pending_count();
+        if pending_count > 0 {
+            self.modal = ModalState::ConfirmReload {
+                reload,
+                pending_count,
+                current_table: table.clone(),
+            };
+        } else {
+            self.reload_now(sh, reload);
+        }
+    }
+
+    fn reload_now(&mut self, sh: &mut Shared, reload: Reload) {
+        let Some(SelectedNode::Table { db, table }) = self.schema.selected_node.clone() else {
+            return;
+        };
+        // La celda en edición también va por posición.
+        self.table_view.editing_cell = None;
+        match reload {
+            Reload::Sort(specs) => {
+                self.table_view.sort_specs = specs;
+                self.clear_row_selection();
+                self.save_table_state(sh);
+            }
+            Reload::Filter(filter) => {
+                if !filter.is_empty() {
+                    let history = &mut self.table_view.filter_history;
+                    history.retain(|f| f != &filter);
+                    history.insert(0, filter.clone());
+                    history.truncate(20);
+                }
+                self.table_view.filter_text = filter;
+                self.clear_row_selection();
+                self.save_table_state(sh);
+            }
+            Reload::Refresh => {
+                // Releer la estructura: el grid la usa para las claves, los
+                // NULL y el AUTO_INCREMENT de las filas nuevas. Antes de la
+                // query, que cede el backend a su hilo.
+                self.load_columns_info(&db, &table);
+                self.load_primary_keys(&db, &table);
+            }
+        }
+        let sql = self.build_sql(sh, &db, &table);
+        self.run_query_async(sql);
+    }
+
+    fn clear_row_selection(&mut self) {
+        self.table_view.selected_cell = None;
+        self.table_view.selected_rows.clear();
+        self.table_view.last_selected_row = None;
+        self.table_view.drag_select_from = None;
     }
 
     /// Abre una tabla en la pestaña indicada. Si hay cambios pendientes en la
@@ -835,6 +967,25 @@ impl Session {
     }
 }
 
+/// Condición `WHERE` que identifica la fila `row_idx` por su clave primaria,
+/// con sus valores como parámetros. `None` si falta la fila o alguna columna
+/// de la clave: una condición parcial podría afectar a varias filas.
+fn pk_condition(
+    data: &QueryResult,
+    primary_keys: &[String],
+    row_idx: usize,
+) -> Option<(String, Vec<Option<String>>)> {
+    let row = data.rows.get(row_idx)?;
+    let mut parts = Vec::new();
+    let mut params = Vec::new();
+    for pk in primary_keys {
+        let col_idx = data.columns.iter().position(|c| c == pk)?;
+        parts.push(format!("`{}` = ?", escape_ident(pk)));
+        params.push(row.get(col_idx)?.clone());
+    }
+    Some((parts.join(" AND "), params))
+}
+
 // ── Loop principal ────────────────────────────────────────────────────────────
 
 impl Session {
@@ -905,6 +1056,14 @@ impl Session {
             self.state = ConnState::Connected(backend);
             match result {
                 Ok(data) => {
+                    // Toda recarga pasa por request_reload, que antes resuelve
+                    // los cambios pendientes. Si alguna se lo salta, mejor
+                    // perderlos que aplicarlos a las filas que ahora ocupan
+                    // esas posiciones.
+                    if self.pending_count() > 0 {
+                        log::warn!("Datos recargados con cambios pendientes: se descartan");
+                        self.discard_pending();
+                    }
                     let rows = data.rows.len();
                     self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
                     self.table_view.sort_indices = (0..rows).collect();
@@ -1012,21 +1171,21 @@ impl Session {
         }
     }
 
-    /// Tablas de una BBDD para el modal de exportación: usa la caché del
-    /// sidebar o, si el árbol aún no se expandió, las pide al backend.
-    fn export_tables_for(&mut self, db: &str) -> Vec<String> {
+    /// Tablas de una BBDD: usa la caché del sidebar o, si el árbol aún no
+    /// la ha cargado, las pide al backend (y las deja en la caché).
+    fn table_names(&mut self, db: &str) -> Result<Vec<String>, String> {
         if let Some(tables) = self.schema.tables_cache.get(db) {
-            return tables.clone();
+            return Ok(tables.clone());
         }
         let ConnState::Connected(backend) = &self.state else {
-            return Vec::new();
+            return Err("No conectado".into());
         };
         match backend.list_tables(db) {
             Ok(tables) => {
                 self.schema
                     .tables_cache
                     .insert(db.to_string(), tables.clone());
-                tables
+                Ok(tables)
             }
             Err(e) => {
                 self.push_log(LogEntry::err(
@@ -1034,7 +1193,7 @@ impl Session {
                     0,
                     e.as_str(),
                 ));
-                Vec::new()
+                Err(e)
             }
         }
     }
@@ -1057,6 +1216,17 @@ impl Session {
                 self.modal = ModalState::None;
                 self.on_table_selected(sh, new_db, new_table);
                 self.active_tab = ActiveTab::Datos;
+            }
+            ModalAction::ApplyAndReload(reload) => {
+                self.modal = ModalState::None;
+                if self.commit_pending_changes() {
+                    self.reload_now(sh, reload);
+                }
+            }
+            ModalAction::DiscardAndReload(reload) => {
+                self.modal = ModalState::None;
+                self.discard_pending();
+                self.reload_now(sh, reload);
             }
             ModalAction::CreateDatabase { name, charset } => {
                 let result = match &mut self.state {
@@ -1087,7 +1257,7 @@ impl Session {
                 match result {
                     Ok(_) => {
                         self.modal = ModalState::None;
-                        self.invalidate_after_write(Some(&db), None);
+                        self.invalidate_schema(&db);
                     }
                     Err(e) => {
                         if let ModalState::CreateTable { error, .. } = &mut self.modal {
@@ -1108,7 +1278,7 @@ impl Session {
                 }
                 self.modal = ModalState::None;
                 if result.is_ok() {
-                    self.invalidate_after_write(Some(&db), None);
+                    self.on_dropped(&db, None);
                 }
             }
             ModalAction::DropTable { db, table } => {
@@ -1123,7 +1293,7 @@ impl Session {
                 }
                 self.modal = ModalState::None;
                 if result.is_ok() {
-                    self.invalidate_after_write(Some(&db), Some(&table));
+                    self.on_dropped(&db, Some(&table));
                 }
             }
             ModalAction::TruncateTable { db, table } => {
@@ -1144,44 +1314,47 @@ impl Session {
                         e,
                     ));
                 }
-                let result = result.map(|_| 0u64);
                 self.modal = ModalState::None;
                 if result.is_ok() {
-                    if matches!(
-                        &self.schema.selected_node,
-                        Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
-                    ) {
-                        let sql = self.build_sql(sh, &db, &table);
-                        self.run_query_async(sql);
-                    }
-                    self.invalidate_after_write(Some(&db), Some(&table));
+                    self.after_truncate(sh, &db, &[table]);
                 }
             }
             ModalAction::TruncateAllTables(db) => {
                 self.modal = ModalState::None;
-                let tables = self
-                    .schema
-                    .tables_cache
-                    .get(&db)
-                    .cloned()
-                    .unwrap_or_default();
-                for table in &tables {
-                    let _ = self.run_write(&format!(
-                        "TRUNCATE TABLE `{}`.`{}`",
-                        db.replace('`', "``"),
-                        table.replace('`', "``")
-                    ));
+                // El árbol puede no haber cargado aún las tablas de esta BBDD
+                let tables = match self.table_names(&db) {
+                    Ok(tables) => tables,
+                    Err(message) => {
+                        self.modal = ModalState::Error {
+                            title: format!("No se pudieron listar las tablas de «{db}»"),
+                            message,
+                        };
+                        return;
+                    }
+                };
+                let failed: Vec<String> = tables
+                    .iter()
+                    .filter_map(|table| {
+                        self.run_write(&format!(
+                            "TRUNCATE TABLE `{}`.`{}`",
+                            escape_ident(&db),
+                            escape_ident(table)
+                        ))
+                        .err()
+                        .map(|e| format!("{table}: {e}"))
+                    })
+                    .collect();
+                self.after_truncate(sh, &db, &tables);
+                if !failed.is_empty() {
+                    self.modal = ModalState::Error {
+                        title: format!("No se pudieron vaciar todas las tablas de «{db}»"),
+                        message: failed.join("\n"),
+                    };
                 }
-                self.invalidate_after_write(Some(&db), None);
             }
             ModalAction::ApplyFilter { sql_fragment } => {
                 self.modal = ModalState::None;
-                self.table_view.filter_text = sql_fragment;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
+                self.request_reload(sh, Reload::Filter(sql_fragment));
             }
             ModalAction::DeleteRow { db, table, row_idx } => {
                 self.modal = ModalState::None;
@@ -1248,7 +1421,7 @@ impl Session {
                             }
                         }
                         self.modal = ModalState::None;
-                        self.invalidate_after_write(Some(&db), None);
+                        self.invalidate_schema(&db);
                     }
                     Err(e) => {
                         if let ModalState::CloneTable { error, .. } = &mut self.modal {
@@ -1416,6 +1589,9 @@ impl Session {
         // (árbol expandido, scroll, cursores) sea propio de cada sesión.
         let sid = self.id;
         let conn_color = self.color.map(|c| theme::get(ui).conn(c));
+        // El grid cambia la ordenación al pulsar una cabecera; se restaura si
+        // la recarga no llega a hacerse (query en curso o el usuario cancela).
+        let sorts_before = self.table_view.sort_specs.clone();
 
         // ── Contenido principal según estado ─────────────────────────────
         match &self.state {
@@ -1674,6 +1850,8 @@ impl Session {
                             );
                             if !running {
                                 grid_action = action;
+                            } else if matches!(action, GridAction::SortChanged) {
+                                self.table_view.sort_specs = sorts_before.clone();
                             }
                         }
 
@@ -1793,12 +1971,8 @@ impl Session {
         match grid_action {
             GridAction::SortChanged => {
                 // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
-                self.save_table_state(sh);
+                let sorts = std::mem::replace(&mut self.table_view.sort_specs, sorts_before);
+                self.request_reload(sh, Reload::Sort(sorts));
             }
             GridAction::CellEditStarted {
                 row,
@@ -1814,35 +1988,7 @@ impl Session {
             }
             GridAction::CellSetNull { row, col_idx } => {
                 self.table_view.editing_cell = None;
-                match row {
-                    RowRef::Insert(insert_idx) => {
-                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
-                            && col_idx < ins.values.len()
-                        {
-                            ins.values[col_idx] = None;
-                        }
-                    }
-                    RowRef::Existing(row_idx) => {
-                        let original = self
-                            .table_view
-                            .table_data
-                            .as_ref()
-                            .and_then(|d| d.rows.get(row_idx))
-                            .and_then(|r| r.get(col_idx))
-                            .cloned()
-                            .unwrap_or_default();
-                        self.table_view
-                            .pending_edits
-                            .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                        self.table_view.pending_edits.push(PendingEdit {
-                            row_idx,
-                            col_idx,
-                            original,
-                            new_value: String::new(),
-                            is_null: true,
-                        });
-                    }
-                }
+                self.record_edit(row, col_idx, None);
             }
             GridAction::CellEditCommitted {
                 row,
@@ -1850,59 +1996,7 @@ impl Session {
                 new_value,
             } => {
                 self.table_view.editing_cell = None;
-                match row {
-                    RowRef::Insert(insert_idx) => {
-                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
-                            && col_idx < ins.values.len()
-                        {
-                            ins.values[col_idx] = Some(new_value);
-                        }
-                    }
-                    RowRef::Existing(row_idx) => {
-                        let original = self
-                            .table_view
-                            .table_data
-                            .as_ref()
-                            .and_then(|d| d.rows.get(row_idx))
-                            .and_then(|r| r.get(col_idx))
-                            .cloned()
-                            .unwrap_or_default();
-
-                        if original.as_deref() == Some(new_value.as_str()) {
-                            self.table_view
-                                .pending_edits
-                                .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                        } else if let Some(existing) = self
-                            .table_view
-                            .pending_edits
-                            .iter_mut()
-                            .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                        {
-                            if existing.original.as_deref() == Some(new_value.as_str())
-                                && !existing.is_null
-                            {
-                                let idx = self
-                                    .table_view
-                                    .pending_edits
-                                    .iter()
-                                    .position(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                                    .unwrap();
-                                self.table_view.pending_edits.remove(idx);
-                            } else {
-                                existing.new_value = new_value;
-                                existing.is_null = false;
-                            }
-                        } else {
-                            self.table_view.pending_edits.push(PendingEdit {
-                                row_idx,
-                                col_idx,
-                                original,
-                                new_value,
-                                is_null: false,
-                            });
-                        }
-                    }
-                }
+                self.record_edit(row, col_idx, Some(new_value));
             }
             GridAction::CellEditCancelled => {
                 self.table_view.editing_cell = None;
@@ -1912,101 +2006,29 @@ impl Session {
                 col_idx,
                 new_value,
             } => {
-                // Commit current value, then move focus to next column
-                match row {
-                    RowRef::Insert(insert_idx) => {
-                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
-                            && col_idx < ins.values.len()
-                        {
-                            ins.values[col_idx] = Some(new_value);
-                        }
-                    }
-                    RowRef::Existing(row_idx) => {
-                        let original = self
-                            .table_view
-                            .table_data
-                            .as_ref()
-                            .and_then(|d| d.rows.get(row_idx))
-                            .and_then(|r| r.get(col_idx))
-                            .cloned()
-                            .unwrap_or_default();
-                        if original.as_deref() != Some(new_value.as_str()) {
-                            self.table_view
-                                .pending_edits
-                                .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                            self.table_view.pending_edits.push(PendingEdit {
-                                row_idx,
-                                col_idx,
-                                original,
-                                new_value,
-                                is_null: false,
-                            });
-                        }
-                    }
-                }
-                // Move to next column
-                let col_count = self
-                    .table_view
-                    .table_data
-                    .as_ref()
-                    .map(|d| d.columns.len())
-                    .unwrap_or(1);
-                let next_col = (col_idx + 1) % col_count;
-                let next_val = match row {
-                    RowRef::Insert(insert_idx) => self
-                        .table_view
-                        .pending_inserts
-                        .get(insert_idx)
-                        .and_then(|ins| ins.values.get(next_col))
-                        .and_then(|v| v.as_deref())
-                        .unwrap_or("")
-                        .to_string(),
-                    RowRef::Existing(row_idx) => self
-                        .table_view
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx))
-                        .and_then(|r| r.get(next_col))
-                        .and_then(|v| v.as_deref())
-                        .unwrap_or("")
-                        .to_string(),
-                };
+                self.record_edit(row, col_idx, Some(new_value));
+                let next_col = self.next_editable_col(row, col_idx);
                 self.table_view.editing_cell = Some(EditingCell {
                     row,
                     col_idx: next_col,
-                    buffer: next_val,
+                    buffer: self.cell_text(row, next_col),
                     needs_focus: true,
                 });
             }
             GridAction::ApplyEdits => {
                 self.apply_pending_changes(sh);
             }
-            GridAction::DiscardEdits => {
-                self.table_view.pending_edits.clear();
-                self.table_view.pending_deletes.clear();
-                self.table_view.pending_inserts.clear();
-                self.table_view.editing_cell = None;
-            }
+            GridAction::DiscardEdits => self.discard_pending(),
             GridAction::FilterBy { sql_fragment } => {
-                self.table_view.filter_text = sql_fragment;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
+                self.request_reload(sh, Reload::Filter(sql_fragment));
             }
             GridAction::FilterByClipboard { col_name } => {
                 match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                     Ok(text) => {
                         let esc_col = format!("`{}`", col_name.replace('`', "``"));
                         let esc_val = escape_sql(&text);
-                        self.table_view.filter_text = format!("{esc_col} = '{esc_val}'");
-                        if let Some(SelectedNode::Table { db, table }) =
-                            &self.schema.selected_node.clone()
-                        {
-                            let sql = self.build_sql(sh, db, table);
-                            self.run_query_async(sql);
-                        }
+                        let filter = format!("{esc_col} = '{esc_val}'");
+                        self.request_reload(sh, Reload::Filter(filter));
                     }
                     Err(e) => {
                         self.table_view.table_error =
@@ -2027,96 +2049,13 @@ impl Session {
                 }
             }
             GridAction::InsertRow => {
-                // Create blank insert row at the bottom
-                let col_count = self
-                    .table_view
-                    .table_data
-                    .as_ref()
-                    .map(|d| d.columns.len())
-                    .unwrap_or(0);
-                if col_count == 0 {
-                } else {
-                    let col_info_key = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { db, table }) => {
-                            Some((db.clone(), table.clone()))
-                        }
-                        _ => None,
-                    };
-                    let empty_cols: Vec<ColumnInfo> = Vec::new();
-                    let ci = col_info_key
-                        .as_ref()
-                        .and_then(|k| self.schema.columns_info.get(k))
-                        .map(|v| v.as_slice())
-                        .unwrap_or(empty_cols.as_slice());
-                    let auto_cols: Vec<bool> = (0..col_count)
-                        .map(|i| {
-                            ci.get(i)
-                                .map(|c| c.extra.contains("auto_increment"))
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    let values: Vec<Option<String>> = (0..col_count)
-                        .map(|i| {
-                            if auto_cols.get(i).copied().unwrap_or(false) {
-                                None
-                            } else {
-                                ci.get(i)
-                                    .and_then(|c| c.default_val.clone())
-                                    .map(Some)
-                                    .unwrap_or(Some(String::new()))
-                            }
-                        })
-                        .collect();
-                    self.table_view
-                        .pending_inserts
-                        .push(PendingInsert { values, auto_cols });
+                if let Some(row) = self.new_insert_row(None) {
+                    self.table_view.pending_inserts.push(row);
                 }
             }
             GridAction::CloneRow { row_idx } => {
-                let col_count = self
-                    .table_view
-                    .table_data
-                    .as_ref()
-                    .map(|d| d.columns.len())
-                    .unwrap_or(0);
-                if col_count == 0 {
-                } else {
-                    let col_info_key = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { db, table }) => {
-                            Some((db.clone(), table.clone()))
-                        }
-                        _ => None,
-                    };
-                    let empty_cols: Vec<ColumnInfo> = Vec::new();
-                    let ci = col_info_key
-                        .as_ref()
-                        .and_then(|k| self.schema.columns_info.get(k))
-                        .map(|v| v.as_slice())
-                        .unwrap_or(empty_cols.as_slice());
-                    let auto_cols: Vec<bool> = (0..col_count)
-                        .map(|i| {
-                            ci.get(i)
-                                .map(|c| c.extra.contains("auto_increment"))
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    let row_data = self
-                        .table_view
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx));
-                    let values: Vec<Option<String>> = (0..col_count)
-                        .map(|i| {
-                            if auto_cols.get(i).copied().unwrap_or(false) {
-                                None // Skip auto_increment columns
-                            } else {
-                                row_data.and_then(|r| r.get(i)).cloned().unwrap_or(None)
-                            }
-                        })
-                        .collect();
-                    self.table_view
-                        .pending_inserts
-                        .push(PendingInsert { values, auto_cols });
+                if let Some(row) = self.new_insert_row(Some(row_idx)) {
+                    self.table_view.pending_inserts.push(row);
                 }
             }
             GridAction::RemoveInsertRow { insert_idx } => {
@@ -2203,12 +2142,7 @@ impl Session {
         // Apply bar action (solo visible cuando hay cambios pendientes)
         match apply_bar_action {
             GridAction::ApplyEdits => self.apply_pending_changes(sh),
-            GridAction::DiscardEdits => {
-                self.table_view.pending_edits.clear();
-                self.table_view.pending_deletes.clear();
-                self.table_view.pending_inserts.clear();
-                self.table_view.editing_cell = None;
-            }
+            GridAction::DiscardEdits => self.discard_pending(),
             _ => {}
         }
 
@@ -2325,7 +2259,7 @@ impl Session {
                 };
             }
             SidebarAction::ExportDatabase(db) => {
-                let tables = self.export_tables_for(&db);
+                let tables = self.table_names(&db).unwrap_or_default();
                 let dbs = self.schema.databases.clone();
                 let profiles = sh.profiles.clone();
                 self.modal = ModalState::ExportData {
@@ -2352,7 +2286,7 @@ impl Session {
             }
             SidebarAction::ExportTable { db, table } => {
                 // Mostrar todas las tablas de la BBDD con solo la pulsada marcada.
-                let mut names = self.export_tables_for(&db);
+                let mut names = self.table_names(&db).unwrap_or_default();
                 if names.is_empty() {
                     names.push(table.clone());
                 }
@@ -2387,40 +2321,18 @@ impl Session {
         }
 
         // F5: recargar grid (invalida también caché de estructura de la tabla)
-        if f5 && let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
-            // Invalidar caché de columnas para reflejar cambios estructurales
-            self.schema
-                .columns_info
-                .remove(&(db.clone(), table.clone()));
-            let sql = self.build_sql(sh, db, table);
-            self.run_query_async(sql);
+        if f5 {
+            self.request_reload(sh, Reload::Refresh);
         }
 
         // Filter action
         match filter_action {
             filter_bar::FilterAction::Apply => {
-                if let Some(SelectedNode::Table { db, table }) =
-                    self.schema.selected_node.clone().as_ref()
-                {
-                    // Añadir al historial de la tabla si hay texto
-                    let filter = self.table_view.filter_text.trim().to_string();
-                    if !filter.is_empty() {
-                        self.table_view.filter_history.retain(|f| f != &filter);
-                        self.table_view.filter_history.insert(0, filter);
-                        self.table_view.filter_history.truncate(20);
-                    }
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                    self.save_table_state(sh);
-                }
+                let filter = self.table_view.filter_text.trim().to_string();
+                self.request_reload(sh, Reload::Filter(filter));
             }
             filter_bar::FilterAction::Clear => {
-                if let Some(SelectedNode::Table { db, table }) =
-                    self.schema.selected_node.clone().as_ref()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
+                self.request_reload(sh, Reload::Filter(String::new()));
             }
             filter_bar::FilterAction::None => {}
         }
@@ -2444,17 +2356,10 @@ impl Session {
 
         // SQL editor
         if let SqlEditorAction::Execute { sql, db_context } = sql_action {
-            // Ejecutar USE por separado para que el log muestre solo la query del usuario
-            if !db_context.is_empty() {
-                let use_sql = format!("USE `{}`", db_context.replace('`', "``"));
-                let _ = match &mut self.state {
-                    ConnState::Connected(b) => b.execute_write(&use_sql),
-                    _ => return outcome,
-                };
-            }
+            let db = (!db_context.is_empty()).then_some(db_context.as_str());
             let start = Instant::now();
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_query(&sql),
+            let result = match &self.state {
+                ConnState::Connected(b) => b.execute_in_session(db, &sql),
                 _ => return outcome,
             };
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -2577,5 +2482,540 @@ impl Session {
         }
 
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{DbResult, QueryEvent};
+
+    /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
+    struct FakeBackend;
+
+    impl DbBackend for FakeBackend {
+        fn list_databases(&self) -> DbResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn list_tables(&self, _: &str) -> DbResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn execute_query(&self, _: &str) -> DbResult<QueryResult> {
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            })
+        }
+        fn execute_in_session(&self, _: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+            self.execute_query(sql)
+        }
+        fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
+            Ok(Vec::new())
+        }
+        fn get_tables_info(&self, _: &str) -> DbResult<Vec<TableInfo>> {
+            Ok(Vec::new())
+        }
+        fn get_columns_info(&self, _: &str, _: &str) -> DbResult<Vec<ColumnInfo>> {
+            Ok(Vec::new())
+        }
+        fn get_primary_keys(&self, _: &str, _: &str) -> DbResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn execute_write(&mut self, _: &str) -> DbResult<u64> {
+            Ok(0)
+        }
+        fn create_database(&mut self, _: &str, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn drop_database(&mut self, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn drop_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn truncate_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn execute_transaction(&mut self, _: &[Statement]) -> DbResult<()> {
+            Ok(())
+        }
+    }
+
+    fn shared() -> Shared {
+        Shared {
+            settings: AppSettings::default(),
+            profiles: Vec::new(),
+            table_states: TableStates::default(),
+        }
+    }
+
+    fn data(ids: &[&str]) -> QueryResult {
+        QueryResult {
+            columns: vec!["id".into()],
+            rows: ids.iter().map(|id| vec![Some(id.to_string())]).collect(),
+        }
+    }
+
+    /// Sesión conectada con `db.t` abierta y sus datos cargados.
+    fn session_with_table() -> Session {
+        let mut s = Session::new(0);
+        s.state = ConnState::Connected(Box::new(FakeBackend));
+        s.schema.selected_node = Some(SelectedNode::Table {
+            db: "db".into(),
+            table: "t".into(),
+        });
+        s.table_view.table_data = Some(data(&["1", "2"]));
+        s.table_view.primary_keys = vec!["id".into()];
+        s
+    }
+
+    #[test]
+    fn recargar_con_cambios_pendientes_pide_confirmacion() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(0);
+        s.request_reload(&mut shared(), Reload::Refresh);
+        assert!(matches!(
+            s.modal,
+            ModalState::ConfirmReload {
+                pending_count: 1,
+                ..
+            }
+        ));
+        assert!(
+            matches!(s.state, ConnState::Connected(_)),
+            "no debe recargar"
+        );
+        assert_eq!(s.table_view.pending_deletes.len(), 1);
+    }
+
+    #[test]
+    fn recargar_sin_cambios_lanza_la_query() {
+        let mut s = session_with_table();
+        s.request_reload(&mut shared(), Reload::Refresh);
+        assert!(matches!(s.modal, ModalState::None));
+        assert!(matches!(s.state, ConnState::QueryRunning));
+    }
+
+    #[test]
+    fn descartar_y_recargar_limpia_los_cambios() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(1);
+        s.handle_modal_action(
+            ModalAction::DiscardAndReload(Reload::Refresh),
+            &mut shared(),
+        );
+        assert_eq!(s.pending_count(), 0);
+        assert!(matches!(s.state, ConnState::QueryRunning));
+    }
+
+    #[test]
+    fn datos_nuevos_no_heredan_cambios_por_posicion() {
+        let mut s = session_with_table();
+        s.state = ConnState::QueryRunning;
+        s.table_view.pending_deletes.insert(0);
+        let (tx, rx) = mpsc::channel();
+        s.table_view.query_receiver = Some(rx);
+        tx.send(QueryEvent::Done {
+            result: Ok(data(&["7", "8"])),
+            backend: Box::new(FakeBackend),
+            sql: String::new(),
+            elapsed_ms: 0,
+        })
+        .unwrap();
+        s.poll_query_receiver(&egui::Context::default());
+        assert_eq!(s.pending_count(), 0);
+    }
+
+    fn open_table(s: &Session) -> Option<(&str, &str)> {
+        match &s.schema.selected_node {
+            Some(SelectedNode::Table { db, table }) => Some((db.as_str(), table.as_str())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn crear_tabla_conserva_la_vista_y_los_cambios() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        s.table_view.pending_deletes.insert(0);
+        let mut col = NewColumnDef::new();
+        col.name = "id".into();
+        s.handle_modal_action(
+            ModalAction::CreateTable {
+                db: "db".into(),
+                name: "nueva".into(),
+                columns: vec![col],
+            },
+            &mut shared(),
+        );
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        assert_eq!(s.active_tab, ActiveTab::Datos);
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn borrar_la_tabla_abierta_la_cierra() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        s.table_view.pending_deletes.insert(0);
+        let action = ModalAction::DropTable {
+            db: "db".into(),
+            table: "t".into(),
+        };
+        s.handle_modal_action(action, &mut shared());
+        assert_eq!(
+            s.schema.selected_node,
+            Some(SelectedNode::Database("db".into()))
+        );
+        assert_eq!(s.active_tab, ActiveTab::Bbdd);
+        assert!(s.table_view.table_data.is_none());
+        assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn borrar_otra_tabla_no_toca_la_abierta() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(0);
+        let action = ModalAction::DropTable {
+            db: "db".into(),
+            table: "otra".into(),
+        };
+        s.handle_modal_action(action, &mut shared());
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn borrar_la_bbdd_desde_una_pestana_sql_no_cambia_de_pestana() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Sql(0);
+        s.handle_modal_action(ModalAction::DropDatabase("db".into()), &mut shared());
+        assert_eq!(s.schema.selected_node, Some(SelectedNode::Server));
+        assert_eq!(s.active_tab, ActiveTab::Sql(0));
+    }
+
+    #[test]
+    fn vaciar_la_tabla_abierta_la_recarga_sin_cambios() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        s.table_view.pending_edits.push(PendingEdit {
+            row_idx: 0,
+            col_idx: 0,
+            new_value: "9".into(),
+            is_null: false,
+        });
+        let action = ModalAction::TruncateTable {
+            db: "db".into(),
+            table: "t".into(),
+        };
+        s.handle_modal_action(action, &mut shared());
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        assert_eq!(s.pending_count(), 0);
+        assert!(matches!(s.state, ConnState::QueryRunning));
+    }
+
+    fn edit(row_idx: usize, col_idx: usize, value: Option<&str>) -> PendingEdit {
+        PendingEdit {
+            row_idx,
+            col_idx,
+            new_value: value.unwrap_or_default().into(),
+            is_null: value.is_none(),
+        }
+    }
+
+    #[test]
+    fn cambios_pendientes_como_sentencias_con_parametros() {
+        let mut s = session_with_table();
+        s.table_view.table_data = Some(QueryResult {
+            columns: vec!["id".into(), "v".into()],
+            rows: vec![
+                vec![Some("1".into()), Some("a".into())],
+                vec![Some("2".into()), None],
+            ],
+        });
+        s.table_view.pending_deletes.insert(1);
+        // Clave primaria y otra columna de la misma fila: un único UPDATE
+        s.table_view.pending_edits = vec![edit(0, 0, Some("10")), edit(0, 1, None)];
+        s.table_view.pending_inserts.push(PendingInsert {
+            values: vec![
+                InsertValue::Value("3".into()),
+                InsertValue::Value("x'y".into()),
+            ],
+            auto_cols: vec![false, false],
+        });
+
+        let stmts = s.pending_statements().unwrap();
+        let p = |v: &[Option<&str>]| v.iter().map(|x| x.map(String::from)).collect::<Vec<_>>();
+        assert_eq!(
+            stmts,
+            [
+                Statement {
+                    sql: "DELETE FROM `db`.`t` WHERE `id` = ?".into(),
+                    params: p(&[Some("2")]),
+                },
+                Statement {
+                    sql: "UPDATE `db`.`t` SET `id` = ?, `v` = ? WHERE `id` = ?".into(),
+                    params: p(&[Some("10"), None, Some("1")]),
+                },
+                Statement {
+                    sql: "INSERT INTO `db`.`t` (`id`, `v`) VALUES (?, ?)".into(),
+                    params: p(&[Some("3"), Some("x'y")]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sin_clave_primaria_no_se_editan_filas() {
+        let mut s = session_with_table();
+        s.table_view.primary_keys.clear();
+        s.table_view.pending_deletes.insert(0);
+        assert!(!s.commit_pending_changes());
+        assert!(matches!(s.modal, ModalState::Error { .. }));
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn guardar_cambios_contra_el_servidor() {
+        let mut b = crate::db::test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_grid")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_grid").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_grid.t (id VARCHAR(20) PRIMARY KEY, v TEXT)")
+            .unwrap();
+        b.execute_write(
+            "INSERT INTO rustql_test_grid.t VALUES ('a','uno'),('b','dos'),('c','tres')",
+        )
+        .unwrap();
+        let select = "SELECT * FROM rustql_test_grid.t ORDER BY id";
+
+        let mut s = Session::new(0);
+        s.table_view.table_data = Some(b.execute_query(select).unwrap());
+        s.state = ConnState::Connected(Box::new(b));
+        s.schema.selected_node = Some(SelectedNode::Table {
+            db: "rustql_test_grid".into(),
+            table: "t".into(),
+        });
+        s.table_view.primary_keys = vec!["id".into()];
+        s.table_view.pending_deletes.insert(2);
+        s.table_view.pending_edits = vec![edit(0, 0, Some("a'\\x")), edit(0, 1, None)];
+        s.table_view.pending_inserts.push(PendingInsert {
+            values: vec![
+                InsertValue::Value("d".into()),
+                InsertValue::Value("it's \\ fine".into()),
+            ],
+            auto_cols: vec![false, false],
+        });
+
+        let saved = s.commit_pending_changes();
+        let ConnState::Connected(b) = &mut s.state else {
+            unreachable!()
+        };
+        let rows = b.execute_query(select).map(|r| r.rows);
+        b.execute_write("DROP DATABASE rustql_test_grid").unwrap();
+
+        assert!(saved, "{:?}", s.modal);
+        let row = |id: &str, v: Option<&str>| vec![Some(id.to_string()), v.map(String::from)];
+        assert_eq!(
+            rows.unwrap(),
+            [
+                row("a'\\x", None),
+                row("b", Some("dos")),
+                row("d", Some("it's \\ fine")),
+            ]
+        );
+    }
+
+    #[test]
+    fn volver_al_valor_original_quita_el_cambio() {
+        let mut s = session_with_table();
+        let cell = RowRef::Existing(0);
+        s.record_edit(cell, 0, Some("9".into()));
+        assert_eq!(s.cell_text(cell, 0), "9");
+        // Tab o Enter con el valor original: antes, Tab dejaba el «9» pendiente
+        s.record_edit(cell, 0, Some("1".into()));
+        assert!(s.table_view.pending_edits.is_empty());
+        assert_eq!(s.cell_text(cell, 0), "1");
+    }
+
+    #[test]
+    fn null_sobre_null_no_es_un_cambio() {
+        let mut s = session_with_table();
+        s.table_view.table_data.as_mut().unwrap().rows[0][0] = None;
+        s.record_edit(RowRef::Existing(0), 0, None);
+        assert!(s.table_view.pending_edits.is_empty());
+        s.record_edit(RowRef::Existing(0), 0, Some(String::new()));
+        assert_eq!(s.table_view.pending_edits.len(), 1, "NULL → '' sí cambia");
+    }
+
+    #[test]
+    fn tab_salta_las_columnas_auto_de_una_fila_nueva() {
+        let mut s = session_with_table();
+        s.table_view.table_data.as_mut().unwrap().columns =
+            vec!["id".into(), "a".into(), "b".into()];
+        s.table_view.pending_inserts.push(PendingInsert {
+            values: vec![InsertValue::Default; 3],
+            auto_cols: vec![true, false, false],
+        });
+        let row = RowRef::Insert(0);
+        assert_eq!(s.next_editable_col(row, 1), 2);
+        assert_eq!(
+            s.next_editable_col(row, 2),
+            1,
+            "da la vuelta sin pasar por id"
+        );
+        assert_eq!(s.next_editable_col(RowRef::Existing(0), 2), 0);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn vaciar_todas_sin_haber_desplegado_el_arbol() {
+        let mut b = crate::db::test_server::backend();
+        for sql in [
+            "DROP DATABASE IF EXISTS rustql_test_truncate",
+            "CREATE DATABASE rustql_test_truncate",
+            "CREATE TABLE rustql_test_truncate.padre (id INT PRIMARY KEY)",
+            "CREATE TABLE rustql_test_truncate.hija (id INT, \
+             FOREIGN KEY (id) REFERENCES rustql_test_truncate.padre (id))",
+            "CREATE TABLE rustql_test_truncate.suelta (id INT)",
+            "INSERT INTO rustql_test_truncate.padre VALUES (1)",
+            "INSERT INTO rustql_test_truncate.hija VALUES (1)",
+            "INSERT INTO rustql_test_truncate.suelta VALUES (1), (2)",
+        ] {
+            b.execute_write(sql).unwrap();
+        }
+        let mut s = Session::new(0);
+        s.state = ConnState::Connected(Box::new(b));
+        assert!(s.schema.tables_cache.is_empty());
+
+        s.handle_modal_action(
+            ModalAction::TruncateAllTables("rustql_test_truncate".into()),
+            &mut shared(),
+        );
+        let ConnState::Connected(b) = &mut s.state else {
+            unreachable!()
+        };
+        let count = |t: &str| {
+            b.execute_query(&format!("SELECT COUNT(*) FROM rustql_test_truncate.{t}"))
+                .unwrap()
+                .rows[0][0]
+                .clone()
+        };
+        let (suelta, hija, padre) = (count("suelta"), count("hija"), count("padre"));
+        b.execute_write("DROP DATABASE rustql_test_truncate")
+            .unwrap();
+
+        assert_eq!(suelta, Some("0".into()));
+        assert_eq!(hija, Some("0".into()));
+        // La referenciada por una clave foránea no se puede truncar: se avisa
+        assert_eq!(padre, Some("1".into()));
+        assert!(
+            matches!(&s.modal, ModalState::Error { message, .. } if message.starts_with("padre:")),
+            "{:?}",
+            s.modal
+        );
+    }
+
+    /// `db.t` con columnas id (AUTO_INCREMENT), v y n.
+    fn session_with_auto_id() -> Session {
+        let mut s = session_with_table();
+        s.table_view.table_data = Some(QueryResult {
+            columns: vec!["id".into(), "v".into(), "n".into()],
+            rows: vec![vec![Some("1".into()), Some("a".into()), None]],
+        });
+        let col = |name: &str, extra: &str| ColumnInfo {
+            name: name.into(),
+            col_type: "INT".into(),
+            is_nullable: true,
+            default_val: Some("CURRENT_TIMESTAMP".into()),
+            column_key: String::new(),
+            extra: extra.into(),
+        };
+        s.schema.columns_info.insert(
+            ("db".into(), "t".into()),
+            vec![col("id", "auto_increment"), col("v", ""), col("n", "")],
+        );
+        s
+    }
+
+    #[test]
+    fn fila_nueva_deja_los_valores_por_defecto_al_servidor() {
+        let mut s = session_with_auto_id();
+        let row = s.new_insert_row(None).unwrap();
+        // Antes: '' en v y n, y el texto «CURRENT_TIMESTAMP» como valor
+        assert_eq!(row.values, vec![InsertValue::Default; 3]);
+        s.table_view.pending_inserts.push(row);
+        s.record_edit(RowRef::Insert(0), 1, Some("x".into()));
+        let stmts = s.pending_statements().unwrap();
+        assert_eq!(stmts[0].sql, "INSERT INTO `db`.`t` (`v`) VALUES (?)");
+        assert_eq!(stmts[0].params, [Some("x".to_string())]);
+    }
+
+    #[test]
+    fn fila_nueva_sin_tocar_inserta_todo_por_defecto() {
+        let mut s = session_with_auto_id();
+        let row = s.new_insert_row(None).unwrap();
+        s.table_view.pending_inserts.push(row);
+        let stmts = s.pending_statements().unwrap();
+        assert_eq!(stmts[0].sql, "INSERT INTO `db`.`t` () VALUES ()");
+    }
+
+    #[test]
+    fn clonar_fila_copia_valores_y_nulls_salvo_el_auto_increment() {
+        let s = session_with_auto_id();
+        let row = s.new_insert_row(Some(0)).unwrap();
+        assert_eq!(
+            row.values,
+            [
+                InsertValue::Default,
+                InsertValue::Value("a".into()),
+                InsertValue::Null
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn fila_nueva_contra_el_servidor() {
+        let mut b = crate::db::test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_insert")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_insert")
+            .unwrap();
+        b.execute_write(
+            "CREATE TABLE rustql_test_insert.t (id INT AUTO_INCREMENT PRIMARY KEY, \
+             creado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, n INT NULL, \
+             v VARCHAR(10) NOT NULL DEFAULT 'x')",
+        )
+        .unwrap();
+        let select = "SELECT id, creado IS NOT NULL, n, v FROM rustql_test_insert.t";
+
+        let mut s = Session::new(0);
+        s.table_view.table_data = Some(QueryResult {
+            columns: vec!["id".into(), "creado".into(), "n".into(), "v".into()],
+            rows: Vec::new(),
+        });
+        let key = ("rustql_test_insert".to_string(), "t".to_string());
+        let columns = b.get_columns_info(&key.0, &key.1).unwrap();
+        s.schema.columns_info.insert(key.clone(), columns);
+        s.schema.selected_node = Some(SelectedNode::Table {
+            db: key.0,
+            table: key.1,
+        });
+        s.state = ConnState::Connected(Box::new(b));
+        let row = s.new_insert_row(None).unwrap();
+        s.table_view.pending_inserts.push(row);
+
+        let saved = s.commit_pending_changes();
+        let ConnState::Connected(b) = &mut s.state else {
+            unreachable!()
+        };
+        let rows = b.execute_query(select).map(|r| r.rows);
+        b.execute_write("DROP DATABASE rustql_test_insert").unwrap();
+
+        assert!(saved, "{:?}", s.modal);
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(rows.unwrap(), [[some("1"), some("1"), None, some("x")]]);
     }
 }

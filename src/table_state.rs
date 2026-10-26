@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,28 +19,14 @@ fn key(db: &str, table: &str) -> String {
     format!("{}/{}", db, table)
 }
 
-fn path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rustql").join("table_states.json"))
-}
+const TABLE_STATES_FILE: &str = "table_states.json";
 
 pub fn load() -> TableStates {
-    let Some(p) = path() else {
-        return HashMap::new();
-    };
-    let Ok(data) = std::fs::read_to_string(p) else {
-        return HashMap::new();
-    };
-    serde_json::from_str(&data).unwrap_or_default()
+    crate::config_file::load(TABLE_STATES_FILE)
 }
 
 pub fn save(states: &TableStates) {
-    let Some(p) = path() else { return };
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(data) = serde_json::to_string_pretty(states) {
-        let _ = std::fs::write(p, data);
-    }
+    crate::config_file::save(TABLE_STATES_FILE, states, false);
 }
 
 pub fn get(states: &TableStates, db: &str, table: &str) -> TableState {

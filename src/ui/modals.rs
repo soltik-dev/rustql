@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::db::export::{ExportDestination, ExportEvent, ExportOptions};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
+use crate::ui::results_grid::SortSpec;
 use crate::ui::theme;
 
 // ── Tipos de datos para formularios ─────────────────────────────────────────
@@ -69,6 +70,19 @@ pub enum DropKind {
 pub enum TruncateKind {
     Table,
     AllInDatabase,
+}
+
+/// Recarga de la tabla abierta. Con cambios pendientes espera a que el
+/// usuario decida qué hacer con ellos: se refieren a las filas por posición
+/// y con los datos nuevos apuntarían a otras.
+#[derive(Debug, Clone)]
+pub enum Reload {
+    /// Ordenación nueva; el grid mantiene la anterior hasta confirmar.
+    Sort(Vec<SortSpec>),
+    /// Filtro WHERE nuevo (vacío = sin filtro).
+    Filter(String),
+    /// F5: volver a leer los datos y la estructura.
+    Refresh,
 }
 
 // ── Tipos de exportación ──────────────────────────────────────────────────────
@@ -163,6 +177,12 @@ pub enum ModalState {
         pending_count: usize,
         current_table: String,
     },
+    /// Hay cambios sin guardar y el usuario reordena, filtra o recarga la tabla.
+    ConfirmReload {
+        reload: Reload,
+        pending_count: usize,
+        current_table: String,
+    },
     /// Hay cambios sin guardar y el usuario cierra la pestaña de la conexión.
     ConfirmCloseSession {
         title: String,
@@ -245,6 +265,10 @@ pub enum ModalAction {
         new_db: String,
         new_table: String,
     },
+    /// Guardar cambios y luego recargar la tabla.
+    ApplyAndReload(Reload),
+    /// Descartar cambios y recargar la tabla.
+    DiscardAndReload(Reload),
     /// Cerrar la pestaña de conexión descartando los cambios pendientes.
     CloseSession,
     DeleteRow {
@@ -346,6 +370,11 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
             pending_count,
             current_table,
         } => show_confirm_switch_table(ctx, new_db, new_table, *pending_count, current_table),
+        ModalState::ConfirmReload {
+            reload,
+            pending_count,
+            current_table,
+        } => show_confirm_reload(ctx, reload, *pending_count, current_table),
         ModalState::ConfirmCloseSession {
             title,
             pending_count,
@@ -807,7 +836,7 @@ fn show_filter_input(
 
 fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str) -> String {
     let esc_col = format!("`{}`", col_name.replace('`', "``"));
-    let esc_val = value.replace('\\', "\\\\").replace('\'', "\\'");
+    let esc_val = crate::db::escape_sql(value);
     match operator {
         FilterOperator::Equals => format!("{esc_col} = '{esc_val}'"),
         FilterOperator::NotEquals => format!("{esc_col} != '{esc_val}'"),
@@ -913,6 +942,41 @@ fn show_confirm_switch_table(
                         new_db: new_db.to_string(),
                         new_table: new_table.to_string(),
                     };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    action
+}
+
+fn show_confirm_reload(
+    ctx: &egui::Context,
+    reload: &Reload,
+    pending_count: usize,
+    current_table: &str,
+) -> ModalAction {
+    let mut action = ModalAction::None;
+
+    egui::Window::new("Cambios sin guardar")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Tienes {pending_count} cambio(s) sin guardar en «{current_table}»."
+            ));
+            ui.add_space(4.0);
+            ui.label("Al recargar los datos se perderían.");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "Guardar y recargar").clicked() {
+                    action = ModalAction::ApplyAndReload(reload.clone());
+                }
+                if theme::warning_button(ui, format!("{TRASH}  Descartar y recargar")).clicked() {
+                    action = ModalAction::DiscardAndReload(reload.clone());
                 }
                 if ui.button("Cancelar").clicked() {
                     action = ModalAction::Cancel;
@@ -1420,6 +1484,15 @@ fn render_export_config(
                                     }
                                 }
                             });
+                        if profiles.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Guarda antes un perfil con el servidor destino.",
+                                )
+                                .color(theme::get(ui).text_muted)
+                                .small(),
+                            );
+                        }
                         ui.horizontal(|ui| {
                             ui.label("BBDD destino:");
                             ui.add(egui::TextEdit::singleline(target_db_name).desired_width(130.0));
@@ -1447,7 +1520,8 @@ fn render_export_config(
             action = ModalAction::CloseExport;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_export = selected_count > 0 && is_destination_valid(destination);
+            let can_export =
+                selected_count > 0 && is_destination_valid(destination, !profiles.is_empty());
             let btn =
                 theme::primary_button_enabled(ui, can_export, format!("{EXPORT}  Exportar →"));
             if btn.clicked() {
@@ -1476,12 +1550,14 @@ fn render_export_config(
     action
 }
 
-fn is_destination_valid(dest: &ExportDestination) -> bool {
+/// Sin perfiles, el destino remoto no apunta a ningún servidor elegido (sus
+/// parámetros serían los por defecto, root@127.0.0.1).
+fn is_destination_valid(dest: &ExportDestination, has_profiles: bool) -> bool {
     match dest {
         ExportDestination::SqlFile { path } => !path.is_empty(),
         ExportDestination::Folder { path } => !path.is_empty(),
         ExportDestination::SameServerDb { target_db } => !target_db.is_empty(),
-        ExportDestination::RemoteServer { target_db, .. } => !target_db.is_empty(),
+        ExportDestination::RemoteServer { target_db, .. } => has_profiles && !target_db.is_empty(),
     }
 }
 
@@ -1766,5 +1842,20 @@ fn format_rows(n: u64) -> String {
         format!("{:.1}K f.", n as f64 / 1_000.0)
     } else {
         format!("{n} f.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destino_remoto_sin_perfiles_no_es_valido() {
+        let dest = ExportDestination::RemoteServer {
+            params: Default::default(),
+            target_db: "copia".into(),
+        };
+        assert!(!is_destination_valid(&dest, false));
+        assert!(is_destination_valid(&dest, true));
     }
 }
