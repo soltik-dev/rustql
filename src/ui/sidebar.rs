@@ -17,6 +17,15 @@ fn clip_text(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Si `db` tiene alguna tabla favorita. Los favoritos son claves «bd/tabla»:
+/// no hace falta haber cargado las tablas de la BBDD para saberlo.
+fn has_favorite(fav_tables: &std::collections::HashSet<String>, db: &str) -> bool {
+    fav_tables.iter().any(|key| {
+        key.strip_prefix(db)
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum SidebarAction {
     None,
@@ -163,14 +172,8 @@ pub fn show(
                                 vec![]
                             };
 
-                            if *show_only_fav {
-                                let has_fav = tables_cache.get(db).is_some_and(|ts| {
-                                    ts.iter()
-                                        .any(|t| fav_tables.contains(&format!("{}/{}", db, t)))
-                                });
-                                if !has_fav {
-                                    continue;
-                                }
+                            if *show_only_fav && !has_favorite(fav_tables, db) {
+                                continue;
                             }
                             if filtering && matching.is_empty() {
                                 continue;
@@ -485,4 +488,17 @@ pub fn show(
         });
 
     action.into_inner()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favoritos_sin_cargar_las_tablas() {
+        let favs = ["tienda/clientes".to_string()].into_iter().collect();
+        assert!(has_favorite(&favs, "tienda"));
+        assert!(!has_favorite(&favs, "tien"), "no basta con el prefijo");
+        assert!(!has_favorite(&favs, "otra"));
+    }
 }
