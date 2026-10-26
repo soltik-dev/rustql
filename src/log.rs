@@ -29,11 +29,7 @@ impl LogEntry {
     }
 }
 
+/// Hora local: la aritmética sobre UNIX_EPOCH daba la hora UTC.
 fn now_hms() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{:02}:{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
