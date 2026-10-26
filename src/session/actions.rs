@@ -11,6 +11,7 @@ use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::{ConnState, SelectedNode, Session, Shared};
 use crate::db::{connect_mysql_progress, escape_sql, qualified, quote_ident};
+use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
 use crate::settings::{self, CopyFormat};
@@ -60,13 +61,47 @@ impl Session {
         if disconnect {
             self.disconnect();
         }
-        // F5: recargar grid (invalida también caché de estructura de la tabla)
         if f5 {
-            self.request_reload(sh, Reload::Refresh);
+            self.refresh_active_tab(sh);
         }
         self.handle_filter_action(sh, signals.filter);
         self.handle_db_info_action(sh, signals.db_info);
         self.handle_sql_action(sh, signals.sql);
+    }
+
+    /// F5: vuelve a leer lo que muestra la pestaña activa (antes recargaba
+    /// siempre la tabla abierta, se estuviera viendo o no).
+    fn refresh_active_tab(&mut self, sh: &mut Shared) {
+        match self.active_tab {
+            // Datos y estructura de la tabla abierta
+            ActiveTab::Datos => self.request_reload(sh, Reload::Refresh),
+            ActiveTab::Tabla => {
+                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node {
+                    let key = (db.clone(), table.clone());
+                    self.schema.columns_info.remove(&key);
+                }
+            }
+            ActiveTab::Bbdd => {
+                if let Some(db) = self.selected_db().map(str::to_string) {
+                    self.schema.tables_info.remove(&db);
+                }
+            }
+            ActiveTab::Servidor => self.schema.databases_info = Loadable::NotLoaded,
+            // La consulta de la pestaña, como Ctrl+Enter
+            ActiveTab::Sql(i) => {
+                if let Some(tab) = self.sql_tabs.get(i)
+                    && tab.running.is_none()
+                    && !tab.sql_text.trim().is_empty()
+                {
+                    let action = SqlEditorAction::Execute {
+                        sql: tab.sql_text.trim().to_string(),
+                        db_context: tab.db_context.clone(),
+                    };
+                    self.handle_sql_action(sh, action);
+                }
+            }
+        }
+        // Lo invalidado se vuelve a pedir en el siguiente frame (request_tab_data)
     }
 
     fn handle_tab_bar(&mut self, sh: &mut Shared, tab_bar: TabBarResult, ctrl_t: bool) {
