@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::ui::icons::*;
-use crate::ui::theme;
+use crate::ui::{CMD, ellipsize, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActiveTab {
@@ -18,16 +18,6 @@ pub struct TabBarResult {
     pub tab_clicked: Option<ActiveTab>,
     pub new_sql_tab: bool,
     pub close_sql_tab: Option<usize>,
-}
-
-fn clip_text(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -49,13 +39,13 @@ pub fn show(
     // Pestañas de contexto + pestañas SQL, con salto de línea si no caben
     ui.horizontal_wrapped(|ui| {
         // Servidor tab
-        let srv_label = format!("{DATABASE} {}", clip_text(server_name, 18));
+        let srv_label = format!("{DATABASE} {}", ellipsize(server_name, 18));
         if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true) {
             result.tab_clicked = Some(ActiveTab::Servidor);
         }
 
         // BBDD tab
-        let db_label = format!("{DATABASE} {}", clip_text(db_name.unwrap_or("BBDD"), 18));
+        let db_label = format!("{DATABASE} {}", ellipsize(db_name.unwrap_or("BBDD"), 18));
         if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db) {
             result.tab_clicked = Some(ActiveTab::Bbdd);
         }
@@ -63,14 +53,14 @@ pub fn show(
         // Estructura tab
         let struct_label = format!(
             "{EDIT} {}",
-            clip_text(table_name.unwrap_or("Estructura"), 18)
+            ellipsize(table_name.unwrap_or("Estructura"), 18)
         );
         if tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table) {
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
         // Datos tab
-        let datos_label = format!("{GRID} {}", clip_text(table_name.unwrap_or("Datos"), 18));
+        let datos_label = format!("{GRID} {}", ellipsize(table_name.unwrap_or("Datos"), 18));
         if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table) {
             result.tab_clicked = Some(ActiveTab::Datos);
         }
@@ -95,7 +85,7 @@ pub fn show(
         // New SQL tab button
         if ui
             .add(egui::Button::new("＋").small().frame(false))
-            .on_hover_text("Nueva pestaña SQL  Ctrl+T")
+            .on_hover_text(format!("Nueva pestaña SQL  {CMD}T"))
             .clicked()
         {
             result.new_sql_tab = true;

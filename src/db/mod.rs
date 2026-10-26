@@ -1,5 +1,5 @@
-pub mod mysql;
 pub mod export;
+pub mod mysql;
 
 use std::sync::Arc;
 
@@ -118,13 +118,25 @@ pub fn escape_ident(s: &str) -> String {
     s.replace('`', "``")
 }
 
+/// Identificador entre backticks: `` `nombre` ``.
+pub fn quote_ident(s: &str) -> String {
+    format!("`{}`", escape_ident(s))
+}
+
+/// Tabla cualificada con su BBDD: `` `bd`.`tabla` ``.
+pub fn qualified(db: &str, table: &str) -> String {
+    format!("{}.{}", quote_ident(db), quote_ident(table))
+}
+
 /// Valida que un nombre de charset MySQL solo contenga caracteres seguros.
 /// Los charsets MySQL son siempre alfanuméricos con guiones bajos (ej. utf8mb4, latin1).
 pub fn validate_charset(s: &str) -> DbResult<()> {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty() {
         Ok(())
     } else {
-        Err(format!("Charset inválido: '{s}'. Solo se permiten caracteres alfanuméricos y '_'."))
+        Err(format!(
+            "Charset inválido: '{s}'. Solo se permiten caracteres alfanuméricos y '_'."
+        ))
     }
 }
 
@@ -171,33 +183,6 @@ pub trait DbBackend: Send + Sync {
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
     fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
-
-    // ── Helpers con implementación por defecto ─────────────────────────────────
-
-    /// SELECT * con LIMIT opcional WHERE.
-    #[allow(dead_code)]
-    fn query_table(&self, db: &str, table: &str, limit: usize) -> DbResult<QueryResult> {
-        self.execute_query(&format!(
-            "SELECT * FROM `{}`.`{}` LIMIT {limit}",
-            escape_ident(db),
-            escape_ident(table)
-        ))
-    }
-
-    #[allow(dead_code)]
-    fn query_filtered(
-        &self,
-        db: &str,
-        table: &str,
-        filter: &str,
-        limit: usize,
-    ) -> DbResult<QueryResult> {
-        self.execute_query(&format!(
-            "SELECT * FROM `{}`.`{}` WHERE {filter} LIMIT {limit}",
-            escape_ident(db),
-            escape_ident(table)
-        ))
-    }
 }
 
 pub enum ConnectEvent {
@@ -253,6 +238,12 @@ mod tests {
     /// Con NO_BACKSLASH_ESCAPES, escapando la comilla como `\'`, este valor
     /// convertía `v = '…'` en `v = '\\\' OR 1=1 -- '`.
     const ATTACK: &str = "\\' OR 1=1 -- ";
+
+    #[test]
+    fn identificadores_entre_backticks() {
+        assert_eq!(quote_ident("a`b"), "`a``b`");
+        assert_eq!(qualified("bd", "ta`bla"), "`bd`.`ta``bla`");
+    }
 
     #[test]
     fn escape_sql_dobla_las_comillas() {

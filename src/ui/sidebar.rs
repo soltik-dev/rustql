@@ -4,18 +4,9 @@ use std::collections::HashMap;
 use eframe::egui;
 
 use crate::loadable::Loadable;
+use crate::table_state::table_key;
 use crate::ui::icons::*;
-use crate::ui::theme;
-
-fn clip_text(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
-}
+use crate::ui::{CMD, ellipsize, theme};
 
 /// Si `db` tiene alguna tabla favorita. Los favoritos son claves «bd/tabla»:
 /// no hace falta haber cargado las tablas de la BBDD para saberlo.
@@ -26,31 +17,63 @@ fn has_favorite(fav_tables: &std::collections::HashSet<String>, db: &str) -> boo
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SidebarAction {
+    #[default]
     None,
     SelectServer,
     SelectDatabase(String),
-    SelectTable { db: String, table: String },
+    SelectTable {
+        db: String,
+        table: String,
+    },
     CreateDatabase,
-    CreateTable { db: String },
-    DropDatabase { db: String },
-    TruncateAllTables { db: String },
-    DropTable { db: String, table: String },
-    TruncateTable { db: String, table: String },
+    CreateTable {
+        db: String,
+    },
+    DropDatabase {
+        db: String,
+    },
+    TruncateAllTables {
+        db: String,
+    },
+    DropTable {
+        db: String,
+        table: String,
+    },
+    TruncateTable {
+        db: String,
+        table: String,
+    },
     CopyTableName(String),
     Refresh,
     Disconnect,
-    ToggleFav { db: String, table: String },
-    OpenTableStructure { db: String, table: String },
-    OpenInSql { db: String, table: String },
-    CloneTable { db: String, table: String },
+    ToggleFav {
+        db: String,
+        table: String,
+    },
+    OpenTableStructure {
+        db: String,
+        table: String,
+    },
+    OpenInSql {
+        db: String,
+        table: String,
+    },
+    CloneTable {
+        db: String,
+        table: String,
+    },
     ExportDatabase(String),
-    ExportTable { db: String, table: String },
+    ExportTable {
+        db: String,
+        table: String,
+    },
 }
 
 /// Lo que el sidebar pide a la sesión: la acción del usuario y los datos
 /// que le faltan para dibujar el árbol (los carga la sesión en segundo plano).
+#[derive(Default)]
 pub struct SidebarOutput {
     pub action: SidebarAction,
     /// BBDD desplegadas cuyas tablas aún no se han pedido.
@@ -78,7 +101,6 @@ pub fn show(
     table_search: &mut String,
     fav_tables: &std::collections::HashSet<String>,
     show_only_fav: &mut bool,
-    host: &str,
     server_name: &str,
     conn_color: Option<egui::Color32>,
 ) -> SidebarOutput {
@@ -91,7 +113,7 @@ pub fn show(
     theme::section_label(ui, "Esquema");
     ui.add_space(2.0);
 
-    let ctrl_f = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
+    let ctrl_f = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F));
 
     ui.horizontal(|ui| {
         let fav_btn = ui.add(
@@ -123,7 +145,7 @@ pub fn show(
                 let search_resp = ui.add(
                     egui::TextEdit::singleline(table_search)
                         .id_salt("sidebar_table_search")
-                        .hint_text("Buscar…  Ctrl+F")
+                        .hint_text(format!("Buscar…  {CMD}F"))
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY),
                 );
@@ -153,8 +175,7 @@ pub fn show(
     let filter = table_search.to_lowercase();
     let filtering = !filter.is_empty();
 
-    let _ = host;
-    let server_label = format!("{} {}", PLUG, clip_text(server_name, 28));
+    let server_label = format!("{} {}", PLUG, ellipsize(server_name, 28));
 
     ui.spacing_mut().indent = 10.0;
 
@@ -197,16 +218,14 @@ pub fn show(
                                 continue;
                             }
 
-                            let open: Option<bool> = None;
                             let is_db_selected = selected_db == Some(db.as_str());
-                            let db_label = clip_text(db, 24);
+                            let db_label = ellipsize(db, 24);
 
                             let db_ch = egui::CollapsingHeader::new(
                                 egui::RichText::new(&db_label).strong(),
                             )
                             .id_salt(db)
                             .default_open(false)
-                            .open(open)
                             .show(ui, |ui: &mut egui::Ui| {
                                 let tables: Vec<String> = {
                                     let base = if filtering {
@@ -231,9 +250,7 @@ pub fn show(
                                     };
                                     if *show_only_fav {
                                         base.into_iter()
-                                            .filter(|t| {
-                                                fav_tables.contains(&format!("{}/{}", db, t))
-                                            })
+                                            .filter(|t| fav_tables.contains(&table_key(db, t)))
                                             .collect()
                                     } else {
                                         base
@@ -253,11 +270,11 @@ pub fn show(
                                     let is_selected =
                                         is_db_selected && selected_table == Some(table.as_str());
 
-                                    let display = clip_text(table, 26);
+                                    let display = ellipsize(table, 26);
                                     let db_clone = db.clone();
                                     let table_clone = table.clone();
 
-                                    let fav_key = format!("{}/{}", db, table);
+                                    let fav_key = table_key(db, table);
                                     let is_fav = fav_tables.contains(&fav_key);
 
                                     let fav_color = p.fav_star;

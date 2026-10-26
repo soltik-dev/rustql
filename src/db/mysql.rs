@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-use mysql::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
+use mysql::{
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable,
+};
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
-    TableInfo, escape_ident, validate_charset,
+    TableInfo, qualified, quote_ident, validate_charset,
 };
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -55,7 +57,10 @@ fn row_values(mut row: mysql::Row) -> Vec<Option<String>> {
 }
 
 fn col(row: &[Option<String>], i: usize) -> String {
-    row.get(i).and_then(|v| v.as_deref()).unwrap_or("").to_string()
+    row.get(i)
+        .and_then(|v| v.as_deref())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Almacena el Pool en lugar de una PooledConn individual.
@@ -136,7 +141,7 @@ impl DbBackend for MysqlBackend {
     }
 
     fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
-        let query = format!("SHOW TABLES FROM `{}`", escape_ident(database));
+        let query = format!("SHOW TABLES FROM {}", quote_ident(database));
         self.conn()?
             .query(query)
             .map_err(|e| format!("Error en query: {e}"))
@@ -176,7 +181,7 @@ impl DbBackend for MysqlBackend {
         };
         let result = (|| {
             if let Some(db) = db {
-                conn.query_drop(format!("USE `{}`", escape_ident(db)))?;
+                conn.query_drop(format!("USE {}", quote_ident(db)))?;
             }
             // Del primer conjunto de resultados, como mucho max_rows filas.
             // Al soltar `set`, el crate lee y descarta el resto.
@@ -296,33 +301,25 @@ impl DbBackend for MysqlBackend {
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()> {
         validate_charset(charset)?;
         let sql = format!(
-            "CREATE DATABASE `{}` CHARACTER SET {}",
-            escape_ident(name),
+            "CREATE DATABASE {} CHARACTER SET {}",
+            quote_ident(name),
             charset
         );
         self.execute_write(&sql).map(|_| ())
     }
 
     fn drop_database(&self, name: &str) -> DbResult<()> {
-        let sql = format!("DROP DATABASE `{}`", escape_ident(name));
+        let sql = format!("DROP DATABASE {}", quote_ident(name));
         self.execute_write(&sql).map(|_| ())
     }
 
     fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!(
-            "DROP TABLE `{}`.`{}`",
-            escape_ident(db),
-            escape_ident(table)
-        );
+        let sql = format!("DROP TABLE {}", qualified(db, table));
         self.execute_write(&sql).map(|_| ())
     }
 
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!(
-            "TRUNCATE TABLE `{}`.`{}`",
-            escape_ident(db),
-            escape_ident(table)
-        );
+        let sql = format!("TRUNCATE TABLE {}", qualified(db, table));
         self.execute_write(&sql).map(|_| ())
     }
 
@@ -352,8 +349,9 @@ mod tests {
         let b = test_server::backend();
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
-        let qdb = format!("`{}`", escape_ident(db));
-        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}")).unwrap();
+        let qdb = quote_ident(db);
+        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}"))
+            .unwrap();
         b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();
         b.execute_write(&format!(
             "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
@@ -386,9 +384,12 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session").unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_session")
+            .unwrap();
+        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)")
+            .unwrap();
         let db = Some("rustql_test_session");
         let run = |sql: &str| b.execute_in_session(db, sql, 100).unwrap().rows;
         let count = || {
@@ -402,7 +403,10 @@ mod tests {
         run("SET @x = 42");
         run("START TRANSACTION");
         run("INSERT INTO t VALUES (1)");
-        assert_eq!(run("SELECT @x, COUNT(*) FROM t")[0], [Some("42".into()), Some("1".into())]);
+        assert_eq!(
+            run("SELECT @x, COUNT(*) FROM t")[0],
+            [Some("42".into()), Some("1".into())]
+        );
         assert_eq!(count(), Some("0".into()), "sin COMMIT, el resto no la ve");
         run("ROLLBACK");
         assert_eq!(run("SELECT COUNT(*) FROM t")[0], [Some("0".into())]);
@@ -412,16 +416,19 @@ mod tests {
         run("COMMIT");
         assert_eq!(count(), Some("1".into()));
 
-        b.execute_write("DROP DATABASE rustql_test_session").unwrap();
+        b.execute_write("DROP DATABASE rustql_test_session")
+            .unwrap();
     }
 
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn el_editor_lee_como_mucho_max_rows() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap").unwrap();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap")
+            .unwrap();
         b.execute_write("CREATE DATABASE rustql_test_cap").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)")
+            .unwrap();
         b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
             .unwrap();
         let db = Some("rustql_test_cap");

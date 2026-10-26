@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      # La imagen no trae Rust; egui 0.37 exige Rust ≥ 1.95.
+      - name: Rust
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential pkg-config zlib1g-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Solo acelera: si el servidor de caché del runner falla, se compila igual.
+      - uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Formato
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      # Los tests marcados #[ignore] usan un servidor real (RUSTQL_TEST_MYSQL).
+      # Se arranca un MariaDB desechable dentro del propio contenedor.
+      - name: Tests de integración (MariaDB)
+        run: |
+          apt-get install -y --no-install-recommends mariadb-server mariadb-client
+          data="$RUNNER_TEMP/mariadb"
+          mariadb-install-db --no-defaults --user=root --datadir="$data" \
+            --auth-root-authentication-method=normal --skip-test-db > /dev/null
+          mariadbd --no-defaults --user=root --datadir="$data" --socket="$data.sock" \
+            --port=33306 --bind-address=127.0.0.1 --skip-name-resolve &
+          for _ in $(seq 30); do
+            [ -S "$data.sock" ] && break
+            sleep 1
+          done
+          mariadb --no-defaults -S "$data.sock" -uroot \
+            -e "CREATE USER 'ci'@'127.0.0.1' IDENTIFIED BY 'ci'; GRANT ALL ON *.* TO 'ci'@'127.0.0.1';"
+          RUSTQL_TEST_MYSQL='ci:ci@127.0.0.1:33306' \
+            cargo test --locked -- --ignored --skip secrets

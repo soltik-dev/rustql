@@ -15,8 +15,9 @@ pub struct TableState {
 
 pub type TableStates = HashMap<String, TableState>;
 
-fn key(db: &str, table: &str) -> String {
-    format!("{}/{}", db, table)
+/// Clave «bd/tabla» de una tabla: la del estado guardado y la de los favoritos.
+pub fn table_key(db: &str, table: &str) -> String {
+    format!("{db}/{table}")
 }
 
 const TABLE_STATES_FILE: &str = "table_states.json";
@@ -30,9 +31,12 @@ pub fn save(states: &TableStates) {
 }
 
 pub fn get(states: &TableStates, db: &str, table: &str) -> TableState {
-    states.get(&key(db, table)).cloned().unwrap_or_default()
+    states
+        .get(&table_key(db, table))
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn set(states: &mut TableStates, db: &str, table: &str, state: TableState) {
-    states.insert(key(db, table), state);
+    states.insert(table_key(db, table), state);
 }

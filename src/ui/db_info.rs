@@ -17,7 +17,9 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// Retornado por db_info::show cuando el usuario hace click en una tabla.
+#[derive(Default)]
 pub enum DbInfoAction {
+    #[default]
     None,
     OpenTable(String),
 }

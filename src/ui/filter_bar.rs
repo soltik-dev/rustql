@@ -2,7 +2,9 @@ use eframe::egui;
 
 use crate::ui::theme;
 
+#[derive(Default)]
 pub enum FilterAction {
+    #[default]
     None,
     Apply,
     Clear,
