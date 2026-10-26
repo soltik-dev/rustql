@@ -1,8 +1,10 @@
 name: CI
 
+# Solo en los PR: la protección de rama de master exige que pase
+# («CI / check (pull_request)») y que el PR esté al día con master, así que
+# lo que se mergea es exactamente lo que se ha probado. Volver a ejecutarla
+# sobre el commit de merge sería repetir lo mismo.
 on:
-  push:
-    branches: [master]
   pull_request:
 
 jobs:
