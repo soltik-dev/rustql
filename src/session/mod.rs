@@ -30,7 +30,8 @@ use crate::ui::modals::{
     TableExportEntry, TableExportState, TruncateKind,
 };
 use crate::ui::results_grid::{
-    EditingCell, GridAction, InsertValue, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec,
+    EditingCell, GridAction, InsertValue, PendingEdit, PendingInsert, RowRef, SortDir,
+    TableViewState,
 };
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
@@ -62,32 +63,6 @@ pub enum SelectedNode {
 }
 
 // ── Sub-structs de estado ─────────────────────────────────────────────────────
-
-/// Datos de la tabla activa: resultado de query, edición inline, selección de filas.
-#[derive(Default)]
-pub struct TableViewState {
-    pub table_data: Option<QueryResult>,
-    pub table_error: Option<String>,
-    pub sort_specs: Vec<SortSpec>,
-    pub filter_text: String,
-    pub filter_history: Vec<String>,
-    pub pending_edits: Vec<PendingEdit>,
-    pub editing_cell: Option<EditingCell>,
-    pub primary_keys: Vec<String>,
-    pub pending_deletes: std::collections::BTreeSet<usize>,
-    pub pending_inserts: Vec<PendingInsert>,
-    pub selected_cell: Option<(usize, usize)>,
-    pub selected_rows: std::collections::BTreeSet<usize>,
-    pub last_selected_row: Option<usize>,
-    pub drag_select_from: Option<usize>,
-    pub query_loading: bool,
-    /// Guardando los cambios pendientes: el grid no admite más hasta saber
-    /// el resultado.
-    pub saving: bool,
-    /// Se incrementa con cada consulta de la tabla: los resultados de una
-    /// anterior que lleguen tarde se descartan.
-    pub data_generation: u64,
-}
 
 // ── Estado compartido entre sesiones ─────────────────────────────────────────
 
@@ -421,11 +396,7 @@ impl Session {
                 self.active_tab = ActiveTab::Servidor;
             }
         }
-        self.table_view.table_data = None;
-        self.table_view.table_error = None;
-        self.table_view.primary_keys.clear();
-        self.discard_pending();
-        self.clear_row_selection();
+        self.table_view.reset();
     }
 
     /// Tras vaciar tablas de `db`: si la abierta es una de ellas, sus cambios
@@ -772,17 +743,11 @@ impl Session {
     /// de la nueva tabla, ejecuta la query con el filtro guardado y reaplica
     /// la ordenación guardada.
     fn on_table_selected(&mut self, sh: &mut Shared, db: String, table: String) {
-        self.table_view.selected_cell = None;
-        self.table_view.selected_rows.clear();
-        self.table_view.last_selected_row = None;
-        self.table_view.drag_select_from = None;
-        self.table_view.pending_edits.clear();
-        self.table_view.pending_deletes.clear();
-        self.table_view.pending_inserts.clear();
-        self.table_view.editing_cell = None;
-
-        // 1. Guardar estado de la tabla anterior (sort, filtro, historial)
+        // 1. Guardar estado de la tabla anterior (sort, filtro, historial) y
+        //    vaciar la vista: hasta que lleguen los datos nuevos no se ven los
+        //    de la anterior
         self.save_table_state(sh);
+        self.table_view.reset();
 
         // 2. Cargar estado de la nueva tabla
         let ts = table_state::get(&sh.table_states, &db, &table);
@@ -799,7 +764,6 @@ impl Session {
         self.table_view.sort_specs = ts.sort_specs.clone();
 
         // 5. Estructura (columnas y claves primarias): de la caché o del servidor
-        self.table_view.primary_keys.clear();
         self.request_structure(&db, &table);
         self.sync_primary_keys();
 
@@ -827,19 +791,7 @@ impl Session {
         self.error_message = None;
         self.schema = SchemaCache::default();
         self.active_tab = ActiveTab::default();
-        self.table_view.table_data = None;
-        self.table_view.pending_deletes.clear();
-        self.table_view.pending_inserts.clear();
-        self.table_view.selected_rows.clear();
-        self.table_view.last_selected_row = None;
-        self.table_view.drag_select_from = None;
-        self.table_view.query_loading = false;
-        self.table_view.table_error = None;
-        self.table_view.sort_specs.clear();
-        self.table_view.filter_text.clear();
-        self.table_view.pending_edits.clear();
-        self.table_view.editing_cell = None;
-        self.table_view.primary_keys.clear();
+        self.table_view.reset();
         self.modal = ModalState::None;
         // Restaurar las pestañas SQL de esta conexión. Las guardadas antes de
         // haber conexiones múltiples las hereda la primera que no tenga propias.
@@ -1529,7 +1481,7 @@ impl Session {
                         ActiveTab::Datos => {
                             let selected_table = match &self.schema.selected_node {
                                 Some(SelectedNode::Table { db, table }) => {
-                                    Some((db.clone(), table.clone()))
+                                    Some((db.as_str(), table.as_str()))
                                 }
                                 _ => None,
                             };
@@ -1551,17 +1503,8 @@ impl Session {
                                 .map_or(&[][..], Vec::as_slice);
                             let action = results_grid::show(
                                 ui,
-                                &selected_table,
-                                &self.table_view.table_data,
-                                &self.table_view.table_error,
-                                &mut self.table_view.sort_specs,
-                                &self.table_view.pending_edits,
-                                &self.table_view.pending_deletes,
-                                &self.table_view.pending_inserts,
-                                &mut self.table_view.editing_cell,
-                                &mut self.table_view.selected_cell,
-                                &mut self.table_view.selected_rows,
-                                &mut self.table_view.drag_select_from,
+                                selected_table,
+                                &mut self.table_view,
                                 col_info_slice,
                                 // Con query en curso: spinner en el grid
                                 running,
@@ -2911,5 +2854,26 @@ mod tests {
         s.run_editor(0, "SELECT 1".into(), String::new(), 10);
         s.disconnect();
         assert!(s.sql_tabs[0].running.is_none());
+    }
+
+    #[test]
+    fn al_cambiar_de_tabla_no_se_ven_los_datos_de_la_anterior() {
+        let mut s = session_with_table();
+        let mut sh = shared();
+        s.request_reload(&mut sh, Reload::Refresh);
+        let old_query = s.table_view.data_generation;
+        s.switch_to_table(&mut sh, "db".into(), "otra".into(), ActiveTab::Datos);
+        assert!(s.table_view.table_data.is_none());
+        s.apply_job(
+            &mut sh,
+            JobResult::TableData {
+                generation: old_query,
+                sql: String::new(),
+                elapsed_ms: 0,
+                result: Ok(data(&["de la anterior"])),
+            },
+        );
+        assert!(s.table_view.table_data.is_none());
+        assert!(s.table_view.query_loading);
     }
 }

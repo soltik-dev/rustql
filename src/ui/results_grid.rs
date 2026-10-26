@@ -367,28 +367,70 @@ pub fn format_rows_for_copy(
     }
 }
 
+/// Estado de la tabla abierta: datos, ordenación y filtro, cambios
+/// pendientes, edición y selección.
+#[derive(Default)]
+pub struct TableViewState {
+    pub table_data: Option<QueryResult>,
+    pub table_error: Option<String>,
+    pub sort_specs: Vec<SortSpec>,
+    pub filter_text: String,
+    pub filter_history: Vec<String>,
+    pub pending_edits: Vec<PendingEdit>,
+    pub editing_cell: Option<EditingCell>,
+    pub primary_keys: Vec<String>,
+    pub pending_deletes: BTreeSet<usize>,
+    pub pending_inserts: Vec<PendingInsert>,
+    pub selected_cell: Option<(usize, usize)>,
+    pub selected_rows: BTreeSet<usize>,
+    pub last_selected_row: Option<usize>,
+    pub drag_select_from: Option<usize>,
+    pub query_loading: bool,
+    /// Guardando los cambios pendientes: el grid no admite más hasta saber
+    /// el resultado.
+    pub saving: bool,
+    /// Se incrementa con cada consulta de la tabla: los resultados de una
+    /// anterior que lleguen tarde se descartan.
+    pub data_generation: u64,
+}
+
+impl TableViewState {
+    /// Vacía la vista (otra tabla, otra conexión, tabla borrada). La
+    /// generación avanza: los datos de consultas anteriores que sigan en
+    /// camino se descartan.
+    pub fn reset(&mut self) {
+        *self = Self {
+            data_generation: self.data_generation + 1,
+            ..Self::default()
+        };
+    }
+}
+
 // ── Grid principal ────────────────────────────────────────────────────────────
 
 /// Muestra el grid de datos con soporte de edición de celdas.
 /// Retorna la acción del usuario este frame.
-#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    selected_table: &Option<(String, String)>,
-    result: &Option<QueryResult>,
-    error: &Option<String>,
-    sorts: &mut Vec<SortSpec>,
-    pending_edits: &[PendingEdit],
-    pending_deletes: &BTreeSet<usize>,
-    pending_inserts: &[PendingInsert],
-    editing_cell: &mut Option<EditingCell>,
-    selected_cell: &mut Option<(usize, usize)>,
-    selected_rows: &mut BTreeSet<usize>,
-    drag_select_from: &mut Option<usize>,
+    selected_table: Option<(&str, &str)>,
+    view: &mut TableViewState,
     column_info: &[ColumnInfo],
     query_loading: bool,
 ) -> GridAction {
-    match (selected_table, result, error) {
+    let TableViewState {
+        table_data: result,
+        table_error: error,
+        sort_specs: sorts,
+        pending_edits,
+        pending_deletes,
+        pending_inserts,
+        editing_cell,
+        selected_cell,
+        selected_rows,
+        drag_select_from,
+        ..
+    } = view;
+    match (selected_table, &*result, &*error) {
         (None, _, _) => {
             ui.centered_and_justified(|ui| {
                 ui.label("Selecciona una tabla en el panel izquierdo");
@@ -415,7 +457,7 @@ pub fn show(
         _ => {}
     }
 
-    let (db, table) = selected_table.as_ref().unwrap();
+    let (db, table) = selected_table.unwrap();
     let data = result.as_ref().unwrap();
 
     // Barra de info + chips de ordenación activa
