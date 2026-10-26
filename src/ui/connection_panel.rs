@@ -2,6 +2,7 @@ use eframe::egui;
 
 use crate::db::ConnectionParams;
 use crate::profiles::{ConnColor, ConnectionProfile};
+use crate::secrets;
 use crate::ui::theme;
 
 /// Resultado de la interacción con el formulario de conexión.
@@ -150,21 +151,33 @@ fn show_form_fields(
             ui.end_row();
 
             ui.label("Contraseña:");
-            ui.add(
-                egui::TextEdit::singleline(&mut params.password)
-                    .password(true)
-                    .min_size(egui::vec2(220.0, 0.0)),
-            );
+            let mut password = egui::TextEdit::singleline(&mut params.password)
+                .password(true)
+                .min_size(egui::vec2(220.0, 0.0));
+            if params.keyring_id.is_some() {
+                password = password.hint_text("Guardada en el llavero");
+            }
+            ui.add(password);
             ui.end_row();
 
             ui.label("");
             ui.vertical(|ui| {
-                ui.checkbox(save_password, "Guardar contraseña");
-                if *save_password {
-                    ui.colored_label(
-                        p.warning,
-                        "⚠ Se guarda sin cifrar en ~/.config/rustql/connections.json",
+                if secrets::available() == Some(false) {
+                    *save_password = false;
+                    ui.add_enabled(
+                        false,
+                        egui::Checkbox::new(save_password, "Guardar contraseña"),
                     );
+                    ui.colored_label(p.warning, "⚠ Sin llavero del sistema: no se guardará");
+                } else {
+                    ui.checkbox(save_password, "Guardar contraseña");
+                    if *save_password {
+                        ui.label(
+                            egui::RichText::new("Se guarda cifrada en el llavero del sistema")
+                                .color(p.text_muted)
+                                .small(),
+                        );
+                    }
                 }
             });
             ui.end_row();

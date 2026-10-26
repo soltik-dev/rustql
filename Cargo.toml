@@ -15,3 +15,16 @@ arboard = "3"
 chrono = "0.4"
 rfd = "0.17"
 env_logger = "0.11"
+log = "0.4"
+keyring-core = "1"
+
+# Almacén de contraseñas del sistema (ver src/secrets.rs). Solo Rust puro en
+# Linux: sin libdbus ni openssl, para el build portable con glibc antigua.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { version = "1", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }

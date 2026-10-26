@@ -66,6 +66,10 @@ impl MysqlBackend {
         params: &ConnectionParams,
         on_status: impl Fn(&str),
     ) -> DbResult<Self> {
+        if params.keyring_id.is_some() && params.password.is_empty() {
+            on_status("Leyendo la contraseña del llavero...");
+        }
+        let password = params.resolve_password()?;
         on_status("Estableciendo conexión TCP...");
         // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10)
         // para un cliente GUI con un solo usuario basta con min:0, max:1
@@ -75,7 +79,7 @@ impl MysqlBackend {
             .ip_or_hostname(Some(params.host.as_str()))
             .tcp_port(params.port)
             .user(Some(params.user.as_str()))
-            .pass(Some(params.password.as_str()))
+            .pass(Some(password.as_str()))
             .pool_opts(pool_opts)
             .into();
 

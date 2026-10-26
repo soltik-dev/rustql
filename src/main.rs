@@ -4,6 +4,7 @@ mod app;
 mod db;
 mod log;
 mod profiles;
+mod secrets;
 mod session;
 mod settings;
 mod table_state;
@@ -32,7 +33,7 @@ fn main() -> eframe::Result<()> {
             let loaded = settings::load();
             settings::setup_fonts(&cc.egui_ctx, &loaded);
             settings::apply(&cc.egui_ctx, &loaded);
-            Ok(Box::new(RustqlApp::default()))
+            Ok(Box::new(RustqlApp::new(&cc.egui_ctx)))
         }),
     )
 }

@@ -1,6 +1,9 @@
+use std::sync::mpsc::{self, Receiver};
+
 use eframe::egui;
 
 use crate::profiles;
+use crate::secrets;
 use crate::session::{FrameKeys, Session, Shared};
 use crate::settings;
 use crate::table_state;
@@ -27,10 +30,13 @@ pub struct RustqlApp {
     next_session_id: u64,
     pub shared: Shared,
     pub ui: UiPanelState,
+    /// Arranque del llavero: ids de los perfiles cuya contraseña en claro ya
+    /// se ha pasado a él.
+    keyring_migration: Option<Receiver<Vec<String>>>,
 }
 
-impl Default for RustqlApp {
-    fn default() -> Self {
+impl RustqlApp {
+    pub fn new(ctx: &egui::Context) -> Self {
         let settings = settings::load();
         let ui = UiPanelState {
             show_sidebar: settings.show_sidebar,
@@ -38,18 +44,45 @@ impl Default for RustqlApp {
             show_settings: false,
             settings_dirty: false,
         };
+        let profiles = profiles::load();
+        let keyring_migration = Some(start_keyring(ctx, profiles::legacy_passwords(&profiles)));
         Self {
             sessions: vec![Session::new(0)],
             active: 0,
             next_session_id: 1,
             shared: Shared {
                 settings,
-                profiles: profiles::load(),
+                profiles,
                 table_states: table_state::load(),
             },
             ui,
+            keyring_migration,
         }
     }
+}
+
+/// Conecta con el llavero en segundo plano (el formulario consulta si está
+/// disponible sin bloquear) y le pasa las contraseñas en claro heredadas.
+fn start_keyring(
+    ctx: &egui::Context,
+    legacy: Vec<(String, String, String)>,
+) -> Receiver<Vec<String>> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let mut migrated = Vec::new();
+        if secrets::init() {
+            for (id, label, password) in legacy {
+                match secrets::set(&id, &label, &password) {
+                    Ok(()) => migrated.push(id),
+                    Err(e) => log::warn!("No se pasó al llavero la contraseña de «{label}»: {e}"),
+                }
+            }
+        }
+        let _ = tx.send(migrated);
+        ctx.request_repaint();
+    });
+    rx
 }
 
 // ── Gestión de pestañas de conexión ──────────────────────────────────────────
@@ -89,6 +122,31 @@ impl RustqlApp {
             self.active -= 1;
         }
         self.active = self.active.min(self.sessions.len() - 1);
+    }
+
+    /// Quita del JSON las contraseñas en claro que ya están en el llavero.
+    fn poll_keyring_migration(&mut self) {
+        let Some(rx) = &self.keyring_migration else {
+            return;
+        };
+        let migrated = match rx.try_recv() {
+            Ok(ids) => ids,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Vec::new(),
+        };
+        self.keyring_migration = None;
+        let mut changed = false;
+        for p in &mut self.shared.profiles {
+            // Si se volvió a guardar entretanto, ya no tiene la heredada.
+            if p.password.is_some() && migrated.contains(&p.id) {
+                p.password = None;
+                p.password_in_keyring = true;
+                changed = true;
+            }
+        }
+        if changed {
+            profiles::save(&self.shared.profiles);
+        }
     }
 
     /// Tras borrar un perfil, corrige los índices de las demás sesiones.
@@ -164,6 +222,7 @@ impl eframe::App for RustqlApp {
         }
 
         let keys = FrameKeys::read(ctx);
+        self.poll_keyring_migration();
 
         // ── Polling de hilos de fondo (todas las sesiones) ────────────────
         for session in &mut self.sessions {
@@ -298,6 +357,7 @@ mod tests {
                 show_settings: false,
                 settings_dirty: false,
             },
+            keyring_migration: None,
         }
     }
 
