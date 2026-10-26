@@ -33,7 +33,6 @@ pub enum SidebarAction {
     Refresh,
     Disconnect,
     ToggleFav { db: String, table: String },
-    PinTable { db: String, table: String },
     OpenTableStructure { db: String, table: String },
     OpenInSql { db: String, table: String },
     CloneTable { db: String, table: String },
@@ -42,6 +41,7 @@ pub enum SidebarAction {
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
+/// `conn_color` (color de la conexión) tiñe la raíz del árbol y la selección.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -55,6 +55,7 @@ pub fn show(
     show_only_fav: &mut bool,
     host: &str,
     server_name: &str,
+    conn_color: Option<egui::Color32>,
 ) -> SidebarAction {
     let action: RefCell<SidebarAction> = RefCell::new(SidebarAction::None);
     let p = theme::get(ui);
@@ -132,6 +133,8 @@ pub fn show(
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             let dbs = databases.clone();
 
+            // Hueco para el fondo de la raíz: se rellena al conocer su rect.
+            let server_bg = ui.painter().add(egui::Shape::Noop);
             let server_ch =
                 egui::CollapsingHeader::new(&server_label)
                     .id_salt("server_root")
@@ -251,23 +254,14 @@ pub fn show(
                                         row_rect.min,
                                         egui::vec2(icon_w, row_height),
                                     );
-                                    let pin_rect = egui::Rect::from_min_size(
-                                        egui::pos2(row_rect.min.x + icon_w, row_rect.min.y),
-                                        egui::vec2(icon_w, row_height),
-                                    );
                                     let label_rect = egui::Rect::from_min_max(
-                                        egui::pos2(row_rect.min.x + icon_w * 2.0, row_rect.min.y),
+                                        egui::pos2(row_rect.min.x + icon_w, row_rect.min.y),
                                         row_rect.max,
                                     );
 
                                     let fav_resp = ui.interact(
                                         fav_rect,
                                         ui.scope_id().with(("fav", db.as_str(), table.as_str())),
-                                        egui::Sense::click(),
-                                    );
-                                    let pin_resp = ui.interact(
-                                        pin_rect,
-                                        ui.scope_id().with(("pin", db.as_str(), table.as_str())),
                                         egui::Sense::click(),
                                     );
                                     let resp = ui.interact(
@@ -277,10 +271,10 @@ pub fn show(
                                     );
 
                                     // Fondo hover/selected
-                                    let is_hovered =
-                                        resp.hovered() || fav_resp.hovered() || pin_resp.hovered();
+                                    let is_hovered = resp.hovered() || fav_resp.hovered();
                                     let bg = if is_selected {
-                                        p.grid_sel_row_bg
+                                        conn_color
+                                            .map_or(p.grid_sel_row_bg, |c| c.gamma_multiply(0.3))
                                     } else if is_hovered {
                                         p.bg_surface
                                     } else {
@@ -309,20 +303,6 @@ pub fn show(
                                         star_color,
                                     );
 
-                                    let pin_icon = PIN;
-                                    let pin_color = if pin_resp.hovered() {
-                                        ui.visuals().strong_text_color()
-                                    } else {
-                                        ui.visuals().weak_text_color()
-                                    };
-                                    ui.painter().text(
-                                        pin_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        pin_icon,
-                                        egui::TextStyle::Body.resolve(ui.style()),
-                                        pin_color,
-                                    );
-
                                     // Texto de la tabla
                                     let text_color = if is_selected {
                                         p.text_primary
@@ -341,12 +321,6 @@ pub fn show(
 
                                     if fav_resp.clicked() {
                                         *action.borrow_mut() = SidebarAction::ToggleFav {
-                                            db: db_clone.clone(),
-                                            table: table_clone.clone(),
-                                        };
-                                    }
-                                    if pin_resp.clicked() {
-                                        *action.borrow_mut() = SidebarAction::PinTable {
                                             db: db_clone.clone(),
                                             table: table_clone.clone(),
                                         };
@@ -370,14 +344,6 @@ pub fn show(
                                             .clicked()
                                         {
                                             *action.borrow_mut() = SidebarAction::ToggleFav {
-                                                db: db_clone.clone(),
-                                                table: table_clone.clone(),
-                                            };
-                                            ui.close();
-                                        }
-                                        if ui.button(format!("{PIN_FILLED} Fijar tabla")).clicked()
-                                        {
-                                            *action.borrow_mut() = SidebarAction::PinTable {
                                                 db: db_clone.clone(),
                                                 table: table_clone.clone(),
                                             };
@@ -485,6 +451,17 @@ pub fn show(
                             });
                         }
                     });
+
+            if let Some(c) = conn_color {
+                let rect = egui::Rect::from_x_y_ranges(
+                    ui.max_rect().x_range(),
+                    server_ch.header_response.rect.y_range(),
+                );
+                ui.painter().set(
+                    server_bg,
+                    egui::epaint::RectShape::filled(rect, theme::RADIUS_SM, c.gamma_multiply(0.22)),
+                );
+            }
 
             if server_ch.header_response.clicked() {
                 *action.borrow_mut() = SidebarAction::SelectServer;

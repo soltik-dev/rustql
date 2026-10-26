@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -52,10 +53,13 @@ pub struct AppSettings {
     pub show_log: bool,
     #[serde(default)]
     pub fav_tables: std::collections::HashSet<String>,
-    #[serde(default)]
-    pub pinned_tables: Vec<(String, String)>,
-    #[serde(default)]
+    /// Pestañas SQL de antes de las conexiones múltiples: las hereda la primera
+    /// conexión que se abra y después deja de guardarse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sql_tabs: Vec<SavedSqlTab>,
+    /// Pestañas SQL guardadas por conexión (clave: ConnectionParams::key).
+    #[serde(default)]
+    pub sql_tabs_by_conn: HashMap<String, Vec<SavedSqlTab>>,
     #[serde(default)]
     pub copy_format: CopyFormat,
     #[serde(default = "default_query_limit")]
@@ -71,8 +75,8 @@ impl Default for AppSettings {
             show_sidebar: true,
             show_log: true,
             fav_tables: std::collections::HashSet::new(),
-            pinned_tables: Vec::new(),
             sql_tabs: Vec::new(),
+            sql_tabs_by_conn: HashMap::new(),
             copy_format: CopyFormat::Csv,
             query_limit: 500,
         }

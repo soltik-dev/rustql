@@ -10,8 +10,7 @@ pub enum ActiveTab {
     Bbdd,
     Tabla,
     Datos,
-    Sql(usize),    // index into sql_tabs Vec
-    Pinned(usize), // index into pinned_tables Vec
+    Sql(usize), // index into sql_tabs Vec
 }
 
 #[derive(Default)]
@@ -19,7 +18,6 @@ pub struct TabBarResult {
     pub tab_clicked: Option<ActiveTab>,
     pub new_sql_tab: bool,
     pub close_sql_tab: Option<usize>,
-    pub close_pinned: Option<usize>,
 }
 
 fn clip_text(s: &str, max_chars: usize) -> String {
@@ -42,15 +40,13 @@ pub fn show(
     db_name: Option<&str>,
     table_name: Option<&str>,
     sql_tab_count: usize,
-    pinned_tables: &[(String, String)],
-    pinned_pending_counts: &[usize],
 ) -> TabBarResult {
     let mut result = TabBarResult::default();
 
     ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
     ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
 
-    // Row 1: main context tabs + SQL tabs, all wrapping
+    // Pestañas de contexto + pestañas SQL, con salto de línea si no caben
     ui.horizontal_wrapped(|ui| {
         // Servidor tab
         let srv_label = format!("{DATABASE} {}", clip_text(server_name, 18));
@@ -106,31 +102,6 @@ pub fn show(
         }
     });
 
-    // Row 2: pinned tabs (only if any)
-    if !pinned_tables.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(PIN_FILLED);
-            for (i, (_db, table)) in pinned_tables.iter().enumerate() {
-                let is_active = active == ActiveTab::Pinned(i);
-                let has_changes = pinned_pending_counts.get(i).copied().unwrap_or(0) > 0;
-                let label = if has_changes {
-                    format!("● {}", clip_text(table, 16))
-                } else {
-                    clip_text(table, 18)
-                };
-                if tab_btn_pinned(ui, &label, is_active, true, has_changes) {
-                    result.tab_clicked = Some(ActiveTab::Pinned(i));
-                }
-                let close_resp = ui
-                    .add(egui::Button::new("×").small().frame(false))
-                    .on_hover_text("Quitar fijado");
-                if close_resp.clicked() {
-                    result.close_pinned = Some(i);
-                }
-            }
-        });
-    }
-
     result
 }
 
@@ -145,14 +116,8 @@ fn tab_separator(ui: &mut egui::Ui) {
 }
 
 /// Pestaña: fondo transparente, hover en superficie y subrayado de acento si
-/// está activa. `tint` colorea fondo y texto (tabs fijados con cambios).
-fn tab_btn_impl(
-    ui: &mut egui::Ui,
-    label: &str,
-    active: bool,
-    enabled: bool,
-    tint: Option<egui::Color32>,
-) -> bool {
+/// está activa.
+fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool {
     let p = theme::get(ui);
     if !enabled {
         let text = egui::RichText::new(label).color(p.text_disabled);
@@ -160,22 +125,14 @@ fn tab_btn_impl(
         return false;
     }
 
-    let text_color = match tint {
-        Some(t) => t,
-        None if active => p.text_primary,
-        None => p.text_muted,
-    };
-    let (fill, fill_hover) = match tint {
-        Some(t) => (t.gamma_multiply(0.18), t.gamma_multiply(0.28)),
-        None => (egui::Color32::TRANSPARENT, p.bg_surface),
-    };
+    let text_color = if active { p.text_primary } else { p.text_muted };
 
     let resp = ui
         .scope(|ui| {
             let w = &mut ui.style_mut().visuals.widgets;
-            w.inactive.weak_bg_fill = fill;
-            w.hovered.weak_bg_fill = fill_hover;
-            w.active.weak_bg_fill = fill_hover;
+            w.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+            w.hovered.weak_bg_fill = p.bg_surface;
+            w.active.weak_bg_fill = p.bg_surface;
             for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
                 state.bg_stroke = egui::Stroke::NONE;
             }
@@ -194,20 +151,4 @@ fn tab_btn_impl(
         );
     }
     resp.clicked()
-}
-
-fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool {
-    tab_btn_impl(ui, label, active, enabled, None)
-}
-
-/// Variante para tabs fijados: tinte cálido cuando tiene cambios pendientes.
-fn tab_btn_pinned(
-    ui: &mut egui::Ui,
-    label: &str,
-    active: bool,
-    enabled: bool,
-    has_changes: bool,
-) -> bool {
-    let tint = has_changes.then(|| theme::get(ui).warning);
-    tab_btn_impl(ui, label, active, enabled, tint)
 }

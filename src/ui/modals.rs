@@ -163,6 +163,11 @@ pub enum ModalState {
         pending_count: usize,
         current_table: String,
     },
+    /// Hay cambios sin guardar y el usuario cierra la pestaña de la conexión.
+    ConfirmCloseSession {
+        title: String,
+        pending_count: usize,
+    },
     ConfirmDeleteRow {
         db: String,
         table: String,
@@ -240,6 +245,8 @@ pub enum ModalAction {
         new_db: String,
         new_table: String,
     },
+    /// Cerrar la pestaña de conexión descartando los cambios pendientes.
+    CloseSession,
     DeleteRow {
         db: String,
         table: String,
@@ -339,6 +346,10 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
             pending_count,
             current_table,
         } => show_confirm_switch_table(ctx, new_db, new_table, *pending_count, current_table),
+        ModalState::ConfirmCloseSession {
+            title,
+            pending_count,
+        } => show_confirm_close_session(ctx, title, *pending_count),
         ModalState::ConfirmDeleteRow {
             db,
             table,
@@ -902,6 +913,37 @@ fn show_confirm_switch_table(
                         new_db: new_db.to_string(),
                         new_table: new_table.to_string(),
                     };
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        });
+
+    action
+}
+
+fn show_confirm_close_session(
+    ctx: &egui::Context,
+    title: &str,
+    pending_count: usize,
+) -> ModalAction {
+    let mut action = ModalAction::None;
+
+    egui::Window::new("Cerrar conexión")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Tienes {pending_count} cambio(s) sin guardar en «{title}»."
+            ));
+            ui.add_space(4.0);
+            ui.label("Si cierras la pestaña se perderán.");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::warning_button(ui, format!("{TRASH}  Descartar y cerrar")).clicked() {
+                    action = ModalAction::CloseSession;
                 }
                 if ui.button("Cancelar").clicked() {
                     action = ModalAction::Cancel;

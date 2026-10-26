@@ -1,6 +1,4 @@
 /// Glifos del TTF embebido rustql.ttf (Private Use Area U+E800..)
-pub const PIN:        &str = "\u{E800}"; // pin vacío
-pub const PIN_FILLED: &str = "\u{E801}"; // pin relleno
 pub const STAR:       &str = "\u{E802}"; // estrella vacía
 pub const STAR_FILLED:&str = "\u{E803}"; // estrella rellena
 pub const DATABASE:   &str = "\u{F1C0}"; // base de datos
