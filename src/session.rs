@@ -1132,21 +1132,21 @@ impl Session {
         }
     }
 
-    /// Tablas de una BBDD para el modal de exportación: usa la caché del
-    /// sidebar o, si el árbol aún no se expandió, las pide al backend.
-    fn export_tables_for(&mut self, db: &str) -> Vec<String> {
+    /// Tablas de una BBDD: usa la caché del sidebar o, si el árbol aún no
+    /// la ha cargado, las pide al backend (y las deja en la caché).
+    fn table_names(&mut self, db: &str) -> Result<Vec<String>, String> {
         if let Some(tables) = self.schema.tables_cache.get(db) {
-            return tables.clone();
+            return Ok(tables.clone());
         }
         let ConnState::Connected(backend) = &self.state else {
-            return Vec::new();
+            return Err("No conectado".into());
         };
         match backend.list_tables(db) {
             Ok(tables) => {
                 self.schema
                     .tables_cache
                     .insert(db.to_string(), tables.clone());
-                tables
+                Ok(tables)
             }
             Err(e) => {
                 self.push_log(LogEntry::err(
@@ -1154,7 +1154,7 @@ impl Session {
                     0,
                     e.as_str(),
                 ));
-                Vec::new()
+                Err(e)
             }
         }
     }
@@ -1282,20 +1282,36 @@ impl Session {
             }
             ModalAction::TruncateAllTables(db) => {
                 self.modal = ModalState::None;
-                let tables = self
-                    .schema
-                    .tables_cache
-                    .get(&db)
-                    .cloned()
-                    .unwrap_or_default();
-                for table in &tables {
-                    let _ = self.run_write(&format!(
-                        "TRUNCATE TABLE `{}`.`{}`",
-                        db.replace('`', "``"),
-                        table.replace('`', "``")
-                    ));
-                }
+                // El árbol puede no haber cargado aún las tablas de esta BBDD
+                let tables = match self.table_names(&db) {
+                    Ok(tables) => tables,
+                    Err(message) => {
+                        self.modal = ModalState::Error {
+                            title: format!("No se pudieron listar las tablas de «{db}»"),
+                            message,
+                        };
+                        return;
+                    }
+                };
+                let failed: Vec<String> = tables
+                    .iter()
+                    .filter_map(|table| {
+                        self.run_write(&format!(
+                            "TRUNCATE TABLE `{}`.`{}`",
+                            escape_ident(&db),
+                            escape_ident(table)
+                        ))
+                        .err()
+                        .map(|e| format!("{table}: {e}"))
+                    })
+                    .collect();
                 self.after_truncate(sh, &db, &tables);
+                if !failed.is_empty() {
+                    self.modal = ModalState::Error {
+                        title: format!("No se pudieron vaciar todas las tablas de «{db}»"),
+                        message: failed.join("\n"),
+                    };
+                }
             }
             ModalAction::ApplyFilter { sql_fragment } => {
                 self.modal = ModalState::None;
@@ -2287,7 +2303,7 @@ impl Session {
                 };
             }
             SidebarAction::ExportDatabase(db) => {
-                let tables = self.export_tables_for(&db);
+                let tables = self.table_names(&db).unwrap_or_default();
                 let dbs = self.schema.databases.clone();
                 let profiles = sh.profiles.clone();
                 self.modal = ModalState::ExportData {
@@ -2314,7 +2330,7 @@ impl Session {
             }
             SidebarAction::ExportTable { db, table } => {
                 // Mostrar todas las tablas de la BBDD con solo la pulsada marcada.
-                let mut names = self.export_tables_for(&db);
+                let mut names = self.table_names(&db).unwrap_or_default();
                 if names.is_empty() {
                     names.push(table.clone());
                 }
@@ -2888,5 +2904,54 @@ mod tests {
             "da la vuelta sin pasar por id"
         );
         assert_eq!(s.next_editable_col(RowRef::Existing(0), 2), 0);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn vaciar_todas_sin_haber_desplegado_el_arbol() {
+        let mut b = crate::db::test_server::backend();
+        for sql in [
+            "DROP DATABASE IF EXISTS rustql_test_truncate",
+            "CREATE DATABASE rustql_test_truncate",
+            "CREATE TABLE rustql_test_truncate.padre (id INT PRIMARY KEY)",
+            "CREATE TABLE rustql_test_truncate.hija (id INT, \
+             FOREIGN KEY (id) REFERENCES rustql_test_truncate.padre (id))",
+            "CREATE TABLE rustql_test_truncate.suelta (id INT)",
+            "INSERT INTO rustql_test_truncate.padre VALUES (1)",
+            "INSERT INTO rustql_test_truncate.hija VALUES (1)",
+            "INSERT INTO rustql_test_truncate.suelta VALUES (1), (2)",
+        ] {
+            b.execute_write(sql).unwrap();
+        }
+        let mut s = Session::new(0);
+        s.state = ConnState::Connected(Box::new(b));
+        assert!(s.schema.tables_cache.is_empty());
+
+        s.handle_modal_action(
+            ModalAction::TruncateAllTables("rustql_test_truncate".into()),
+            &mut shared(),
+        );
+        let ConnState::Connected(b) = &mut s.state else {
+            unreachable!()
+        };
+        let count = |t: &str| {
+            b.execute_query(&format!("SELECT COUNT(*) FROM rustql_test_truncate.{t}"))
+                .unwrap()
+                .rows[0][0]
+                .clone()
+        };
+        let (suelta, hija, padre) = (count("suelta"), count("hija"), count("padre"));
+        b.execute_write("DROP DATABASE rustql_test_truncate")
+            .unwrap();
+
+        assert_eq!(suelta, Some("0".into()));
+        assert_eq!(hija, Some("0".into()));
+        // La referenciada por una clave foránea no se puede truncar: se avisa
+        assert_eq!(padre, Some("1".into()));
+        assert!(
+            matches!(&s.modal, ModalState::Error { message, .. } if message.starts_with("padre:")),
+            "{:?}",
+            s.modal
+        );
     }
 }
