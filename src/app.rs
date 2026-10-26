@@ -175,7 +175,9 @@ impl eframe::App for RustqlApp {
         let mut settings_changed = false;
 
         // ── Paneles globales (antes que los de la sesión) ─────────────────
-        {
+        // Borde inferior del marco de color: encima del log, o de la barra
+        // de estado si el log está oculto.
+        let mut frame_bottom = {
             let (sb_host, sb_db) = self.sessions[self.active].status();
             let statusbar_frame =
                 egui::Frame::side_top_panel(ui.style()).fill(theme::get(ui).bg_sunken);
@@ -191,20 +193,26 @@ impl eframe::App for RustqlApp {
                         sb_host.as_deref(),
                         sb_db.as_deref(),
                     );
-                });
-        }
+                })
+                .response
+                .rect
+                .top()
+        };
 
         let (tabs_action, tabs_rect) = self.show_conn_tabs(ui);
 
         let session = &self.sessions[self.active];
         if session.is_connected() && self.ui.show_log {
-            egui::Panel::bottom("log_panel")
+            frame_bottom = egui::Panel::bottom("log_panel")
                 .resizable(true)
                 .min_size(80.0)
                 .max_size(300.0)
                 .show(ui, |ui| {
                     log_panel::show(ui, &session.query_log);
-                });
+                })
+                .response
+                .rect
+                .top();
         }
 
         if self.ui.show_settings {
@@ -219,15 +227,16 @@ impl eframe::App for RustqlApp {
         let outcome =
             self.sessions[self.active].show(ui, &mut self.shared, keys, self.ui.show_sidebar);
 
-        // Marco de la ventana con el color de la conexión activa, por encima de
-        // todos los paneles. Su lado superior es la línea de las pestañas.
+        // Marco con el color de la conexión activa alrededor del área de
+        // trabajo (sin log ni barra de estado), por encima de sus paneles. Su
+        // lado superior es la línea de las pestañas.
         if let Some(color) = self.sessions[self.active].color {
             let frame = egui::Rect::from_min_max(
                 egui::pos2(
                     window_rect.left(),
                     tabs_rect.bottom() - theme::CONN_FRAME_WIDTH,
                 ),
-                window_rect.max,
+                egui::pos2(window_rect.right(), frame_bottom),
             );
             ui.painter().rect_stroke(
                 frame,
