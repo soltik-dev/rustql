@@ -118,7 +118,6 @@ pub struct RustqlApp {
     // Pestañas
     pub active_tab: ActiveTab,
     pub sql_tabs: Vec<SqlTab>,
-    pub pinned_tables: Vec<(String, String)>,
 
     // Sesión / perfiles
     pub profiles: Vec<ConnectionProfile>,
@@ -128,10 +127,6 @@ pub struct RustqlApp {
 
     // Estado persistido por tabla (sort, filtro, historial)
     pub table_states: TableStates,
-
-    /// Cambios pendientes guardados por tabla fijada (clave: "db/tabla").
-    /// Persisten aunque el usuario cambie de tabla.
-    pub pinned_pending_edits: HashMap<String, Vec<PendingEdit>>,
 }
 
 impl Default for RustqlApp {
@@ -160,13 +155,11 @@ impl Default for RustqlApp {
             },
             active_tab: ActiveTab::default(),
             sql_tabs: vec![SqlTab::default()],
-            pinned_tables: Vec::new(),
             profiles: profiles::load(),
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
             table_states: table_state::load(),
-            pinned_pending_edits: HashMap::new(),
         }
     }
 }
@@ -328,7 +321,7 @@ impl RustqlApp {
                     }
                 }
             }
-            ActiveTab::Sql(_) | ActiveTab::Pinned(_) | ActiveTab::Datos => {}
+            ActiveTab::Sql(_) | ActiveTab::Datos => {}
         }
     }
 
@@ -381,14 +374,23 @@ impl RustqlApp {
         }
     }
 
-    fn apply_pending_edits(&mut self) {
-        self.apply_pending_changes();
+    /// Aplica los cambios pendientes y recarga la tabla si se guardaron todos.
+    fn apply_pending_changes(&mut self) {
+        if self.commit_pending_changes()
+            && let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
+        {
+            let sql = self.build_sql(db, table);
+            self.run_query_async(sql);
+        }
     }
 
-    fn apply_pending_changes(&mut self) {
+    /// Ejecuta deletes, edits e inserts pendientes (cada grupo en su transacción).
+    /// Devuelve true si no queda ninguno. No recarga: el llamante decide, porque
+    /// la recarga cede el backend a un hilo y bloquearía otras operaciones.
+    fn commit_pending_changes(&mut self) -> bool {
         let (db, table) = match &self.schema.selected_node {
             Some(SelectedNode::Table { db, table }) => (db.clone(), table.clone()),
-            _ => return,
+            _ => return false,
         };
 
         // 1. Apply deletes (en transacción para garantizar atomicidad)
@@ -398,11 +400,11 @@ impl RustqlApp {
                     title: "Error al eliminar".into(),
                     message: "No se puede eliminar: tabla sin clave primaria".into(),
                 };
-                return;
+                return false;
             }
             let data = match &self.table_view.table_data {
                 Some(d) => d.clone(),
-                None => return,
+                None => return false,
             };
             let pks = self.table_view.primary_keys.clone();
             let deletes: Vec<usize> = self.table_view.pending_deletes.iter().cloned().collect();
@@ -432,7 +434,7 @@ impl RustqlApp {
             }
             let result = match &mut self.state {
                 AppState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return,
+                _ => return false,
             };
             match result {
                 Ok(()) => {
@@ -457,11 +459,11 @@ impl RustqlApp {
                     title: "Error al editar".into(),
                     message: "No se puede editar: la tabla no tiene clave primaria".into(),
                 };
-                return;
+                return false;
             }
             let data = match &self.table_view.table_data {
                 Some(d) => d.clone(),
-                None => return,
+                None => return false,
             };
             let edits = self.table_view.pending_edits.clone();
             let pks = self.table_view.primary_keys.clone();
@@ -506,7 +508,7 @@ impl RustqlApp {
             }
             let result = match &mut self.state {
                 AppState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return,
+                _ => return false,
             };
             match result {
                 Ok(()) => {
@@ -514,8 +516,6 @@ impl RustqlApp {
                     self.push_log(LogEntry::ok(format!("UPDATE x{n} (transacción)"), 0, n));
                     self.table_view.pending_edits.clear();
                     self.table_view.editing_cell = None;
-                    let key = Self::pinned_table_key(&db, &table);
-                    self.pinned_pending_edits.remove(&key);
                 }
                 Err(e) => {
                     self.push_log(LogEntry::err("UPDATE (transacción)", 0, &e));
@@ -565,7 +565,7 @@ impl RustqlApp {
             }
             let result = match &mut self.state {
                 AppState::Connected(b) => b.execute_transaction(&stmts),
-                _ => return,
+                _ => return false,
             };
             match result {
                 Ok(()) => {
@@ -583,14 +583,7 @@ impl RustqlApp {
             }
         }
 
-        // 4. Reload if all clear
-        if self.table_view.pending_deletes.is_empty()
-            && self.table_view.pending_inserts.is_empty()
-            && self.table_view.pending_edits.is_empty()
-        {
-            let sql = self.build_sql(&db, &table);
-            self.run_query_async(sql);
-        }
+        self.pending_count() == 0
     }
 
     /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
@@ -605,58 +598,36 @@ impl RustqlApp {
         }
     }
 
-    pub fn pinned_table_key(db: &str, table: &str) -> String {
-        format!("{}/{}", db, table)
+    /// Total de cambios pendientes (edits + deletes + inserts) en la tabla actual.
+    fn pending_count(&self) -> usize {
+        self.table_view.pending_edits.len()
+            + self.table_view.pending_deletes.len()
+            + self.table_view.pending_inserts.len()
     }
 
-    fn is_table_pinned(&self, db: &str, table: &str) -> bool {
-        self.pinned_tables
-            .iter()
-            .any(|(d, t)| d == db && t == table)
-    }
-
-    /// Devuelve true si hay cambios pendientes en la tabla actual que NO está fijada,
-    /// lo que requiere confirmación antes de cambiar de tabla.
-    fn needs_confirm_before_switch(&self) -> bool {
-        let has_pending = !self.table_view.pending_edits.is_empty()
-            || !self.table_view.pending_deletes.is_empty()
-            || !self.table_view.pending_inserts.is_empty();
-        if !has_pending {
-            return false;
-        }
-        match &self.schema.selected_node {
-            Some(SelectedNode::Table { db, table }) => !self.is_table_pinned(db, table),
-            _ => false,
-        }
-    }
-
-    /// Si la tabla actual está fijada, guarda sus pending_edits en pinned_pending_edits.
-    fn save_pinned_edits_if_needed(&mut self) {
-        if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-            && self.is_table_pinned(db, table)
-        {
-            let key = Self::pinned_table_key(db, table);
-            if self.table_view.pending_edits.is_empty() {
-                self.pinned_pending_edits.remove(&key);
-            } else {
-                self.pinned_pending_edits
-                    .insert(key, self.table_view.pending_edits.clone());
-            }
-        }
-    }
-
-    /// Si la nueva tabla está fijada, restaura sus pending_edits guardados.
-    /// Si no está fijada, limpia los pending_edits.
-    fn restore_pinned_edits_for(&mut self, db: &str, table: &str) {
-        if self.is_table_pinned(db, table) {
-            let key = Self::pinned_table_key(db, table);
-            self.table_view.pending_edits = self
-                .pinned_pending_edits
-                .get(&key)
-                .cloned()
-                .unwrap_or_default();
+    /// Abre una tabla en la pestaña indicada. Si hay cambios pendientes en la
+    /// tabla actual, pide confirmación antes de cambiar.
+    fn switch_to_table(&mut self, db: String, table: String, tab: ActiveTab) {
+        let already_selected = matches!(
+            &self.schema.selected_node,
+            Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
+        );
+        if already_selected {
+            self.active_tab = tab;
+        } else if self.pending_count() > 0 {
+            let current_table = match &self.schema.selected_node {
+                Some(SelectedNode::Table { table: t, .. }) => t.clone(),
+                _ => String::new(),
+            };
+            self.ui.modal = modals::ModalState::ConfirmSwitchTable {
+                new_db: db,
+                new_table: table,
+                pending_count: self.pending_count(),
+                current_table,
+            };
         } else {
-            self.table_view.pending_edits.clear();
+            self.on_table_selected(db, table);
+            self.active_tab = tab;
         }
     }
 
@@ -668,48 +639,42 @@ impl RustqlApp {
         self.table_view.selected_rows.clear();
         self.table_view.last_selected_row = None;
         self.table_view.drag_select_from = None;
+        self.table_view.pending_edits.clear();
         self.table_view.pending_deletes.clear();
         self.table_view.pending_inserts.clear();
+        self.table_view.editing_cell = None;
 
-        // 1. Si la tabla actual está fijada, preservar sus cambios pendientes
-        self.save_pinned_edits_if_needed();
-
-        // 2. Guardar estado de la tabla anterior (sort, filtro, historial)
+        // 1. Guardar estado de la tabla anterior (sort, filtro, historial)
         self.save_table_state();
 
-        // 3. Cargar estado de la nueva tabla
+        // 2. Cargar estado de la nueva tabla
         let ts = table_state::get(&self.table_states, &db, &table);
         self.table_view.filter_text = ts.filter_text.clone();
         self.table_view.filter_history = ts.filter_history.clone();
 
-        // 4. Actualizar selección
+        // 3. Actualizar selección
         self.schema.selected_node = Some(SelectedNode::Table {
             db: db.clone(),
             table: table.clone(),
         });
 
-        // 5. Restaurar pending_edits para la nueva tabla (solo si está fijada)
-        self.restore_pinned_edits_for(&db, &table);
-        self.table_view.editing_cell = None;
-
-        // 6. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
+        // 4. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
         self.table_view.sort_specs = ts.sort_specs.clone();
 
-        // 7. Cargar claves primarias e info de columnas (antes de run_query_async, que cambia el estado a QueryRunning)
+        // 5. Cargar claves primarias e info de columnas (antes de run_query_async, que cambia el estado a QueryRunning)
         self.load_primary_keys(&db, &table);
         let col_key = (db.clone(), table.clone());
         if !self.schema.columns_info.contains_key(&col_key) {
             self.load_columns_info(&db, &table);
         }
 
-        // 8. Ejecutar query (server-side sort + filter restaurados)
+        // 6. Ejecutar query (server-side sort + filter restaurados)
         let sql = self.build_sql(&db, &table);
         self.run_query_async(sql);
         // sort_indices es identidad tras run_query (datos ya ordenados por servidor)
     }
 
     fn save_tabs_state(&mut self) {
-        self.ui.settings.pinned_tables = self.pinned_tables.clone();
         self.ui.settings.sql_tabs = self
             .sql_tabs
             .iter()
@@ -748,8 +713,7 @@ impl RustqlApp {
         self.schema.databases_info = None;
         self.schema.tables_info.clear();
         self.schema.columns_info.clear();
-        // Restaurar pestañas guardadas desde settings
-        self.pinned_tables = self.ui.settings.pinned_tables.clone();
+        // Restaurar pestañas SQL guardadas desde settings
         self.sql_tabs = if self.ui.settings.sql_tabs.is_empty() {
             vec![SqlTab::default()]
         } else {
@@ -765,7 +729,6 @@ impl RustqlApp {
                 .collect()
         };
         self.ui.query_log.clear();
-        self.pinned_pending_edits.clear();
     }
 }
 
@@ -982,21 +945,13 @@ impl RustqlApp {
             }
             ModalAction::ApplyAndSwitch { new_db, new_table } => {
                 self.ui.modal = ModalState::None;
-                self.apply_pending_edits();
-                if self.table_view.pending_edits.is_empty() {
+                if self.commit_pending_changes() {
                     self.on_table_selected(new_db, new_table);
                     self.active_tab = ActiveTab::Datos;
                 }
             }
             ModalAction::DiscardAndSwitch { new_db, new_table } => {
                 self.ui.modal = ModalState::None;
-                self.table_view.pending_edits.clear();
-                self.table_view.editing_cell = None;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let key = Self::pinned_table_key(db, table);
-                    self.pinned_pending_edits.remove(&key);
-                }
                 self.on_table_selected(new_db, new_table);
                 self.active_tab = ActiveTab::Datos;
             }
@@ -1516,22 +1471,6 @@ impl eframe::App for RustqlApp {
                     };
 
                     let sql_tab_count = self.sql_tabs.len();
-                    let pinned_tables = self.pinned_tables.clone();
-
-                    // Calcular cuántos cambios pendientes tiene cada tabla fijada
-                    let pinned_pending_counts: Vec<usize> = pinned_tables.iter().map(|(db, table)| {
-                        let key = Self::pinned_table_key(db, table);
-                        // Si es la tabla actualmente abierta, usar los pending_edits en vivo
-                        let is_current = matches!(
-                            &self.schema.selected_node,
-                            Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
-                        );
-                        if is_current {
-                            self.table_view.pending_edits.len()
-                        } else {
-                            self.pinned_pending_edits.get(&key).map_or(0, |v| v.len())
-                        }
-                    }).collect();
 
                     egui::Panel::top("tab_bar")
                         .min_size(30.0)
@@ -1547,8 +1486,6 @@ impl eframe::App for RustqlApp {
                                 db_name_tab.as_deref(),
                                 table_name_tab.as_deref(),
                                 sql_tab_count,
-                                &pinned_tables,
-                                &pinned_pending_counts,
                             );
                         });
                 }
@@ -1684,21 +1621,6 @@ impl eframe::App for RustqlApp {
                                 );
                             }
                         }
-
-                        ActiveTab::Pinned(idx) => {
-                            if let Some((pin_db, pin_table)) = self.pinned_tables.get(idx).cloned() {
-                                ui.centered_and_justified(|ui| {
-                                    ui.vertical_centered(|ui| {
-                                        ui.strong(format!("Tabla fijada: {pin_db}.{pin_table}"));
-                                        ui.add_space(8.0);
-                                        if ui.button("Ir a datos").clicked() {
-                                            // Will be handled after render
-                                        }
-                                        ui.label("(Haz doble-click en la tabla del sidebar para cargar datos)");
-                                    });
-                                });
-                            }
-                        }
                     }
                 });
             }
@@ -1761,16 +1683,6 @@ impl eframe::App for RustqlApp {
                         _ => None,
                     };
                     let sql_tab_count = self.sql_tabs.len();
-                    let pinned_tables = self.pinned_tables.clone();
-                    let pinned_pending_counts: Vec<usize> = pinned_tables.iter().map(|(db, table)| {
-                        let key = Self::pinned_table_key(db, table);
-                        let is_current = matches!(
-                            &self.schema.selected_node,
-                            Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
-                        );
-                        if is_current { self.table_view.pending_edits.len() }
-                        else { self.pinned_pending_edits.get(&key).map_or(0, |v| v.len()) }
-                    }).collect();
                     egui::Panel::top("tab_bar")
                         .min_size(30.0)
                         .resizable(false)
@@ -1785,8 +1697,6 @@ impl eframe::App for RustqlApp {
                                 db_name_tab.as_deref(),
                                 table_name_tab.as_deref(),
                                 sql_tab_count,
-                                &pinned_tables,
-                                &pinned_pending_counts,
                             );
                         });
                 }
@@ -1874,37 +1784,7 @@ impl eframe::App for RustqlApp {
 
         // Handle tab bar result
         if let Some(t) = tab_bar_result.tab_clicked {
-            match t {
-                ActiveTab::Pinned(idx) => {
-                    if let Some((pin_db, pin_table)) = self.pinned_tables.get(idx).cloned() {
-                        let already_selected = matches!(
-                            &self.schema.selected_node,
-                            Some(SelectedNode::Table { db, table }) if *db == pin_db && *table == pin_table
-                        );
-                        if !already_selected {
-                            if self.needs_confirm_before_switch() {
-                                let current_table = match &self.schema.selected_node {
-                                    Some(SelectedNode::Table { table: t, .. }) => t.clone(),
-                                    _ => String::new(),
-                                };
-                                let count = self.table_view.pending_edits.len();
-                                self.ui.modal = modals::ModalState::ConfirmSwitchTable {
-                                    new_db: pin_db,
-                                    new_table: pin_table,
-                                    pending_count: count,
-                                    current_table,
-                                };
-                            } else {
-                                self.on_table_selected(pin_db, pin_table);
-                                self.active_tab = ActiveTab::Datos;
-                            }
-                        } else {
-                            self.active_tab = ActiveTab::Datos;
-                        }
-                    }
-                }
-                other => self.active_tab = other,
-            }
+            self.active_tab = t;
         }
 
         if tab_bar_result.new_sql_tab || ctrl_t {
@@ -1937,25 +1817,6 @@ impl eframe::App for RustqlApp {
                 }
                 other => other,
             };
-            self.save_tabs_state();
-        }
-
-        if let Some(close_idx) = tab_bar_result.close_pinned
-            && close_idx < self.pinned_tables.len()
-        {
-            self.pinned_tables.remove(close_idx);
-            if let ActiveTab::Pinned(i) = self.active_tab
-                && i >= close_idx
-            {
-                self.active_tab = if self.pinned_tables.is_empty() {
-                    ActiveTab::Datos
-                } else {
-                    ActiveTab::Pinned(
-                        i.saturating_sub(1)
-                            .min(self.pinned_tables.len().saturating_sub(1)),
-                    )
-                };
-            }
             self.save_tabs_state();
         }
 
@@ -2156,11 +2017,6 @@ impl eframe::App for RustqlApp {
                 self.table_view.pending_deletes.clear();
                 self.table_view.pending_inserts.clear();
                 self.table_view.editing_cell = None;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let key = Self::pinned_table_key(db, table);
-                    self.pinned_pending_edits.remove(&key);
-                }
             }
             GridAction::FilterBy { sql_fragment } => {
                 self.table_view.filter_text = sql_fragment;
@@ -2383,11 +2239,6 @@ impl eframe::App for RustqlApp {
                 self.table_view.pending_deletes.clear();
                 self.table_view.pending_inserts.clear();
                 self.table_view.editing_cell = None;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let key = Self::pinned_table_key(db, table);
-                    self.pinned_pending_edits.remove(&key);
-                }
             }
             _ => {}
         }
@@ -2407,30 +2258,7 @@ impl eframe::App for RustqlApp {
                 }
             }
             SidebarAction::SelectTable { db, table } => {
-                let already_selected = matches!(
-                    &self.schema.selected_node,
-                    Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
-                );
-                if !already_selected {
-                    if self.needs_confirm_before_switch() {
-                        let current_table = match &self.schema.selected_node {
-                            Some(SelectedNode::Table { table: t, .. }) => t.clone(),
-                            _ => String::new(),
-                        };
-                        let count = self.table_view.pending_edits.len();
-                        self.ui.modal = modals::ModalState::ConfirmSwitchTable {
-                            new_db: db,
-                            new_table: table,
-                            pending_count: count,
-                            current_table,
-                        };
-                    } else {
-                        self.on_table_selected(db, table);
-                        self.active_tab = ActiveTab::Datos;
-                    }
-                } else {
-                    self.active_tab = ActiveTab::Datos;
-                }
+                self.switch_to_table(db, table, ActiveTab::Datos);
             }
             SidebarAction::CreateDatabase => {
                 self.ui.modal = ModalState::CreateDatabase {
@@ -2504,41 +2332,8 @@ impl eframe::App for RustqlApp {
                 }
                 settings::save(&self.ui.settings);
             }
-            SidebarAction::PinTable { db, table } => {
-                let already_pinned = self
-                    .pinned_tables
-                    .iter()
-                    .any(|(d, t)| *d == db && *t == table);
-                if !already_pinned {
-                    self.pinned_tables.push((db, table));
-                    self.save_tabs_state();
-                }
-            }
             SidebarAction::OpenTableStructure { db, table } => {
-                let already_selected = matches!(
-                    &self.schema.selected_node,
-                    Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
-                );
-                if !already_selected {
-                    if self.needs_confirm_before_switch() {
-                        let current_table = match &self.schema.selected_node {
-                            Some(SelectedNode::Table { table: t, .. }) => t.clone(),
-                            _ => String::new(),
-                        };
-                        let count = self.table_view.pending_edits.len();
-                        self.ui.modal = modals::ModalState::ConfirmSwitchTable {
-                            new_db: db,
-                            new_table: table,
-                            pending_count: count,
-                            current_table,
-                        };
-                    } else {
-                        self.on_table_selected(db, table);
-                        self.active_tab = ActiveTab::Tabla;
-                    }
-                } else {
-                    self.active_tab = ActiveTab::Tabla;
-                }
+                self.switch_to_table(db, table, ActiveTab::Tabla);
             }
             SidebarAction::OpenInSql { db, table } => {
                 let new_idx = self.sql_tabs.len();
@@ -2669,22 +2464,7 @@ impl eframe::App for RustqlApp {
                 _ => None,
             };
             if let Some(db) = db {
-                if self.needs_confirm_before_switch() {
-                    let current_table = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { table: t, .. }) => t.clone(),
-                        _ => String::new(),
-                    };
-                    let count = self.table_view.pending_edits.len();
-                    self.ui.modal = modals::ModalState::ConfirmSwitchTable {
-                        new_db: db,
-                        new_table: table,
-                        pending_count: count,
-                        current_table,
-                    };
-                } else {
-                    self.on_table_selected(db, table);
-                    self.active_tab = ActiveTab::Datos;
-                }
+                self.switch_to_table(db, table, ActiveTab::Datos);
             }
         }
 

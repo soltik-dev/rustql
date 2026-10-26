@@ -53,8 +53,6 @@ pub struct AppSettings {
     #[serde(default)]
     pub fav_tables: std::collections::HashSet<String>,
     #[serde(default)]
-    pub pinned_tables: Vec<(String, String)>,
-    #[serde(default)]
     pub sql_tabs: Vec<SavedSqlTab>,
     #[serde(default)]
     pub copy_format: CopyFormat,
@@ -71,7 +69,6 @@ impl Default for AppSettings {
             show_sidebar: true,
             show_log: true,
             fav_tables: std::collections::HashSet::new(),
-            pinned_tables: Vec::new(),
             sql_tabs: Vec::new(),
             copy_format: CopyFormat::Csv,
             query_limit: 500,
