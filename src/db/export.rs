@@ -8,7 +8,7 @@ use mysql::prelude::Queryable;
 
 use super::DbBackend;
 use super::mysql::MysqlBackend;
-use super::{ConnectionParams, escape_ident, escape_sql};
+use super::{ConnectionParams, escape_sql, qualified, quote_ident};
 
 // ── Tipos públicos ─────────────────────────────────────────────────────────────
 
@@ -303,10 +303,7 @@ fn export_to_same_server_db(
     tx: &Sender<ExportEvent>,
 ) -> Result<(usize, u64), String> {
     // Crear la BBDD destino si no existe
-    let create_db_sql = format!(
-        "CREATE DATABASE IF NOT EXISTS `{}`",
-        escape_ident(target_db)
-    );
+    let create_db_sql = format!("CREATE DATABASE IF NOT EXISTS {}", quote_ident(target_db));
     backend
         .execute_query(&create_db_sql)
         .map_err(|e| format!("No se pudo crear la base de datos '{target_db}': {e}"))?;
@@ -357,8 +354,8 @@ fn copy_table_same_server(
     target_db: &str,
     options: &ExportOptions,
 ) -> Result<u64, String> {
-    let src = format!("`{}`.`{}`", escape_ident(source_db), escape_ident(table));
-    let dst = format!("`{}`.`{}`", escape_ident(target_db), escape_ident(table));
+    let src = qualified(source_db, table);
+    let dst = qualified(target_db, table);
 
     if options.drop_if_exists {
         conn.query_drop(format!("DROP TABLE IF EXISTS {dst}"))
@@ -395,8 +392,8 @@ fn export_to_remote(
     // Crear BBDD destino si no existe
     dst_backend
         .execute_query(&format!(
-            "CREATE DATABASE IF NOT EXISTS `{}`",
-            escape_ident(target_db)
+            "CREATE DATABASE IF NOT EXISTS {}",
+            quote_ident(target_db)
         ))
         .map_err(|e| format!("No se pudo crear la BBDD destino '{target_db}': {e}"))?;
 
@@ -454,7 +451,7 @@ fn copy_table_remote(
     target_db: &str,
     options: &ExportOptions,
 ) -> Result<u64, String> {
-    let dst_ref = format!("`{}`.`{}`", escape_ident(target_db), escape_ident(table));
+    let dst_ref = qualified(target_db, table);
 
     if options.drop_if_exists {
         dst_conn
@@ -465,10 +462,7 @@ fn copy_table_remote(
     if options.include_create {
         let ddl = get_create_table_ddl(src, source_db, table)?;
         // Sustituir referencia de BBDD en el DDL y ejecutar en destino
-        let dst_ddl = ddl.replace(
-            &format!("`{}`", escape_ident(table)),
-            &format!("`{}`.`{}`", escape_ident(target_db), escape_ident(table)),
-        );
+        let dst_ddl = ddl.replace(&quote_ident(table), &qualified(target_db, table));
         dst_conn
             .query_drop(dst_ddl)
             .map_err(|e| format!("CREATE TABLE en destino: {e}"))?;
@@ -480,11 +474,7 @@ fn copy_table_remote(
 
     // SELECT en origen, INSERT en destino en batches
     let data = src
-        .execute_query(&format!(
-            "SELECT * FROM `{}`.`{}`",
-            escape_ident(source_db),
-            escape_ident(table)
-        ))
+        .execute_query(&format!("SELECT * FROM {}", qualified(source_db, table)))
         .map_err(|e| format!("SELECT: {e}"))?;
 
     if data.rows.is_empty() {
@@ -494,7 +484,7 @@ fn copy_table_remote(
     let col_list = data
         .columns
         .iter()
-        .map(|c| format!("`{}`", escape_ident(c)))
+        .map(|c| quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -551,9 +541,8 @@ fn get_create_table_ddl(
 ) -> Result<String, String> {
     let result = backend
         .execute_query(&format!(
-            "SHOW CREATE TABLE `{}`.`{}`",
-            escape_ident(source_db),
-            escape_ident(table)
+            "SHOW CREATE TABLE {}",
+            qualified(source_db, table)
         ))
         .map_err(|e| format!("SHOW CREATE TABLE: {e}"))?;
 
@@ -597,7 +586,7 @@ fn export_table_to_writer(
     .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
 
     if options.drop_if_exists {
-        writeln!(file, "DROP TABLE IF EXISTS `{}`;", escape_ident(table))
+        writeln!(file, "DROP TABLE IF EXISTS {};", quote_ident(table))
             .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
     }
 
@@ -611,11 +600,7 @@ fn export_table_to_writer(
     }
 
     let data = backend
-        .execute_query(&format!(
-            "SELECT * FROM `{}`.`{}`",
-            escape_ident(source_db),
-            escape_ident(table)
-        ))
+        .execute_query(&format!("SELECT * FROM {}", qualified(source_db, table)))
         .map_err(|e| format!("SELECT: {e}"))?;
 
     if data.rows.is_empty() {
@@ -625,7 +610,7 @@ fn export_table_to_writer(
     let col_list = data
         .columns
         .iter()
-        .map(|c| format!("`{}`", escape_ident(c)))
+        .map(|c| quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -650,8 +635,8 @@ fn export_table_to_writer(
 
         writeln!(
             file,
-            "INSERT INTO `{}` ({col_list}) VALUES\n{values_list};",
-            escape_ident(table)
+            "INSERT INTO {} ({col_list}) VALUES\n{values_list};",
+            quote_ident(table)
         )
         .map_err(|e| format!("Error escribiendo fichero: {e}"))?;
     }

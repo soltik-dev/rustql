@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use super::jobs::JobResult;
 use super::{SelectedNode, Session, Shared};
-use crate::db::{DbBackend, DbResult, Statement, escape_ident};
+use crate::db::{DbBackend, DbResult, Statement, qualified};
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::ui::modals::{ModalState, Reload};
@@ -75,10 +75,6 @@ fn logged(
         Err(e) => LogEntry::err(label, ms, e.as_str()),
     });
     result
-}
-
-fn qualified(db: &str, table: &str) -> String {
-    format!("`{}`.`{}`", escape_ident(db), escape_ident(table))
 }
 
 // ── Lanzar escrituras ────────────────────────────────────────────────────────

@@ -118,6 +118,16 @@ pub fn escape_ident(s: &str) -> String {
     s.replace('`', "``")
 }
 
+/// Identificador entre backticks: `` `nombre` ``.
+pub fn quote_ident(s: &str) -> String {
+    format!("`{}`", escape_ident(s))
+}
+
+/// Tabla cualificada con su BBDD: `` `bd`.`tabla` ``.
+pub fn qualified(db: &str, table: &str) -> String {
+    format!("{}.{}", quote_ident(db), quote_ident(table))
+}
+
 /// Valida que un nombre de charset MySQL solo contenga caracteres seguros.
 /// Los charsets MySQL son siempre alfanuméricos con guiones bajos (ej. utf8mb4, latin1).
 pub fn validate_charset(s: &str) -> DbResult<()> {
@@ -228,6 +238,12 @@ mod tests {
     /// Con NO_BACKSLASH_ESCAPES, escapando la comilla como `\'`, este valor
     /// convertía `v = '…'` en `v = '\\\' OR 1=1 -- '`.
     const ATTACK: &str = "\\' OR 1=1 -- ";
+
+    #[test]
+    fn identificadores_entre_backticks() {
+        assert_eq!(quote_ident("a`b"), "`a``b`");
+        assert_eq!(qualified("bd", "ta`bla"), "`bd`.`ta``bla`");
+    }
 
     #[test]
     fn escape_sql_dobla_las_comillas() {

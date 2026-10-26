@@ -6,7 +6,7 @@ use mysql::{
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
-    TableInfo, escape_ident, validate_charset,
+    TableInfo, qualified, quote_ident, validate_charset,
 };
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -141,7 +141,7 @@ impl DbBackend for MysqlBackend {
     }
 
     fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
-        let query = format!("SHOW TABLES FROM `{}`", escape_ident(database));
+        let query = format!("SHOW TABLES FROM {}", quote_ident(database));
         self.conn()?
             .query(query)
             .map_err(|e| format!("Error en query: {e}"))
@@ -181,7 +181,7 @@ impl DbBackend for MysqlBackend {
         };
         let result = (|| {
             if let Some(db) = db {
-                conn.query_drop(format!("USE `{}`", escape_ident(db)))?;
+                conn.query_drop(format!("USE {}", quote_ident(db)))?;
             }
             // Del primer conjunto de resultados, como mucho max_rows filas.
             // Al soltar `set`, el crate lee y descarta el resto.
@@ -301,33 +301,25 @@ impl DbBackend for MysqlBackend {
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()> {
         validate_charset(charset)?;
         let sql = format!(
-            "CREATE DATABASE `{}` CHARACTER SET {}",
-            escape_ident(name),
+            "CREATE DATABASE {} CHARACTER SET {}",
+            quote_ident(name),
             charset
         );
         self.execute_write(&sql).map(|_| ())
     }
 
     fn drop_database(&self, name: &str) -> DbResult<()> {
-        let sql = format!("DROP DATABASE `{}`", escape_ident(name));
+        let sql = format!("DROP DATABASE {}", quote_ident(name));
         self.execute_write(&sql).map(|_| ())
     }
 
     fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!(
-            "DROP TABLE `{}`.`{}`",
-            escape_ident(db),
-            escape_ident(table)
-        );
+        let sql = format!("DROP TABLE {}", qualified(db, table));
         self.execute_write(&sql).map(|_| ())
     }
 
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!(
-            "TRUNCATE TABLE `{}`.`{}`",
-            escape_ident(db),
-            escape_ident(table)
-        );
+        let sql = format!("TRUNCATE TABLE {}", qualified(db, table));
         self.execute_write(&sql).map(|_| ())
     }
 
@@ -357,7 +349,7 @@ mod tests {
         let b = test_server::backend();
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
-        let qdb = format!("`{}`", escape_ident(db));
+        let qdb = quote_ident(db);
         b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}"))
             .unwrap();
         b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use eframe::egui;
 
 use crate::db::export::{ExportDestination, ExportEvent, ExportOptions};
+use crate::db::{qualified, quote_ident};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
 use crate::ui::results_grid::SortSpec;
@@ -812,7 +813,7 @@ fn show_filter_input(
 }
 
 fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str) -> String {
-    let esc_col = format!("`{}`", col_name.replace('`', "``"));
+    let esc_col = quote_ident(col_name);
     let esc_val = crate::db::escape_sql(value);
     match operator {
         FilterOperator::Equals => format!("{esc_col} = '{esc_val}'"),
@@ -858,14 +859,14 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
 
         let null_part = if col.not_null { " NOT NULL" } else { "" };
         parts.push(format!(
-            "  `{}` {}{}",
-            col.name.trim().replace('`', "``"),
+            "  {} {}{}",
+            quote_ident(col.name.trim()),
             type_part,
             null_part
         ));
 
         if col.primary_key {
-            pks.push(format!("`{}`", col.name.trim().replace('`', "``")));
+            pks.push(quote_ident(col.name.trim()));
         }
     }
 
@@ -874,9 +875,8 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
     }
 
     format!(
-        "CREATE TABLE `{}`.`{}` (\n{}\n)",
-        db.replace('`', "``"),
-        name.replace('`', "``"),
+        "CREATE TABLE {} (\n{}\n)",
+        qualified(db, name),
         parts.join(",\n")
     )
 }

@@ -5,8 +5,8 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{ColumnInfo, QueryResult};
-use crate::ui::theme;
+use crate::db::{ColumnInfo, QueryResult, quote_ident};
+use crate::ui::{ellipsize, theme};
 
 // ── Tipos de ordenación ───────────────────────────────────────────────────────
 
@@ -265,22 +265,6 @@ fn paint_text_truncated(
     painter.galley(pos, galley, color);
 }
 
-/// Escapa un identificador SQL entre backticks.
-fn esc_ident(s: &str) -> String {
-    format!("`{}`", s.replace('`', "``"))
-}
-
-/// Trunca `s` para mostrar en el label de un botón de menú.
-fn trunc_display(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let t: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        format!("{t}…")
-    } else {
-        t
-    }
-}
-
 // ── Ancho inteligente de columnas ────────────────────────────────────────────
 
 fn compute_col_widths(ui: &egui::Ui, data: &QueryResult) -> Vec<f32> {
@@ -359,10 +343,10 @@ pub fn format_rows_for_copy(
         crate::settings::CopyFormat::SqlInserts => {
             let col_list = columns
                 .iter()
-                .map(|c| format!("`{}`", c.replace('`', "``")))
+                .map(|c| quote_ident(c))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let tbl = table_name.unwrap_or("tabla");
+            let tbl = quote_ident(table_name.unwrap_or("tabla"));
             rows.iter()
                 .map(|row| {
                     let vals: Vec<String> = row
@@ -373,7 +357,7 @@ pub fn format_rows_for_copy(
                         })
                         .collect();
                     format!(
-                        "INSERT INTO `{tbl}` ({col_list}) VALUES ({});",
+                        "INSERT INTO {tbl} ({col_list}) VALUES ({});",
                         vals.join(", ")
                     )
                 })
@@ -1126,8 +1110,8 @@ pub fn show(
                                             }
 
                                             // Filtrar
-                                            let esc_col = esc_ident(col_name);
-                                            let val_display = trunc_display(cell_text, 22);
+                                            let esc_col = quote_ident(col_name);
+                                            let val_display = ellipsize(cell_text, 22);
                                             let val_escaped = crate::db::escape_sql(cell_text);
 
                                             if ui.button(format!("🔍  = '{val_display}'")).clicked()

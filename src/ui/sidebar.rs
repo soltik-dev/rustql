@@ -4,18 +4,9 @@ use std::collections::HashMap;
 use eframe::egui;
 
 use crate::loadable::Loadable;
+use crate::table_state::table_key;
 use crate::ui::icons::*;
-use crate::ui::theme;
-
-fn clip_text(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
-}
+use crate::ui::{ellipsize, theme};
 
 /// Si `db` tiene alguna tabla favorita. Los favoritos son claves «bd/tabla»:
 /// no hace falta haber cargado las tablas de la BBDD para saberlo.
@@ -152,7 +143,7 @@ pub fn show(
     let filter = table_search.to_lowercase();
     let filtering = !filter.is_empty();
 
-    let server_label = format!("{} {}", PLUG, clip_text(server_name, 28));
+    let server_label = format!("{} {}", PLUG, ellipsize(server_name, 28));
 
     ui.spacing_mut().indent = 10.0;
 
@@ -196,7 +187,7 @@ pub fn show(
                             }
 
                             let is_db_selected = selected_db == Some(db.as_str());
-                            let db_label = clip_text(db, 24);
+                            let db_label = ellipsize(db, 24);
 
                             let db_ch = egui::CollapsingHeader::new(
                                 egui::RichText::new(&db_label).strong(),
@@ -227,9 +218,7 @@ pub fn show(
                                     };
                                     if *show_only_fav {
                                         base.into_iter()
-                                            .filter(|t| {
-                                                fav_tables.contains(&format!("{}/{}", db, t))
-                                            })
+                                            .filter(|t| fav_tables.contains(&table_key(db, t)))
                                             .collect()
                                     } else {
                                         base
@@ -249,11 +238,11 @@ pub fn show(
                                     let is_selected =
                                         is_db_selected && selected_table == Some(table.as_str());
 
-                                    let display = clip_text(table, 26);
+                                    let display = ellipsize(table, 26);
                                     let db_clone = db.clone();
                                     let table_clone = table.clone();
 
-                                    let fav_key = format!("{}/{}", db, table);
+                                    let fav_key = table_key(db, table);
                                     let is_fav = fav_tables.contains(&fav_key);
 
                                     let fav_color = p.fav_star;

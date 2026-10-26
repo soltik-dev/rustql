@@ -15,7 +15,8 @@ use self::schema::show_loading;
 use self::writes::AfterCommit;
 use crate::db::{
     ConnectEvent, ConnectionParams, DbBackend, DbResult, ExportDestination, ExportEvent,
-    ExportOptions, QueryResult, Statement, connect_mysql_progress, escape_ident, escape_sql,
+    ExportOptions, QueryResult, Statement, connect_mysql_progress, escape_sql, qualified,
+    quote_ident,
 };
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
@@ -355,7 +356,7 @@ impl Session {
                     } else {
                         "ASC"
                     };
-                    format!("`{}` {}", s.col_name.replace('`', "``"), dir)
+                    format!("{} {dir}", quote_ident(&s.col_name))
                 })
                 .collect();
             format!(" ORDER BY {}", parts.join(", "))
@@ -364,16 +365,14 @@ impl Session {
         let limit = sh.settings.query_limit;
         if filter.is_empty() {
             format!(
-                "SELECT * FROM `{}`.`{}`{} LIMIT {limit}",
-                escape_ident(db),
-                escape_ident(table),
+                "SELECT * FROM {}{} LIMIT {limit}",
+                qualified(db, table),
                 order_by
             )
         } else {
             format!(
-                "SELECT * FROM `{}`.`{}` WHERE {filter}{} LIMIT {limit}",
-                escape_ident(db),
-                escape_ident(table),
+                "SELECT * FROM {} WHERE {filter}{} LIMIT {limit}",
+                qualified(db, table),
                 order_by
             )
         }
@@ -451,7 +450,7 @@ impl Session {
         };
         let tv = &self.table_view;
         let data = tv.table_data.as_ref().ok_or("No hay datos cargados.")?;
-        let target = format!("`{}`.`{}`", escape_ident(db), escape_ident(table));
+        let target = qualified(db, table);
         let edits_rows = !tv.pending_deletes.is_empty() || !tv.pending_edits.is_empty();
         if edits_rows && self.schema.open_table_columns().is_none() {
             return Err(
@@ -492,7 +491,7 @@ impl Session {
                     .columns
                     .get(edit.col_idx)
                     .ok_or_else(|| format!("No existe la columna {}.", edit.col_idx))?;
-                sets.push(format!("`{}` = ?", escape_ident(col)));
+                sets.push(format!("{} = ?", quote_ident(col)));
                 params.push((!edit.is_null).then(|| edit.new_value.clone()));
             }
             let (condition, key) = row_key(row_idx)?;
@@ -516,7 +515,7 @@ impl Session {
                         InsertValue::Null => None,
                         InsertValue::Value(v) => Some(v.clone()),
                     };
-                    Some((format!("`{}`", escape_ident(col)), param))
+                    Some((quote_ident(col), param))
                 })
                 .unzip();
             let placeholders = vec!["?"; cols.len()].join(", ");
@@ -885,7 +884,7 @@ fn pk_condition(
     let mut params = Vec::new();
     for pk in primary_keys {
         let col_idx = data.columns.iter().position(|c| c == pk)?;
-        parts.push(format!("`{}` = ?", escape_ident(pk)));
+        parts.push(format!("{} = ?", quote_ident(pk)));
         params.push(row.get(col_idx)?.clone());
     }
     Some((parts.join(" AND "), params))
@@ -1746,7 +1745,7 @@ impl Session {
             GridAction::FilterByClipboard { col_name } => {
                 match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                     Ok(text) => {
-                        let esc_col = format!("`{}`", col_name.replace('`', "``"));
+                        let esc_col = quote_ident(&col_name);
                         let esc_val = escape_sql(&text);
                         let filter = format!("{esc_col} = '{esc_val}'");
                         self.request_reload(sh, Reload::Filter(filter));
@@ -1940,7 +1939,7 @@ impl Session {
                 should_disconnect = true;
             }
             SidebarAction::ToggleFav { db, table } => {
-                let key = format!("{}/{}", db, table);
+                let key = table_state::table_key(&db, &table);
                 if sh.settings.fav_tables.contains(&key) {
                     sh.settings.fav_tables.remove(&key);
                 } else {
@@ -1953,7 +1952,7 @@ impl Session {
             }
             SidebarAction::OpenInSql { db, table } => {
                 let new_idx = self.sql_tabs.len();
-                let sql_text = format!("SELECT * FROM `{}`.`{}` WHERE ", db, table);
+                let sql_text = format!("SELECT * FROM {} WHERE ", qualified(&db, &table));
                 self.sql_tabs.push(SqlTab {
                     db_context: db.clone(),
                     sql_text,
