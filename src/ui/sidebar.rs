@@ -6,7 +6,7 @@ use eframe::egui;
 use crate::loadable::Loadable;
 use crate::table_state::table_key;
 use crate::ui::icons::*;
-use crate::ui::{ellipsize, theme};
+use crate::ui::{CMD, ellipsize, theme};
 
 /// Si `db` tiene alguna tabla favorita. Los favoritos son claves «bd/tabla»:
 /// no hace falta haber cargado las tablas de la BBDD para saberlo.
@@ -81,7 +81,7 @@ pub fn show(
     theme::section_label(ui, "Esquema");
     ui.add_space(2.0);
 
-    let ctrl_f = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
+    let ctrl_f = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F));
 
     ui.horizontal(|ui| {
         let fav_btn = ui.add(
@@ -113,7 +113,7 @@ pub fn show(
                 let search_resp = ui.add(
                     egui::TextEdit::singleline(table_search)
                         .id_salt("sidebar_table_search")
-                        .hint_text("Buscar…  Ctrl+F")
+                        .hint_text(format!("Buscar…  {CMD}F"))
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY),
                 );

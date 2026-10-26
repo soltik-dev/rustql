@@ -114,8 +114,8 @@ impl FrameKeys {
         ctx.input(|i| Self {
             f5: i.key_pressed(egui::Key::F5),
             f9: i.key_pressed(egui::Key::F9),
-            ctrl_enter: i.modifiers.ctrl && i.key_pressed(egui::Key::Enter),
-            ctrl_t: i.modifiers.ctrl && i.key_pressed(egui::Key::T),
+            ctrl_enter: i.modifiers.command && i.key_pressed(egui::Key::Enter),
+            ctrl_t: i.modifiers.command && i.key_pressed(egui::Key::T),
         })
     }
 }

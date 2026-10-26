@@ -16,6 +16,14 @@ pub mod tab_bar;
 pub mod table_structure;
 pub mod theme;
 
+/// Prefijo de los atajos con la tecla de comando: Ctrl en Linux y Windows,
+/// ⌘ en macOS (egui la expone como `Modifiers::command`).
+pub const CMD: &str = if cfg!(target_os = "macos") {
+    "⌘"
+} else {
+    "Ctrl+"
+};
+
 /// Recorta `s` a `max_chars` caracteres, con «…» si sobraban.
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();

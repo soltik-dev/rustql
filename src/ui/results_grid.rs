@@ -6,7 +6,7 @@ use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{ColumnInfo, QueryResult, quote_ident};
-use crate::ui::{ellipsize, theme};
+use crate::ui::{CMD, ellipsize, theme};
 
 // ── Tipos de ordenación ───────────────────────────────────────────────────────
 
@@ -201,7 +201,7 @@ pub fn show_apply_bar(
                 action = GridAction::DiscardEdits;
             }
             if !pk_missing {
-                let apply_btn = theme::primary_button(ui, "Guardar  Ctrl+Enter");
+                let apply_btn = theme::primary_button(ui, format!("Guardar  {CMD}Enter"));
                 if apply_btn.clicked() || ctrl_enter {
                     action = GridAction::ApplyEdits;
                 }
@@ -522,7 +522,7 @@ pub fn show(
         && no_widget_focused
         && ui.input(|i| {
             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                || (i.modifiers.ctrl && i.key_pressed(egui::Key::C))
+                || (i.modifiers.command && i.key_pressed(egui::Key::C))
         });
     if copy_requested {
         if !selected_rows.is_empty() {
@@ -560,7 +560,7 @@ pub fn show(
             *selected_cell = Some((new_r, new_c));
         }
 
-        let ctrl = ui.input(|i| i.modifiers.ctrl);
+        let ctrl = ui.input(|i| i.modifiers.command);
 
         if let Some((sel_row, sel_col)) = *selected_cell
             && sel_row < data.rows.len()
@@ -896,7 +896,7 @@ pub fn show(
                                         // Handle click for row selection
                                         if resp.clicked() {
                                             let shift = ui.input(|i| i.modifiers.shift);
-                                            let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                            let ctrl = ui.input(|i| i.modifiers.command);
                                             if shift || ctrl {
                                                 *grid_action_rc.borrow_mut() =
                                                     GridAction::RowSelected {
@@ -1010,7 +1010,7 @@ pub fn show(
 
                                         if resp.clicked() {
                                             let shift = ui.input(|i| i.modifiers.shift);
-                                            let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                            let ctrl = ui.input(|i| i.modifiers.command);
                                             if shift || ctrl {
                                                 *grid_action_rc.borrow_mut() =
                                                     GridAction::RowSelected {
@@ -1177,19 +1177,25 @@ pub fn show(
 
                                             // Fila
                                             ui.separator();
-                                            if ui.button("➕  Insertar fila  Ctrl+Ins").clicked() {
+                                            if ui
+                                                .button(format!("➕  Insertar fila  {CMD}Ins"))
+                                                .clicked()
+                                            {
                                                 *ga_rc.borrow_mut() = GridAction::InsertRow;
                                                 ui.close();
                                             }
-                                            if ui.button("📋  Clonar fila  Ctrl+D").clicked() {
+                                            if ui
+                                                .button(format!("📋  Clonar fila  {CMD}D"))
+                                                .clicked()
+                                            {
                                                 *ga_rc.borrow_mut() =
                                                     GridAction::CloneRow { row_idx: real_idx };
                                                 ui.close();
                                             }
                                             let del_label = if pending_deletes.contains(&real_idx) {
-                                                "↩  Desmarcar eliminación"
+                                                "↩  Desmarcar eliminación".to_string()
                                             } else {
-                                                "🗑  Eliminar fila  Ctrl+Supr"
+                                                format!("🗑  Eliminar fila  {CMD}Supr")
                                             };
                                             if theme::danger_button(ui, del_label).clicked() {
                                                 *ga_rc.borrow_mut() =

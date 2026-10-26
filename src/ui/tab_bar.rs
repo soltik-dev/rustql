@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::ui::icons::*;
-use crate::ui::{ellipsize, theme};
+use crate::ui::{CMD, ellipsize, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActiveTab {
@@ -85,7 +85,7 @@ pub fn show(
         // New SQL tab button
         if ui
             .add(egui::Button::new("＋").small().frame(false))
-            .on_hover_text("Nueva pestaña SQL  Ctrl+T")
+            .on_hover_text(format!("Nueva pestaña SQL  {CMD}T"))
             .clicked()
         {
             result.new_sql_tab = true;

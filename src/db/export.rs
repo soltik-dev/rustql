@@ -1,4 +1,5 @@
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -217,6 +218,32 @@ fn for_each_table(
     (done, total_rows)
 }
 
+/// Nombre de fichero para una tabla, válido en cualquier sistema: sin
+/// separadores de ruta (una tabla «../x» escribiría fuera de la carpeta) ni
+/// caracteres o nombres que Windows no admite, y sin empezar por punto.
+fn file_name_for(table: &str) -> String {
+    let name: String = table
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    const WINDOWS_RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if name.is_empty()
+        || name.starts_with('.')
+        || WINDOWS_RESERVED.contains(&name.to_ascii_uppercase().as_str())
+    {
+        format!("_{name}")
+    } else {
+        name
+    }
+}
+
 fn write_error(e: std::io::Error) -> String {
     format!("Error escribiendo fichero: {e}")
 }
@@ -255,9 +282,9 @@ fn export_to_folder(
     std::fs::create_dir_all(folder)
         .map_err(|e| format!("No se pudo crear la carpeta '{folder}': {e}"))?;
     Ok(for_each_table(tables, cancel, tx, |table| {
-        let file_path = format!("{folder}/{table}.sql");
+        let file_path = Path::new(folder).join(format!("{}.sql", file_name_for(table)));
         let file = std::fs::File::create(&file_path)
-            .map_err(|e| format!("No se pudo crear '{file_path}': {e}"))?;
+            .map_err(|e| format!("No se pudo crear '{}': {e}", file_path.display()))?;
         let mut out = BufWriter::new(file);
         write_sql_header(&mut out, source_db)?;
         let rows = export_table_to_writer(&mut out, backend, source_db, table, options)?;
@@ -566,6 +593,15 @@ fn export_table_to_writer(
 mod tests {
     use super::*;
     use crate::db::test_server;
+
+    #[test]
+    fn nombres_de_fichero_seguros() {
+        assert_eq!(file_name_for("clientes"), "clientes");
+        assert_eq!(file_name_for("../x"), "_.._x");
+        assert_eq!(file_name_for("a:b*c"), "a_b_c");
+        assert_eq!(file_name_for("con"), "_con");
+        assert_eq!(file_name_for("año"), "año");
+    }
 
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
