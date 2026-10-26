@@ -61,7 +61,7 @@ pub struct Statement {
     pub params: Vec<Option<String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     /// Cada celda es `None` si el valor es NULL en la base de datos.
@@ -193,14 +193,6 @@ pub trait DbBackend: Send + Sync {
 pub enum ConnectEvent {
     Status(String),
     Done(DbResult<Arc<dyn DbBackend>>),
-}
-
-pub enum QueryEvent {
-    Done {
-        result: DbResult<QueryResult>,
-        sql: String,
-        elapsed_ms: u64,
-    },
 }
 
 pub fn connect_mysql_progress(

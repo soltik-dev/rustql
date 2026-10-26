@@ -1,16 +1,18 @@
+mod jobs;
+
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use self::jobs::{JobResult, Jobs};
 use crate::db::{
-    ColumnInfo, ConnectEvent, ConnectionParams, DatabaseInfo, DbBackend, ExportDestination,
-    ExportEvent, ExportOptions, QueryResult, Statement, TableInfo, connect_mysql_progress,
-    escape_ident, escape_sql,
+    ColumnInfo, ConnectEvent, ConnectionParams, DatabaseInfo, DbBackend, DbResult,
+    ExportDestination, ExportEvent, ExportOptions, QueryResult, Statement, TableInfo,
+    connect_mysql_progress, escape_ident, escape_sql,
 };
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
@@ -87,7 +89,9 @@ pub struct TableViewState {
     pub last_selected_row: Option<usize>,
     pub drag_select_from: Option<usize>,
     pub query_loading: bool,
-    pub query_receiver: Option<std::sync::mpsc::Receiver<crate::db::QueryEvent>>,
+    /// Se incrementa con cada consulta de la tabla: los resultados de una
+    /// anterior que lleguen tarde se descartan.
+    pub data_generation: u64,
 }
 
 // ── Estado compartido entre sesiones ─────────────────────────────────────────
@@ -160,6 +164,8 @@ pub struct Session {
     pub selected_profile_idx: Option<usize>,
     pub profile_name: String,
     pub save_password: bool,
+    /// Trabajos contra la BD en segundo plano.
+    jobs: Jobs,
     /// Contraseñas que un hilo terminó de guardar en el llavero: (id del perfil, resultado).
     keyring_tx: mpsc::Sender<(String, Result<(), String>)>,
     keyring_rx: Receiver<(String, Result<(), String>)>,
@@ -188,6 +194,7 @@ impl Session {
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
+            jobs: Jobs::default(),
             keyring_tx,
             keyring_rx,
         }
@@ -240,7 +247,7 @@ impl Session {
     /// resultado ya no corresponde a nada que se esté mostrando.
     fn disconnect(&mut self) {
         self.state = ConnState::Disconnected;
-        self.table_view.query_receiver = None;
+        self.jobs.new_epoch();
         self.table_view.query_loading = false;
     }
 }
@@ -248,23 +255,24 @@ impl Session {
 // ── Métodos auxiliares ────────────────────────────────────────────────────────
 
 impl Session {
+    /// Carga los datos de la tabla en segundo plano. Sustituye a la consulta
+    /// en curso, si la hay.
     fn run_query_async(&mut self, sql: String) {
         let ConnState::Connected(backend) = &self.state else {
             return;
         };
-        let backend = Arc::clone(backend);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.table_view.query_receiver = Some(rx);
+        self.table_view.data_generation += 1;
+        let generation = self.table_view.data_generation;
         self.table_view.query_loading = true;
-        std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            let result = backend.execute_query(&sql);
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let _ = tx.send(crate::db::QueryEvent::Done {
-                result,
+        self.jobs.spawn(backend, move |b| {
+            let start = Instant::now();
+            let result = b.execute_query(&sql);
+            JobResult::TableData {
+                generation,
                 sql,
-                elapsed_ms,
-            });
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                result,
+            }
         });
     }
 
@@ -898,6 +906,7 @@ impl Session {
 
     fn on_connected(&mut self, backend: Arc<dyn DbBackend>, sh: &mut Shared) {
         self.state = ConnState::Connected(backend);
+        self.jobs.new_epoch();
         self.error_message = None;
         self.schema.databases.clear();
         self.schema.tables_cache.clear();
@@ -911,7 +920,6 @@ impl Session {
         self.table_view.last_selected_row = None;
         self.table_view.drag_select_from = None;
         self.table_view.query_loading = false;
-        self.table_view.query_receiver = None;
         self.table_view.table_error = None;
         self.table_view.sort_specs.clear();
         self.table_view.sort_indices.clear();
@@ -1015,51 +1023,58 @@ impl Session {
         }
     }
 
-    /// Sondea el canal de query asíncrona y actualiza la vista si terminó.
-    fn poll_query_receiver(&mut self, ctx: &egui::Context) {
-        let mut query_done: Option<crate::db::QueryEvent> = None;
-        if let Some(rx) = &self.table_view.query_receiver {
-            match rx.try_recv() {
-                Ok(evt) => query_done = Some(evt),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(Duration::from_millis(50));
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.table_view.query_receiver = None;
-                    self.table_view.query_loading = false;
-                }
-            }
+    /// Aplica los resultados de los trabajos en segundo plano que hayan
+    /// terminado.
+    fn poll_jobs(&mut self, ctx: &egui::Context) {
+        while let Some(result) = self.jobs.try_recv(ctx) {
+            self.apply_job(result);
         }
-        if let Some(crate::db::QueryEvent::Done {
-            result,
-            sql,
-            elapsed_ms,
-        }) = query_done
-        {
-            self.table_view.query_receiver = None;
-            self.table_view.query_loading = false;
-            match result {
-                Ok(data) => {
-                    // Toda recarga pasa por request_reload, que antes resuelve
-                    // los cambios pendientes. Si alguna se lo salta, mejor
-                    // perderlos que aplicarlos a las filas que ahora ocupan
-                    // esas posiciones.
-                    if self.pending_count() > 0 {
-                        log::warn!("Datos recargados con cambios pendientes: se descartan");
-                        self.discard_pending();
-                    }
-                    let rows = data.rows.len();
-                    self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
-                    self.table_view.sort_indices = (0..rows).collect();
-                    self.table_view.table_data = Some(data);
-                    self.table_view.table_error = None;
+    }
+
+    fn apply_job(&mut self, result: JobResult) {
+        match result {
+            JobResult::TableData {
+                generation,
+                sql,
+                elapsed_ms,
+                result,
+            } => self.apply_table_data(generation, sql, elapsed_ms, result),
+        }
+    }
+
+    fn apply_table_data(
+        &mut self,
+        generation: u64,
+        sql: String,
+        elapsed_ms: u64,
+        result: DbResult<QueryResult>,
+    ) {
+        // Otra consulta posterior ya la ha sustituido
+        if generation != self.table_view.data_generation {
+            return;
+        }
+        self.table_view.query_loading = false;
+        match result {
+            Ok(data) => {
+                // Toda recarga pasa por request_reload, que antes resuelve
+                // los cambios pendientes. Si alguna se lo salta, mejor
+                // perderlos que aplicarlos a las filas que ahora ocupan
+                // esas posiciones.
+                if self.pending_count() > 0 {
+                    log::warn!("Datos recargados con cambios pendientes: se descartan");
+                    self.discard_pending();
                 }
-                Err(e) => {
-                    self.push_log(LogEntry::err(sql, elapsed_ms, &e));
-                    self.table_view.table_data = None;
-                    self.table_view.table_error = Some(e);
-                    self.table_view.sort_indices.clear();
-                }
+                let rows = data.rows.len();
+                self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
+                self.table_view.sort_indices = (0..rows).collect();
+                self.table_view.table_data = Some(data);
+                self.table_view.table_error = None;
+            }
+            Err(e) => {
+                self.push_log(LogEntry::err(sql, elapsed_ms, &e));
+                self.table_view.table_data = None;
+                self.table_view.table_error = Some(e);
+                self.table_view.sort_indices.clear();
             }
         }
     }
@@ -1506,7 +1521,7 @@ impl Session {
     /// llama en todas las sesiones, no solo en la visible.
     pub fn poll(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         self.poll_connection(ctx, sh);
-        self.poll_query_receiver(ctx);
+        self.poll_jobs(ctx);
         self.poll_export_progress(ctx);
         self.poll_keyring(sh);
     }
@@ -2461,7 +2476,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{DbResult, QueryEvent};
+    use crate::db::DbResult;
 
     /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
     struct FakeBackend;
@@ -2584,18 +2599,33 @@ mod tests {
     #[test]
     fn datos_nuevos_no_heredan_cambios_por_posicion() {
         let mut s = session_with_table();
-        s.table_view.query_loading = true;
         s.table_view.pending_deletes.insert(0);
-        let (tx, rx) = mpsc::channel();
-        s.table_view.query_receiver = Some(rx);
-        tx.send(QueryEvent::Done {
-            result: Ok(data(&["7", "8"])),
+        s.apply_job(JobResult::TableData {
+            generation: s.table_view.data_generation,
             sql: String::new(),
             elapsed_ms: 0,
-        })
-        .unwrap();
-        s.poll_query_receiver(&egui::Context::default());
+            result: Ok(data(&["7", "8"])),
+        });
         assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn los_datos_de_una_consulta_sustituida_se_descartan() {
+        let mut s = session_with_table();
+        s.request_reload(&mut shared(), Reload::Refresh);
+        let stale = s.table_view.data_generation;
+        s.request_reload(&mut shared(), Reload::Refresh);
+        s.apply_job(JobResult::TableData {
+            generation: stale,
+            sql: String::new(),
+            elapsed_ms: 0,
+            result: Ok(data(&["viejo"])),
+        });
+        assert_eq!(s.table_view.table_data, Some(data(&["1", "2"])));
+        assert!(
+            s.table_view.query_loading,
+            "la consulta nueva sigue en curso"
+        );
     }
 
     fn open_table(s: &Session) -> Option<(&str, &str)> {
