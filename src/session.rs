@@ -416,52 +416,66 @@ impl Session {
         }
     }
 
-    fn invalidate_after_write(&mut self, db: Option<&str>, table: Option<&str>) {
-        // Invalidar bases de datos info
+    /// Tras escribir en `db` (crear, clonar, vaciar…): descarta sus cachés de
+    /// esquema para que se vuelvan a leer. No toca la tabla abierta.
+    fn invalidate_schema(&mut self, db: &str) {
         self.schema.databases_info = None;
+        // Recargar lista de bases de datos del sidebar
+        self.schema.databases.clear();
+        self.schema.tables_cache.remove(db);
+        self.schema.tables_info.remove(db);
+    }
 
-        if let Some(db) = db {
-            // Invalidar caché de tablas de esa BD
-            self.schema.tables_cache.remove(db);
-            self.schema.tables_info.remove(db);
-            // Recargar lista de bases de datos del sidebar
-            self.schema.databases.clear();
-
-            if let Some(table) = table {
-                let key = (db.to_string(), table.to_string());
-                self.schema.columns_info.remove(&key);
-
-                // Si la tabla eliminada era la seleccionada, limpiar
-                if matches!(
-                    &self.schema.selected_node,
-                    Some(SelectedNode::Table { db: d, table: t }) if d == db && t == table
-                ) {
-                    self.schema.selected_node = Some(SelectedNode::Database(db.to_string()));
-                    self.table_view.table_data = None;
-                    self.table_view.table_error = None;
-                    self.table_view.pending_edits.clear();
-                    self.table_view.pending_deletes.clear();
-                    self.table_view.pending_inserts.clear();
-                    self.table_view.editing_cell = None;
-                    self.table_view.primary_keys.clear();
-                }
-            } else {
-                // BD entera eliminada
-                if matches!(
-                    &self.schema.selected_node,
-                    Some(SelectedNode::Database(d) | SelectedNode::Table { db: d, .. }) if d == db
-                ) {
-                    self.schema.selected_node = Some(SelectedNode::Server);
-                    self.active_tab = ActiveTab::Servidor;
-                    self.table_view.table_data = None;
-                    self.table_view.table_error = None;
-                    self.table_view.pending_edits.clear();
-                    self.table_view.pending_deletes.clear();
-                    self.table_view.pending_inserts.clear();
-                    self.table_view.editing_cell = None;
-                    self.table_view.primary_keys.clear();
-                }
+    /// Tras borrar `db` o, con `table`, solo esa tabla: además de invalidar
+    /// las cachés, cierra lo borrado si estaba abierto.
+    fn on_dropped(&mut self, db: &str, table: Option<&str>) {
+        self.invalidate_schema(db);
+        let (open_db, open_table) = match &self.schema.selected_node {
+            Some(SelectedNode::Database(d)) => (Some(d.as_str()), None),
+            Some(SelectedNode::Table { db, table }) => (Some(db.as_str()), Some(table.as_str())),
+            _ => (None, None),
+        };
+        let closes_view = open_db == Some(db) && (table.is_none() || table == open_table);
+        match table {
+            Some(t) => {
+                self.schema
+                    .columns_info
+                    .remove(&(db.to_string(), t.to_string()));
             }
+            None => self.schema.columns_info.retain(|(d, _), _| d != db),
+        }
+        if !closes_view {
+            return;
+        }
+        // Las pestañas SQL no dependen de la selección: se quedan donde están.
+        if table.is_some() {
+            self.schema.selected_node = Some(SelectedNode::Database(db.to_string()));
+            if matches!(self.active_tab, ActiveTab::Datos | ActiveTab::Tabla) {
+                self.active_tab = ActiveTab::Bbdd;
+            }
+        } else {
+            self.schema.selected_node = Some(SelectedNode::Server);
+            if !matches!(self.active_tab, ActiveTab::Sql(_)) {
+                self.active_tab = ActiveTab::Servidor;
+            }
+        }
+        self.table_view.table_data = None;
+        self.table_view.table_error = None;
+        self.table_view.primary_keys.clear();
+        self.discard_pending();
+        self.clear_row_selection();
+    }
+
+    /// Tras vaciar tablas de `db`: si la abierta es una de ellas, sus cambios
+    /// pendientes ya no tienen filas a las que aplicarse; se recarga vacía.
+    fn after_truncate(&mut self, sh: &mut Shared, db: &str, tables: &[String]) {
+        self.invalidate_schema(db);
+        if let Some(SelectedNode::Table { db: d, table: t }) = &self.schema.selected_node
+            && d == db
+            && tables.contains(t)
+        {
+            self.discard_pending();
+            self.reload_now(sh, Reload::Refresh);
         }
     }
 
@@ -1174,7 +1188,7 @@ impl Session {
                 match result {
                     Ok(_) => {
                         self.modal = ModalState::None;
-                        self.invalidate_after_write(Some(&db), None);
+                        self.invalidate_schema(&db);
                     }
                     Err(e) => {
                         if let ModalState::CreateTable { error, .. } = &mut self.modal {
@@ -1195,7 +1209,7 @@ impl Session {
                 }
                 self.modal = ModalState::None;
                 if result.is_ok() {
-                    self.invalidate_after_write(Some(&db), None);
+                    self.on_dropped(&db, None);
                 }
             }
             ModalAction::DropTable { db, table } => {
@@ -1210,7 +1224,7 @@ impl Session {
                 }
                 self.modal = ModalState::None;
                 if result.is_ok() {
-                    self.invalidate_after_write(Some(&db), Some(&table));
+                    self.on_dropped(&db, Some(&table));
                 }
             }
             ModalAction::TruncateTable { db, table } => {
@@ -1231,17 +1245,9 @@ impl Session {
                         e,
                     ));
                 }
-                let result = result.map(|_| 0u64);
                 self.modal = ModalState::None;
                 if result.is_ok() {
-                    if matches!(
-                        &self.schema.selected_node,
-                        Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
-                    ) {
-                        let sql = self.build_sql(sh, &db, &table);
-                        self.run_query_async(sql);
-                    }
-                    self.invalidate_after_write(Some(&db), Some(&table));
+                    self.after_truncate(sh, &db, &[table]);
                 }
             }
             ModalAction::TruncateAllTables(db) => {
@@ -1259,7 +1265,7 @@ impl Session {
                         table.replace('`', "``")
                     ));
                 }
-                self.invalidate_after_write(Some(&db), None);
+                self.after_truncate(sh, &db, &tables);
             }
             ModalAction::ApplyFilter { sql_fragment } => {
                 self.modal = ModalState::None;
@@ -1330,7 +1336,7 @@ impl Session {
                             }
                         }
                         self.modal = ModalState::None;
-                        self.invalidate_after_write(Some(&db), None);
+                        self.invalidate_schema(&db);
                     }
                     Err(e) => {
                         if let ModalState::CloneTable { error, .. } = &mut self.modal {
@@ -2757,5 +2763,94 @@ mod tests {
         .unwrap();
         s.poll_query_receiver(&egui::Context::default());
         assert_eq!(s.pending_count(), 0);
+    }
+
+    fn open_table(s: &Session) -> Option<(&str, &str)> {
+        match &s.schema.selected_node {
+            Some(SelectedNode::Table { db, table }) => Some((db.as_str(), table.as_str())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn crear_tabla_conserva_la_vista_y_los_cambios() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        s.table_view.pending_deletes.insert(0);
+        let mut col = NewColumnDef::new();
+        col.name = "id".into();
+        s.handle_modal_action(
+            ModalAction::CreateTable {
+                db: "db".into(),
+                name: "nueva".into(),
+                columns: vec![col],
+            },
+            &mut shared(),
+        );
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        assert_eq!(s.active_tab, ActiveTab::Datos);
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn borrar_la_tabla_abierta_la_cierra() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        s.table_view.pending_deletes.insert(0);
+        let action = ModalAction::DropTable {
+            db: "db".into(),
+            table: "t".into(),
+        };
+        s.handle_modal_action(action, &mut shared());
+        assert_eq!(
+            s.schema.selected_node,
+            Some(SelectedNode::Database("db".into()))
+        );
+        assert_eq!(s.active_tab, ActiveTab::Bbdd);
+        assert!(s.table_view.table_data.is_none());
+        assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn borrar_otra_tabla_no_toca_la_abierta() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(0);
+        let action = ModalAction::DropTable {
+            db: "db".into(),
+            table: "otra".into(),
+        };
+        s.handle_modal_action(action, &mut shared());
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn borrar_la_bbdd_desde_una_pestana_sql_no_cambia_de_pestana() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Sql(0);
+        s.handle_modal_action(ModalAction::DropDatabase("db".into()), &mut shared());
+        assert_eq!(s.schema.selected_node, Some(SelectedNode::Server));
+        assert_eq!(s.active_tab, ActiveTab::Sql(0));
+    }
+
+    #[test]
+    fn vaciar_la_tabla_abierta_la_recarga_sin_cambios() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        s.table_view.pending_edits.push(PendingEdit {
+            row_idx: 0,
+            col_idx: 0,
+            original: Some("1".into()),
+            new_value: "9".into(),
+            is_null: false,
+        });
+        let action = ModalAction::TruncateTable {
+            db: "db".into(),
+            table: "t".into(),
+        };
+        s.handle_modal_action(action, &mut shared());
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        assert_eq!(s.pending_count(), 0);
+        assert!(matches!(s.state, ConnState::QueryRunning));
     }
 }
