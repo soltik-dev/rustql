@@ -307,6 +307,46 @@ fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
 
 // ── Función principal ─────────────────────────────────────────────────────────
 
+/// Diálogo modal: oscurece y bloquea el resto de la interfaz hasta que se
+/// cierra. Con `open`, Escape o la × lo ponen a false (equivale a Cancelar);
+/// sin él (una exportación en marcha) solo se cierra con sus botones. Un clic
+/// fuera no lo cierra: perdería lo escrito en un formulario.
+fn dialog(
+    ctx: &egui::Context,
+    title: &str,
+    min_width: f32,
+    open: Option<&mut bool>,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let closable = open.is_some();
+    let mut close_clicked = false;
+    let response = egui::Modal::new(egui::Id::unique(("rustql_dialog", title))).show(ctx, |ui| {
+        ui.set_min_width(min_width);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(title).strong());
+            if closable {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close_clicked = ui
+                        .add(egui::Button::new("×").frame(false))
+                        .on_hover_text("Cerrar  Esc")
+                        .clicked();
+                });
+            }
+        });
+        ui.separator();
+        ui.add_space(4.0);
+        content(ui);
+    });
+    let escape = response.is_top_modal
+        && !response.any_popup_open
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if let Some(open) = open
+        && (close_clicked || escape)
+    {
+        *open = false;
+    }
+}
+
 /// Fila de botones de un formulario. Con `busy` (una escritura en curso) se
 /// desactiva y muestra un spinner: así no se envía dos veces.
 fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egui::Ui)) {
@@ -415,59 +455,53 @@ fn show_create_database(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    egui::Window::new("Crear base de datos")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            egui::Grid::new("create_db_grid")
-                .num_columns(2)
-                .spacing([12.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Nombre:");
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(name)
-                            .desired_width(200.0)
-                            .hint_text("mi_base_de_datos"),
-                    );
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        // handled below
-                    }
-                    ui.end_row();
-
-                    ui.label("Charset:");
-                    egui::ComboBox::from_id_salt("charset_combo")
-                        .selected_text(charset.as_str())
-                        .show_ui(ui, |ui| {
-                            for &cs in CHARSETS {
-                                ui.selectable_value(charset, cs.to_string(), cs);
-                            }
-                        });
-                    ui.end_row();
-                });
-
-            if let Some(e) = error {
-                ui.separator();
-                theme::error_card(ui, &format!("Error: {e}"));
-            }
-
-            ui.separator();
-            form_buttons(ui, busy, |ui| {
-                let create_clicked = theme::primary_button(ui, "Crear").clicked();
-                let enter_pressed =
-                    ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (create_clicked || enter_pressed) && !name.trim().is_empty() {
-                    action = ModalAction::CreateDatabase {
-                        name: name.trim().to_string(),
-                        charset: charset.clone(),
-                    };
+    dialog(ctx, "Crear base de datos", 280.0, Some(&mut open), |ui| {
+        egui::Grid::new("create_db_grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Nombre:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(name)
+                        .desired_width(200.0)
+                        .hint_text("mi_base_de_datos"),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    // handled below
                 }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
+                ui.end_row();
+
+                ui.label("Charset:");
+                egui::ComboBox::from_id_salt("charset_combo")
+                    .selected_text(charset.as_str())
+                    .show_ui(ui, |ui| {
+                        for &cs in CHARSETS {
+                            ui.selectable_value(charset, cs.to_string(), cs);
+                        }
+                    });
+                ui.end_row();
             });
+
+        if let Some(e) = error {
+            ui.separator();
+            theme::error_card(ui, &format!("Error: {e}"));
+        }
+
+        ui.separator();
+        form_buttons(ui, busy, |ui| {
+            let create_clicked = theme::primary_button(ui, "Crear").clicked();
+            let enter_pressed = ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (create_clicked || enter_pressed) && !name.trim().is_empty() {
+                action = ModalAction::CreateDatabase {
+                    name: name.trim().to_string(),
+                    charset: charset.clone(),
+                };
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
         });
+    });
 
     if !open {
         action = ModalAction::Cancel;
@@ -494,125 +528,119 @@ fn show_create_table(
         columns.push(NewColumnDef::new());
     }
 
-    egui::Window::new("Crear tabla")
-        .collapsible(false)
-        .resizable(true)
-        .min_width(600.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Base de datos:");
-                ui.strong(db);
-                ui.separator();
-                ui.label("Nombre de tabla:");
-                ui.add(
-                    egui::TextEdit::singleline(name)
-                        .desired_width(180.0)
-                        .hint_text("mi_tabla"),
-                );
-            });
+    dialog(ctx, "Crear tabla", 600.0, Some(&mut open), |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Base de datos:");
+            ui.strong(db);
             ui.separator();
+            ui.label("Nombre de tabla:");
+            ui.add(
+                egui::TextEdit::singleline(name)
+                    .desired_width(180.0)
+                    .hint_text("mi_tabla"),
+            );
+        });
+        ui.separator();
 
-            ui.strong("Columnas:");
-            ui.add_space(4.0);
+        ui.strong("Columnas:");
+        ui.add_space(4.0);
 
-            use egui_extras::{Column, TableBuilder};
+        use egui_extras::{Column, TableBuilder};
 
-            let mut remove_idx: Option<usize> = None;
+        let mut remove_idx: Option<usize> = None;
 
-            TableBuilder::new(ui)
-                .resizable(false)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::exact(160.0)) // nombre
-                .column(Column::exact(110.0)) // tipo
-                .column(Column::exact(70.0)) // longitud
-                .column(Column::exact(60.0)) // not null
-                .column(Column::exact(40.0)) // PK
-                .column(Column::exact(30.0)) // borrar
-                .header(20.0, |mut header| {
-                    for h in &["Nombre", "Tipo", "Longitud", "Not Null", "PK", ""] {
-                        header.col(|ui| {
-                            ui.strong(*h);
-                        });
-                    }
-                })
-                .body(|body| {
-                    let n = columns.len();
-                    body.rows(24.0, n, |mut row| {
-                        let i = row.index();
-                        let col = &mut columns[i];
-                        row.col(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut col.name)
-                                    .desired_width(f32::INFINITY)
-                                    .hint_text("columna"),
-                            );
-                        });
-                        row.col(|ui| {
-                            egui::ComboBox::from_id_salt(format!("type_{i}"))
-                                .selected_text(&col.col_type)
-                                .width(100.0)
-                                .show_ui(ui, |ui| {
-                                    for &t in COL_TYPES {
-                                        ui.selectable_value(&mut col.col_type, t.to_string(), t);
-                                    }
-                                });
-                        });
-                        row.col(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut col.length)
-                                    .desired_width(f32::INFINITY),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.checkbox(&mut col.not_null, "");
+        TableBuilder::new(ui)
+            .resizable(false)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(160.0)) // nombre
+            .column(Column::exact(110.0)) // tipo
+            .column(Column::exact(70.0)) // longitud
+            .column(Column::exact(60.0)) // not null
+            .column(Column::exact(40.0)) // PK
+            .column(Column::exact(30.0)) // borrar
+            .header(20.0, |mut header| {
+                for h in &["Nombre", "Tipo", "Longitud", "Not Null", "PK", ""] {
+                    header.col(|ui| {
+                        ui.strong(*h);
+                    });
+                }
+            })
+            .body(|body| {
+                let n = columns.len();
+                body.rows(24.0, n, |mut row| {
+                    let i = row.index();
+                    let col = &mut columns[i];
+                    row.col(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut col.name)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("columna"),
+                        );
+                    });
+                    row.col(|ui| {
+                        egui::ComboBox::from_id_salt(format!("type_{i}"))
+                            .selected_text(&col.col_type)
+                            .width(100.0)
+                            .show_ui(ui, |ui| {
+                                for &t in COL_TYPES {
+                                    ui.selectable_value(&mut col.col_type, t.to_string(), t);
+                                }
                             });
-                        });
-                        row.col(|ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.checkbox(&mut col.primary_key, "");
-                            });
-                        });
-                        row.col(|ui| {
-                            if ui.small_button("✖").clicked() {
-                                remove_idx = Some(i);
-                            }
+                    });
+                    row.col(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut col.length)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.checkbox(&mut col.not_null, "");
                         });
                     });
+                    row.col(|ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.checkbox(&mut col.primary_key, "");
+                        });
+                    });
+                    row.col(|ui| {
+                        if ui.small_button("✖").clicked() {
+                            remove_idx = Some(i);
+                        }
+                    });
                 });
-
-            if let Some(idx) = remove_idx {
-                columns.remove(idx);
-            }
-
-            if ui.button(format!("{PLUS} Añadir columna")).clicked() {
-                columns.push(NewColumnDef::new());
-            }
-
-            if let Some(e) = error {
-                ui.separator();
-                theme::error_card(ui, &format!("Error: {e}"));
-            }
-
-            ui.separator();
-            form_buttons(ui, busy, |ui| {
-                if theme::primary_button(ui, "Crear tabla").clicked()
-                    && !name.trim().is_empty()
-                    && !columns.is_empty()
-                {
-                    action = ModalAction::CreateTable {
-                        db: db.to_string(),
-                        name: name.trim().to_string(),
-                        columns: columns.clone(),
-                    };
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
             });
+
+        if let Some(idx) = remove_idx {
+            columns.remove(idx);
+        }
+
+        if ui.button(format!("{PLUS} Añadir columna")).clicked() {
+            columns.push(NewColumnDef::new());
+        }
+
+        if let Some(e) = error {
+            ui.separator();
+            theme::error_card(ui, &format!("Error: {e}"));
+        }
+
+        ui.separator();
+        form_buttons(ui, busy, |ui| {
+            if theme::primary_button(ui, "Crear tabla").clicked()
+                && !name.trim().is_empty()
+                && !columns.is_empty()
+            {
+                action = ModalAction::CreateTable {
+                    db: db.to_string(),
+                    name: name.trim().to_string(),
+                    columns: columns.clone(),
+                };
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
         });
+    });
 
     if !open {
         action = ModalAction::Cancel;
@@ -638,12 +666,12 @@ fn show_confirm_drop(
         DropKind::Table => "tabla",
     };
 
-    egui::Window::new(format!("Eliminar {kind_label}"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
+    dialog(
+        ctx,
+        &format!("Eliminar {kind_label}"),
+        280.0,
+        Some(&mut open),
+        |ui| {
             ui.label(format!("¿Seguro que quieres eliminar la {kind_label}:"));
             ui.add_space(4.0);
             ui.strong(target);
@@ -669,7 +697,8 @@ fn show_confirm_drop(
                     action = ModalAction::Cancel;
                 }
             });
-        });
+        },
+    );
 
     if !open {
         action = ModalAction::Cancel;
@@ -695,38 +724,33 @@ fn show_confirm_truncate(
         TruncateKind::AllInDatabase => "todas las tablas de",
     };
 
-    egui::Window::new("Vaciar datos")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label(format!("¿Seguro que quieres vaciar {kind_label}:"));
-            ui.add_space(4.0);
-            ui.strong(target);
-            ui.add_space(4.0);
-            ui.colored_label(
-                theme::get(ui).warning,
-                "⚠ Se eliminarán todos los datos. No se puede deshacer.",
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                if red_btn(ui, "Vaciar") {
-                    action = match kind {
-                        TruncateKind::Table => ModalAction::TruncateTable {
-                            db: db.clone().unwrap_or_default(),
-                            table: table.clone().unwrap_or_default(),
-                        },
-                        TruncateKind::AllInDatabase => {
-                            ModalAction::TruncateAllTables(db.clone().unwrap_or_default())
-                        }
-                    };
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
+    dialog(ctx, "Vaciar datos", 280.0, Some(&mut open), |ui| {
+        ui.label(format!("¿Seguro que quieres vaciar {kind_label}:"));
+        ui.add_space(4.0);
+        ui.strong(target);
+        ui.add_space(4.0);
+        ui.colored_label(
+            theme::get(ui).warning,
+            "⚠ Se eliminarán todos los datos. No se puede deshacer.",
+        );
+        ui.separator();
+        ui.horizontal(|ui| {
+            if red_btn(ui, "Vaciar") {
+                action = match kind {
+                    TruncateKind::Table => ModalAction::TruncateTable {
+                        db: db.clone().unwrap_or_default(),
+                        table: table.clone().unwrap_or_default(),
+                    },
+                    TruncateKind::AllInDatabase => {
+                        ModalAction::TruncateAllTables(db.clone().unwrap_or_default())
+                    }
+                };
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
         });
+    });
 
     if !open {
         action = ModalAction::Cancel;
@@ -758,13 +782,12 @@ fn show_filter_input(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    egui::Window::new(format!("Filtrar por {col_name}"))
-        .collapsible(false)
-        .resizable(false)
-        .min_width(320.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
+    dialog(
+        ctx,
+        &format!("Filtrar por {col_name}"),
+        320.0,
+        Some(&mut open),
+        |ui| {
             egui::Grid::new("filter_input_grid")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
@@ -803,7 +826,8 @@ fn show_filter_input(
                     action = ModalAction::Cancel;
                 }
             });
-        });
+        },
+    );
 
     if !open {
         action = ModalAction::Cancel;
@@ -891,41 +915,41 @@ fn show_confirm_switch_table(
     current_table: &str,
 ) -> ModalAction {
     let mut action = ModalAction::None;
+    let mut open = true;
 
-    egui::Window::new("Cambios sin guardar")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(format!(
-                "Tienes {} cambio(s) sin guardar en «{}».",
-                pending_count, current_table
-            ));
-            ui.add_space(4.0);
-            ui.label(format!(
-                "¿Qué quieres hacer antes de abrir «{}.{}»?",
-                new_db, new_table
-            ));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if theme::primary_button(ui, format!("{CLONE} Guardar y cambiar")).clicked() {
-                    action = ModalAction::ApplyAndSwitch {
-                        new_db: new_db.to_string(),
-                        new_table: new_table.to_string(),
-                    };
-                }
-                if theme::warning_button(ui, format!("{TRASH}  Descartar y cambiar")).clicked() {
-                    action = ModalAction::DiscardAndSwitch {
-                        new_db: new_db.to_string(),
-                        new_table: new_table.to_string(),
-                    };
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
+    dialog(ctx, "Cambios sin guardar", 280.0, Some(&mut open), |ui| {
+        ui.label(format!(
+            "Tienes {} cambio(s) sin guardar en «{}».",
+            pending_count, current_table
+        ));
+        ui.add_space(4.0);
+        ui.label(format!(
+            "¿Qué quieres hacer antes de abrir «{}.{}»?",
+            new_db, new_table
+        ));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if theme::primary_button(ui, format!("{CLONE} Guardar y cambiar")).clicked() {
+                action = ModalAction::ApplyAndSwitch {
+                    new_db: new_db.to_string(),
+                    new_table: new_table.to_string(),
+                };
+            }
+            if theme::warning_button(ui, format!("{TRASH}  Descartar y cambiar")).clicked() {
+                action = ModalAction::DiscardAndSwitch {
+                    new_db: new_db.to_string(),
+                    new_table: new_table.to_string(),
+                };
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
         });
+    });
 
+    if !open {
+        action = ModalAction::Cancel;
+    }
     action
 }
 
@@ -936,31 +960,31 @@ fn show_confirm_reload(
     current_table: &str,
 ) -> ModalAction {
     let mut action = ModalAction::None;
+    let mut open = true;
 
-    egui::Window::new("Cambios sin guardar")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(format!(
-                "Tienes {pending_count} cambio(s) sin guardar en «{current_table}»."
-            ));
-            ui.add_space(4.0);
-            ui.label("Al recargar los datos se perderían.");
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if theme::primary_button(ui, "Guardar y recargar").clicked() {
-                    action = ModalAction::ApplyAndReload(reload.clone());
-                }
-                if theme::warning_button(ui, format!("{TRASH}  Descartar y recargar")).clicked() {
-                    action = ModalAction::DiscardAndReload(reload.clone());
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
+    dialog(ctx, "Cambios sin guardar", 280.0, Some(&mut open), |ui| {
+        ui.label(format!(
+            "Tienes {pending_count} cambio(s) sin guardar en «{current_table}»."
+        ));
+        ui.add_space(4.0);
+        ui.label("Al recargar los datos se perderían.");
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if theme::primary_button(ui, "Guardar y recargar").clicked() {
+                action = ModalAction::ApplyAndReload(reload.clone());
+            }
+            if theme::warning_button(ui, format!("{TRASH}  Descartar y recargar")).clicked() {
+                action = ModalAction::DiscardAndReload(reload.clone());
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
         });
+    });
 
+    if !open {
+        action = ModalAction::Cancel;
+    }
     action
 }
 
@@ -970,28 +994,28 @@ fn show_confirm_close_session(
     pending_count: usize,
 ) -> ModalAction {
     let mut action = ModalAction::None;
+    let mut open = true;
 
-    egui::Window::new("Cerrar conexión")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(format!(
-                "Tienes {pending_count} cambio(s) sin guardar en «{title}»."
-            ));
-            ui.add_space(4.0);
-            ui.label("Si cierras la pestaña se perderán.");
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if theme::warning_button(ui, format!("{TRASH}  Descartar y cerrar")).clicked() {
-                    action = ModalAction::CloseSession;
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
+    dialog(ctx, "Cerrar conexión", 280.0, Some(&mut open), |ui| {
+        ui.label(format!(
+            "Tienes {pending_count} cambio(s) sin guardar en «{title}»."
+        ));
+        ui.add_space(4.0);
+        ui.label("Si cierras la pestaña se perderán.");
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if theme::warning_button(ui, format!("{TRASH}  Descartar y cerrar")).clicked() {
+                action = ModalAction::CloseSession;
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
         });
+    });
 
+    if !open {
+        action = ModalAction::Cancel;
+    }
     action
 }
 
@@ -1009,12 +1033,12 @@ fn show_clone_table(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    egui::Window::new(format!("Clonar tabla — {db}.{table}"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
+    dialog(
+        ctx,
+        &format!("Clonar tabla — {db}.{table}"),
+        280.0,
+        Some(&mut open),
+        |ui| {
             egui::Grid::new("clone_table_grid")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
@@ -1055,7 +1079,8 @@ fn show_clone_table(
                     action = ModalAction::Cancel;
                 }
             });
-        });
+        },
+    );
 
     if !open {
         action = ModalAction::Cancel;
@@ -1069,18 +1094,13 @@ fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
     let mut open = true;
     let mut close = false;
 
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            theme::error_card(ui, message);
-            ui.separator();
-            if ui.button("Cerrar").clicked() {
-                close = true;
-            }
-        });
+    dialog(ctx, title, 280.0, Some(&mut open), |ui| {
+        theme::error_card(ui, message);
+        ui.separator();
+        if ui.button("Cerrar").clicked() {
+            close = true;
+        }
+    });
 
     if !open || close {
         ModalAction::Cancel
@@ -1109,56 +1129,53 @@ fn show_export_data(
     let mut open = true;
 
     let title = format!("{EXPORT}  Exportar datos — {source_db}");
+    // En marcha solo se cierra con Cancelar: cerrarlo dejaría la exportación
+    // corriendo sin nada que la muestre
+    let closable = !matches!(phase, ExportPhase::Running(_));
 
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .min_size([620.0, 380.0])
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            // Ancho fijo: sin esto, las fases con StripBuilder pueden recibir
-            // un ancho no acotado del auto-size y propagar NaN al layout.
-            ui.set_width(600.0);
-            match phase {
-                ExportPhase::Configuring => {
-                    action = render_export_config(
-                        ui,
-                        source_db,
-                        tables,
-                        databases,
-                        profiles,
-                        destination,
-                        target_db_name,
-                        profile_idx,
-                        options,
-                    );
-                }
-                ExportPhase::Running(running) => {
-                    action = render_export_running(ui, tables, running, destination);
-                }
-                ExportPhase::Done {
-                    total_tables,
-                    total_rows,
-                    elapsed_ms,
-                } => {
-                    action = render_export_done(
-                        ui,
-                        tables,
-                        *total_tables,
-                        *total_rows,
-                        *elapsed_ms,
-                        destination,
-                    );
-                }
-                ExportPhase::Cancelled => {
-                    action = render_export_cancelled(ui, tables);
-                }
-                ExportPhase::Failed(error) => {
-                    action = render_export_failed(ui, error);
-                }
+    dialog(ctx, &title, 620.0, closable.then_some(&mut open), |ui| {
+        // Ancho fijo: sin esto, las fases con StripBuilder pueden recibir
+        // un ancho no acotado del auto-size y propagar NaN al layout.
+        ui.set_width(600.0);
+        match phase {
+            ExportPhase::Configuring => {
+                action = render_export_config(
+                    ui,
+                    source_db,
+                    tables,
+                    databases,
+                    profiles,
+                    destination,
+                    target_db_name,
+                    profile_idx,
+                    options,
+                );
             }
-        });
+            ExportPhase::Running(running) => {
+                action = render_export_running(ui, tables, running, destination);
+            }
+            ExportPhase::Done {
+                total_tables,
+                total_rows,
+                elapsed_ms,
+            } => {
+                action = render_export_done(
+                    ui,
+                    tables,
+                    *total_tables,
+                    *total_rows,
+                    *elapsed_ms,
+                    destination,
+                );
+            }
+            ExportPhase::Cancelled => {
+                action = render_export_cancelled(ui, tables);
+            }
+            ExportPhase::Failed(error) => {
+                action = render_export_failed(ui, error);
+            }
+        }
+    });
 
     if !open {
         action = ModalAction::CloseExport;

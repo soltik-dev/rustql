@@ -36,6 +36,21 @@ pub(super) struct FrameSignals {
     pub sql: SqlEditorAction,
 }
 
+impl FrameSignals {
+    /// Solo lo que pide datos para dibujar (las tablas del árbol): lo demás
+    /// es una acción del usuario.
+    pub fn data_requests_only(self) -> Self {
+        Self {
+            sidebar: SidebarOutput {
+                load_tables: self.sidebar.load_tables,
+                load_all_tables: self.sidebar.load_all_tables,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 impl Session {
     pub(super) fn draw(
         &mut self,

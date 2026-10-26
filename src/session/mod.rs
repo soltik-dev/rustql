@@ -67,7 +67,7 @@ pub struct Shared {
 }
 
 /// Teclas globales del frame: solo las recibe la sesión activa.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct FrameKeys {
     pub f5: bool,
     pub f9: bool,
@@ -1137,7 +1137,18 @@ impl Session {
         // la recarga no llega a hacerse (query en curso o el usuario cancela).
         let sorts_before = self.table_view.sort_specs.clone();
 
-        let signals = self.draw(ui, sh, keys, show_sidebar, &sorts_before);
+        // Con un diálogo abierto, el ratón no llega a lo de detrás (lo
+        // bloquea el propio diálogo), pero el teclado sí: se ignora.
+        let dialog_open = !matches!(self.modal, ModalState::None);
+        let keys = if dialog_open {
+            FrameKeys::default()
+        } else {
+            keys
+        };
+        let mut signals = self.draw(ui, sh, keys, show_sidebar, &sorts_before);
+        if dialog_open {
+            signals = signals.data_requests_only();
+        }
         // ── Modal (sobre todo) ────────────────────────────────────────────
         let modal_action = modals_ui::show(ctx, &mut self.modal, self.writes_in_flight > 0);
 
