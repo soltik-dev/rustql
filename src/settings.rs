@@ -347,10 +347,22 @@ pub fn apply(ctx: &egui::Context, s: &AppSettings) {
     let pref = match s.theme {
         Theme::Dark => egui::ThemePreference::Dark,
         Theme::Light => egui::ThemePreference::Light,
-        Theme::System => match dark_light::detect() {
-            Ok(dark_light::Mode::Light) => egui::ThemePreference::Light,
+        Theme::System => match detect_system_mode() {
+            Some(dark_light::Mode::Light) => egui::ThemePreference::Light,
             _ => egui::ThemePreference::Dark,
         },
     };
     ctx.set_theme(pref);
+}
+
+/// Tema del sistema con tope de espera. dark-light 3 consulta el portal por
+/// D-Bus sin timeout; si el portal no responde, no debe congelar la UI.
+fn detect_system_mode() -> Option<dark_light::Mode> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(dark_light::detect());
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(250))
+        .ok()?
+        .ok()
 }

@@ -94,7 +94,7 @@ pub fn show(
             .show(ui, |ui| {
                 let search_resp = ui.add(
                     egui::TextEdit::singleline(table_search)
-                        .id(egui::Id::new("sidebar_table_search"))
+                        .id_salt("sidebar_table_search")
                         .hint_text("Buscar…  Ctrl+F")
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY),
@@ -262,17 +262,17 @@ pub fn show(
 
                                     let fav_resp = ui.interact(
                                         fav_rect,
-                                        ui.id().with(("fav", db.as_str(), table.as_str())),
+                                        ui.scope_id().with(("fav", db.as_str(), table.as_str())),
                                         egui::Sense::click(),
                                     );
                                     let pin_resp = ui.interact(
                                         pin_rect,
-                                        ui.id().with(("pin", db.as_str(), table.as_str())),
+                                        ui.scope_id().with(("pin", db.as_str(), table.as_str())),
                                         egui::Sense::click(),
                                     );
                                     let resp = ui.interact(
                                         label_rect,
-                                        ui.id().with(("row", db.as_str(), table.as_str())),
+                                        ui.scope_id().with(("row", db.as_str(), table.as_str())),
                                         egui::Sense::click(),
                                     );
 
