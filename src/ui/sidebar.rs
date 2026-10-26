@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use eframe::egui;
 
-use crate::db::DbBackend;
+use crate::loadable::Loadable;
 use crate::ui::icons::*;
 use crate::ui::theme;
 
@@ -49,14 +49,30 @@ pub enum SidebarAction {
     ExportTable { db: String, table: String },
 }
 
+/// Lo que el sidebar pide a la sesión: la acción del usuario y los datos
+/// que le faltan para dibujar el árbol (los carga la sesión en segundo plano).
+pub struct SidebarOutput {
+    pub action: SidebarAction,
+    /// BBDD desplegadas cuyas tablas aún no se han pedido.
+    pub load_tables: Vec<String>,
+    /// El buscador necesita las tablas de todas las BBDD.
+    pub load_all_tables: bool,
+}
+
+fn loading_label(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.spinner();
+        ui.label("Cargando…");
+    });
+}
+
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
 /// `conn_color` (color de la conexión) tiñe la raíz del árbol y la selección.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    backend: Option<&dyn DbBackend>,
-    databases: &mut Vec<String>,
-    tables_cache: &mut HashMap<String, Vec<String>>,
+    databases: &Loadable<Vec<String>>,
+    tables_cache: &HashMap<String, Loadable<Vec<String>>>,
     selected_db: Option<&str>,
     selected_table: Option<&str>,
     table_search: &mut String,
@@ -65,8 +81,10 @@ pub fn show(
     host: &str,
     server_name: &str,
     conn_color: Option<egui::Color32>,
-) -> SidebarAction {
+) -> SidebarOutput {
     let action: RefCell<SidebarAction> = RefCell::new(SidebarAction::None);
+    let mut load_tables = Vec::new();
+    let mut load_all_tables = false;
     let p = theme::get(ui);
 
     ui.add_space(4.0);
@@ -116,17 +134,21 @@ pub fn show(
     });
     ui.separator();
 
-    if databases.is_empty()
-        && let Some(b) = backend
-    {
-        match b.list_databases() {
-            Ok(dbs) => *databases = dbs,
-            Err(e) => {
+    let dbs = match databases {
+        Loadable::Ready(dbs) => dbs,
+        other => {
+            if let Loadable::Failed(e) = other {
                 ui.colored_label(p.danger, format!("Error: {e}"));
-                return SidebarAction::None;
+            } else {
+                loading_label(ui);
             }
+            return SidebarOutput {
+                action: action.into_inner(),
+                load_tables,
+                load_all_tables,
+            };
         }
-    }
+    };
 
     let filter = table_search.to_lowercase();
     let filtering = !filter.is_empty();
@@ -140,7 +162,6 @@ pub fn show(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            let dbs = databases.clone();
 
             // Hueco para el fondo de la raíz: se rellena al conocer su rect.
             let server_bg = ui.painter().add(egui::Shape::Noop);
@@ -149,18 +170,15 @@ pub fn show(
                     .id_salt("server_root")
                     .default_open(true)
                     .show(ui, |ui| {
-                        for db in &dbs {
-                            if filtering
-                                && !tables_cache.contains_key(db)
-                                && let Some(b) = backend
-                                && let Ok(tables) = b.list_tables(db)
-                            {
-                                tables_cache.insert(db.clone(), tables);
+                        for db in dbs {
+                            let db_tables = tables_cache.get(db);
+                            if filtering && db_tables.is_none_or(Loadable::needs_load) {
+                                load_all_tables = true;
                             }
 
                             let matching: Vec<String> = if filtering {
-                                tables_cache
-                                    .get(db)
+                                db_tables
+                                    .and_then(Loadable::ready)
                                     .map(|ts| {
                                         ts.iter()
                                             .filter(|t| t.to_lowercase().contains(&filter))
@@ -190,26 +208,26 @@ pub fn show(
                             .default_open(false)
                             .open(open)
                             .show(ui, |ui: &mut egui::Ui| {
-                                if !filtering
-                                    && !tables_cache.contains_key(db)
-                                    && let Some(b) = backend
-                                {
-                                    match b.list_tables(db) {
-                                        Ok(tables) => {
-                                            tables_cache.insert(db.clone(), tables);
-                                        }
-                                        Err(e) => {
-                                            ui.colored_label(p.danger, format!("Error: {e}"));
-                                            return;
-                                        }
-                                    }
-                                }
-
                                 let tables: Vec<String> = {
                                     let base = if filtering {
                                         matching.clone()
                                     } else {
-                                        tables_cache.get(db).cloned().unwrap_or_default()
+                                        match db_tables {
+                                            Some(Loadable::Ready(ts)) => ts.clone(),
+                                            Some(Loadable::Failed(e)) => {
+                                                ui.colored_label(p.danger, format!("Error: {e}"));
+                                                return;
+                                            }
+                                            Some(Loadable::Loading(_)) => {
+                                                loading_label(ui);
+                                                return;
+                                            }
+                                            None | Some(Loadable::NotLoaded) => {
+                                                load_tables.push(db.clone());
+                                                loading_label(ui);
+                                                return;
+                                            }
+                                        }
                                     };
                                     if *show_only_fav {
                                         base.into_iter()
@@ -487,7 +505,11 @@ pub fn show(
             });
         });
 
-    action.into_inner()
+    SidebarOutput {
+        action: action.into_inner(),
+        load_tables,
+        load_all_tables,
+    }
 }
 
 #[cfg(test)]

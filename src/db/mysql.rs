@@ -36,20 +36,22 @@ fn rows_to_result(raw_rows: Vec<mysql::Row>) -> QueryResult {
         })
         .unwrap_or_default();
 
-    let rows = raw_rows
-        .into_iter()
-        .map(|mut row| {
-            let n = row.len();
-            (0..n)
-                .map(|i| {
-                    let v: Value = row.take(i).unwrap_or(Value::NULL);
-                    value_to_string(v)
-                })
-                .collect()
-        })
-        .collect();
+    let rows = raw_rows.into_iter().map(row_values).collect();
 
-    QueryResult { columns, rows }
+    QueryResult {
+        columns,
+        rows,
+        truncated: false,
+    }
+}
+
+fn row_values(mut row: mysql::Row) -> Vec<Option<String>> {
+    (0..row.len())
+        .map(|i| {
+            let v: Value = row.take(i).unwrap_or(Value::NULL);
+            value_to_string(v)
+        })
+        .collect()
 }
 
 fn col(row: &[Option<String>], i: usize) -> String {
@@ -79,9 +81,10 @@ impl MysqlBackend {
         }
         let password = params.resolve_password()?;
         on_status("Estableciendo conexión TCP...");
-        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10)
-        // para un cliente GUI con un solo usuario basta con min:0, max:1
-        let pool_constraints = PoolConstraints::new(0, 1).unwrap();
+        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
+        // max:4 deja que los trabajos en segundo plano (datos, metadatos,
+        // escrituras) no esperen unos a otros; el editor SQL va aparte.
+        let pool_constraints = PoolConstraints::new(0, 4).unwrap();
         let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
         let opts: Opts = OptsBuilder::new()
             .ip_or_hostname(Some(params.host.as_str()))
@@ -139,6 +142,15 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("Error en query: {e}"))
     }
 
+    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
+        self.conn()?
+            .query(
+                "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            )
+            .map_err(|e| format!("Error en query: {e}"))
+    }
+
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult> {
         let raw_rows: Vec<mysql::Row> = self
             .conn()?
@@ -148,7 +160,12 @@ impl DbBackend for MysqlBackend {
         Ok(rows_to_result(raw_rows))
     }
 
-    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+    fn execute_in_session(
+        &self,
+        db: Option<&str>,
+        sql: &str,
+        max_rows: usize,
+    ) -> DbResult<QueryResult> {
         let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
         let conn = match &mut *session {
             Some(conn) => conn,
@@ -161,10 +178,32 @@ impl DbBackend for MysqlBackend {
             if let Some(db) = db {
                 conn.query_drop(format!("USE `{}`", escape_ident(db)))?;
             }
-            conn.query::<mysql::Row, _>(sql)
+            // Del primer conjunto de resultados, como mucho max_rows filas.
+            // Al soltar `set`, el crate lee y descarta el resto.
+            let mut set = conn.query_iter(sql)?;
+            let columns = set
+                .columns()
+                .as_ref()
+                .iter()
+                .map(|c| c.name_str().into_owned())
+                .collect();
+            let mut rows = Vec::new();
+            let mut truncated = false;
+            for row in set.by_ref() {
+                if rows.len() == max_rows {
+                    truncated = true;
+                    break;
+                }
+                rows.push(row_values(row?));
+            }
+            Ok::<_, mysql::Error>(QueryResult {
+                columns,
+                rows,
+                truncated,
+            })
         })();
         match result {
-            Ok(raw_rows) => Ok(rows_to_result(raw_rows)),
+            Ok(data) => Ok(data),
             Err(e) => {
                 // Conexión perdida (servidor reiniciado, timeout…): la próxima
                 // ejecución abre otra; el estado de la sesión ya se ha perdido.
@@ -176,7 +215,7 @@ impl DbBackend for MysqlBackend {
         }
     }
 
-    fn execute_write(&mut self, sql: &str) -> DbResult<u64> {
+    fn execute_write(&self, sql: &str) -> DbResult<u64> {
         let mut conn = self.conn()?;
         conn.query_drop(sql)
             .map_err(|e| format!("Error en escritura: {e}"))?;
@@ -254,16 +293,7 @@ impl DbBackend for MysqlBackend {
             .collect())
     }
 
-    fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>> {
-        let sql = "SELECT COLUMN_NAME \
-                   FROM information_schema.COLUMNS \
-                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY='PRI' \
-                   ORDER BY ORDINAL_POSITION";
-        let r = self.query_with(sql, vec![Some(db.into()), Some(table.into())])?;
-        Ok(r.rows.iter().map(|row| col(row, 0)).collect())
-    }
-
-    fn create_database(&mut self, name: &str, charset: &str) -> DbResult<()> {
+    fn create_database(&self, name: &str, charset: &str) -> DbResult<()> {
         validate_charset(charset)?;
         let sql = format!(
             "CREATE DATABASE `{}` CHARACTER SET {}",
@@ -273,12 +303,12 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn drop_database(&mut self, name: &str) -> DbResult<()> {
+    fn drop_database(&self, name: &str) -> DbResult<()> {
         let sql = format!("DROP DATABASE `{}`", escape_ident(name));
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn drop_table(&mut self, db: &str, table: &str) -> DbResult<()> {
+    fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!(
             "DROP TABLE `{}`.`{}`",
             escape_ident(db),
@@ -287,7 +317,7 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn truncate_table(&mut self, db: &str, table: &str) -> DbResult<()> {
+    fn truncate_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!(
             "TRUNCATE TABLE `{}`.`{}`",
             escape_ident(db),
@@ -296,7 +326,7 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()> {
+    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
             .map_err(|e| format!("Error iniciando transacción: {e}"))?;
@@ -319,7 +349,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn metadatos_con_parametros() {
-        let mut b = test_server::backend();
+        let b = test_server::backend();
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
         let qdb = format!("`{}`", escape_ident(db));
@@ -336,7 +366,7 @@ mod tests {
 
         let tables = b.get_tables_info(db);
         let columns = b.get_columns_info(db, "t");
-        let pks = b.get_primary_keys(db, "t");
+        let all = b.list_all_tables();
         b.execute_write(&format!("DROP DATABASE {qdb}")).unwrap();
 
         let tables = tables.unwrap();
@@ -348,18 +378,19 @@ mod tests {
         assert_eq!(names, ["id", "v", "n"]);
         assert!(columns[0].extra.contains("auto_increment"));
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
-        assert_eq!(pks.unwrap(), ["id"]);
+        assert_eq!(columns[0].column_key, "PRI");
+        assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
     }
 
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
-        let mut b = test_server::backend();
+        let b = test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_session").unwrap();
         b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
         b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
         let db = Some("rustql_test_session");
-        let run = |sql: &str| b.execute_in_session(db, sql).unwrap().rows;
+        let run = |sql: &str| b.execute_in_session(db, sql, 100).unwrap().rows;
         let count = || {
             b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
                 .unwrap()
@@ -382,5 +413,34 @@ mod tests {
         assert_eq!(count(), Some("1".into()));
 
         b.execute_write("DROP DATABASE rustql_test_session").unwrap();
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn el_editor_lee_como_mucho_max_rows() {
+        let b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap").unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_cap").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)").unwrap();
+        b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
+            .unwrap();
+        let db = Some("rustql_test_cap");
+        let capped = b.execute_in_session(db, "SELECT * FROM t ORDER BY id", 3);
+        let exact = b.execute_in_session(db, "SELECT * FROM t", 5);
+        let empty = b.execute_in_session(db, "SELECT id AS n FROM t WHERE 1 = 0", 3);
+        // Tras recortar, la sesión sigue utilizable
+        let after = b.execute_in_session(db, "SELECT COUNT(*) FROM t", 3);
+        b.execute_write("DROP DATABASE rustql_test_cap").unwrap();
+
+        let capped = capped.unwrap();
+        assert_eq!(capped.rows.len(), 3);
+        assert!(capped.truncated);
+        let exact = exact.unwrap();
+        assert_eq!(exact.rows.len(), 5);
+        assert!(!exact.truncated);
+        let empty = empty.unwrap();
+        assert_eq!(empty.columns, ["n"], "columnas aunque no haya filas");
+        assert!(empty.rows.is_empty());
+        assert_eq!(after.unwrap().rows, [[Some("5".to_string())]]);
     }
 }

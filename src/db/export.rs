@@ -570,7 +570,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn no_copia_una_bbdd_sobre_si_misma() {
-        let mut b = test_server::backend();
+        let b = test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_export").unwrap();
         b.execute_write("CREATE DATABASE rustql_test_export").unwrap();
         b.execute_write("CREATE TABLE rustql_test_export.t (id INT PRIMARY KEY)").unwrap();

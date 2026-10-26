@@ -946,8 +946,7 @@ pub fn show(
                                     } else {
                                         // ── Celda normal ──────────────────────────────
                                         let is_null_cell = cell_opt.is_none();
-                                        let cell_text =
-                                            cell_opt.as_deref().unwrap_or("").to_string();
+                                        let cell_text: &str = cell_opt.as_deref().unwrap_or("");
 
                                         // Fondo tenue si la fila tiene cambios en otras celdas (no delete)
                                         if row_modified && !is_pending_delete {
@@ -988,16 +987,13 @@ pub fn show(
                                                         * 0.5,
                                             );
                                             if is_pending_delete {
-                                                let display_text = if is_null_cell {
-                                                    "NULL".to_string()
-                                                } else {
-                                                    cell_text.clone()
-                                                };
+                                                let display_text =
+                                                    if is_null_cell { "NULL" } else { cell_text };
                                                 paint_text_truncated(
                                                     ui,
                                                     &painter,
                                                     pos,
-                                                    &display_text,
+                                                    display_text,
                                                     p.grid_delete_fg,
                                                     text_clip.width(),
                                                 );
@@ -1015,7 +1011,7 @@ pub fn show(
                                                     ui,
                                                     &painter,
                                                     pos,
-                                                    &cell_text,
+                                                    cell_text,
                                                     ui.visuals().text_color(),
                                                     text_clip.width(),
                                                 );
@@ -1067,15 +1063,14 @@ pub fn show(
                                                 GridAction::CellEditStarted {
                                                     row: RowRef::Existing(real_idx),
                                                     col_idx: col_i,
-                                                    current_value: cell_text.clone(),
+                                                    current_value: cell_text.to_string(),
                                                 };
                                         }
 
                                         // Context menu
-                                        let is_dt = looks_like_datetime(&cell_text);
-                                        let ctx = ui.ctx().clone();
+                                        let is_dt = looks_like_datetime(cell_text);
                                         let ga_rc = &grid_action_rc;
-                                        let col_name = data.columns[col_i].clone();
+                                        let col_name = &data.columns[col_i];
                                         let has_multi_selection = !selected_rows.is_empty();
                                         resp.context_menu(|ui| {
                                             if has_multi_selection {
@@ -1100,7 +1095,7 @@ pub fn show(
                                                 }
                                             } else {
                                                 if ui.button("📋  Copiar valor").clicked() {
-                                                    ctx.copy_text(cell_text.clone());
+                                                    ui.ctx().copy_text(cell_text.to_string());
                                                     ui.close();
                                                 }
                                             }
@@ -1111,7 +1106,7 @@ pub fn show(
                                                         GridAction::CellEditStarted {
                                                             row: RowRef::Existing(real_idx),
                                                             col_idx: col_i,
-                                                            current_value: cell_text.clone(),
+                                                            current_value: cell_text.to_string(),
                                                         };
                                                     ui.close();
                                                 }
@@ -1146,9 +1141,9 @@ pub fn show(
                                             }
 
                                             // Filtrar
-                                            let esc_col = esc_ident(&col_name);
-                                            let val_display = trunc_display(&cell_text, 22);
-                                            let val_escaped = crate::db::escape_sql(&cell_text);
+                                            let esc_col = esc_ident(col_name);
+                                            let val_display = trunc_display(cell_text, 22);
+                                            let val_escaped = crate::db::escape_sql(cell_text);
 
                                             if ui.button(format!("🔍  = '{val_display}'")).clicked()
                                             {

@@ -3,6 +3,7 @@
 mod app;
 mod config_file;
 mod db;
+mod loadable;
 mod log;
 mod profiles;
 mod secrets;

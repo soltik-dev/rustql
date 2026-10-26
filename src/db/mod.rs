@@ -1,6 +1,8 @@
 pub mod mysql;
 pub mod export;
 
+use std::sync::Arc;
+
 pub use export::{ExportDestination, ExportEvent, ExportOptions};
 
 #[derive(Debug, Clone)]
@@ -59,11 +61,13 @@ pub struct Statement {
     pub params: Vec<Option<String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     /// Cada celda es `None` si el valor es NULL en la base de datos.
     pub rows: Vec<Vec<Option<String>>>,
+    /// Había más filas de las que se leyeron (tope del editor SQL).
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -124,11 +128,16 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
     }
 }
 
-pub trait DbBackend: Send {
+/// Backend de una conexión. Es `Sync` y todos sus métodos toman `&self`: se
+/// comparte (`Arc`) entre la UI y los hilos de trabajo, que piden conexiones
+/// a su pool cuando las necesitan.
+pub trait DbBackend: Send + Sync {
     // ── Lectura (no modifican el estado del backend) ───────────────────────────
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
     fn list_tables(&self, database: &str) -> DbResult<Vec<String>>;
+    /// Pares (BBDD, tabla) de todo el servidor, en una sola consulta.
+    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>>;
 
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
@@ -136,26 +145,32 @@ pub trait DbBackend: Send {
     /// SQL del editor, en una conexión propia que se mantiene entre
     /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
     /// tablas temporales siguen vivas en la siguiente. Con `db`, antes `USE`.
-    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
+    /// Lee como mucho `max_rows` filas (el resto se descarta, `truncated`).
+    fn execute_in_session(
+        &self,
+        db: Option<&str>,
+        sql: &str,
+        max_rows: usize,
+    ) -> DbResult<QueryResult>;
 
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
+    /// Columnas en orden; las de la clave primaria tienen `column_key` «PRI».
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;
-    fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>>;
 
     // ── Escritura (modifican datos en el servidor) ─────────────────────────────
 
     /// Ejecuta SQL de escritura (INSERT/UPDATE/DELETE/DDL). Devuelve filas afectadas.
-    fn execute_write(&mut self, sql: &str) -> DbResult<u64>;
+    fn execute_write(&self, sql: &str) -> DbResult<u64>;
 
-    fn create_database(&mut self, name: &str, charset: &str) -> DbResult<()>;
-    fn drop_database(&mut self, name: &str) -> DbResult<()>;
-    fn drop_table(&mut self, db: &str, table: &str) -> DbResult<()>;
-    fn truncate_table(&mut self, db: &str, table: &str) -> DbResult<()>;
+    fn create_database(&self, name: &str, charset: &str) -> DbResult<()>;
+    fn drop_database(&self, name: &str) -> DbResult<()>;
+    fn drop_table(&self, db: &str, table: &str) -> DbResult<()>;
+    fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
-    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()>;
+    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
 
     // ── Helpers con implementación por defecto ─────────────────────────────────
 
@@ -187,16 +202,7 @@ pub trait DbBackend: Send {
 
 pub enum ConnectEvent {
     Status(String),
-    Done(DbResult<Box<dyn DbBackend>>),
-}
-
-pub enum QueryEvent {
-    Done {
-        result: DbResult<QueryResult>,
-        backend: Box<dyn DbBackend>,
-        sql: String,
-        elapsed_ms: u64,
-    },
+    Done(DbResult<Arc<dyn DbBackend>>),
 }
 
 pub fn connect_mysql_progress(
@@ -207,7 +213,7 @@ pub fn connect_mysql_progress(
         let _ = tx.send(ConnectEvent::Status(msg.to_string()));
     };
     let result = mysql::MysqlBackend::connect_with_progress(params, send_status)
-        .map(|b| -> Box<dyn DbBackend> { Box::new(b) });
+        .map(|b| -> Arc<dyn DbBackend> { Arc::new(b) });
     let _ = tx.send(ConnectEvent::Done(result));
 }
 

@@ -331,22 +331,35 @@ fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
 
 // ── Función principal ─────────────────────────────────────────────────────────
 
+/// Fila de botones de un formulario. Con `busy` (una escritura en curso) se
+/// desactiva y muestra un spinner: así no se envía dos veces.
+fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!busy, add_buttons);
+        if busy {
+            ui.spinner();
+            ui.label("Ejecutando…");
+        }
+    });
+}
+
 /// Renderiza el modal activo sobre todo lo demás.
 /// Debe llamarse desde `update()` después de todos los paneles, pasando `ctx`.
-pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
+/// `busy`: hay una escritura en curso (los formularios esperan su resultado).
+pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAction {
     match modal {
         ModalState::None => ModalAction::None,
         ModalState::CreateDatabase {
             name,
             charset,
             error,
-        } => show_create_database(ctx, name, charset, error),
+        } => show_create_database(ctx, name, charset, error, busy),
         ModalState::CreateTable {
             db,
             name,
             columns,
             error,
-        } => show_create_table(ctx, db, name, columns, error),
+        } => show_create_table(ctx, db, name, columns, error, busy),
         ModalState::ConfirmDrop {
             kind,
             target,
@@ -399,7 +412,7 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState) -> ModalAction {
             new_name,
             copy_data,
             error,
-        } => show_clone_table(ctx, db, table, new_name, copy_data, error),
+        } => show_clone_table(ctx, db, table, new_name, copy_data, error, busy),
         ModalState::Error { title, message } => show_error(ctx, title, message),
         ModalState::ExportData {
             source_db,
@@ -435,6 +448,7 @@ fn show_create_database(
     name: &mut String,
     charset: &mut String,
     error: &mut Option<String>,
+    busy: bool,
 ) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
@@ -477,9 +491,10 @@ fn show_create_database(
             }
 
             ui.separator();
-            ui.horizontal(|ui| {
+            form_buttons(ui, busy, |ui| {
                 let create_clicked = theme::primary_button(ui, "Crear").clicked();
-                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let enter_pressed =
+                    ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (create_clicked || enter_pressed) && !name.trim().is_empty() {
                     action = ModalAction::CreateDatabase {
                         name: name.trim().to_string(),
@@ -507,6 +522,7 @@ fn show_create_table(
     name: &mut String,
     columns: &mut Vec<NewColumnDef>,
     error: &mut Option<String>,
+    busy: bool,
 ) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
@@ -619,7 +635,7 @@ fn show_create_table(
             }
 
             ui.separator();
-            ui.horizontal(|ui| {
+            form_buttons(ui, busy, |ui| {
                 if theme::primary_button(ui, "Crear tabla").clicked()
                     && !name.trim().is_empty()
                     && !columns.is_empty()
@@ -1151,6 +1167,7 @@ fn show_clone_table(
     new_name: &mut String,
     copy_data: &mut bool,
     error: &mut Option<String>,
+    busy: bool,
 ) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
@@ -1182,7 +1199,7 @@ fn show_clone_table(
                 theme::error_card(ui, &format!("Error: {err}"));
             }
             ui.separator();
-            ui.horizontal(|ui| {
+            form_buttons(ui, busy, |ui| {
                 let ok = theme::primary_button_enabled(
                     ui,
                     !new_name.is_empty(),

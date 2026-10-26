@@ -1,17 +1,23 @@
-use std::collections::HashMap;
+mod jobs;
+mod schema;
+mod writes;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use self::jobs::{JobResult, Jobs};
+pub use self::schema::SchemaCache;
+use self::schema::show_loading;
+use self::writes::AfterCommit;
 use crate::db::{
-    ColumnInfo, ConnectEvent, ConnectionParams, DatabaseInfo, DbBackend, ExportDestination,
-    ExportEvent, ExportOptions, QueryResult, Statement, TableInfo, connect_mysql_progress,
-    escape_ident, escape_sql,
+    ConnectEvent, ConnectionParams, DbBackend, DbResult, ExportDestination, ExportEvent,
+    ExportOptions, QueryResult, Statement, connect_mysql_progress, escape_ident, escape_sql,
 };
+use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
 use crate::secrets;
@@ -43,10 +49,8 @@ pub enum ConnState {
         status: String,
         start: Instant,
     },
-    Connected(Box<dyn DbBackend>),
-    /// Backend cedido temporalmente a un hilo de query; la UI sigue mostrando
-    /// la pantalla connected (con spinner en el grid).
-    QueryRunning,
+    /// Compartido con los hilos de trabajo.
+    Connected(Arc<dyn DbBackend>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,18 +61,6 @@ pub enum SelectedNode {
 }
 
 // ── Sub-structs de estado ─────────────────────────────────────────────────────
-
-/// Árbol de esquema visible en el sidebar + cachés de info de servidor.
-#[derive(Default)]
-pub struct SchemaCache {
-    pub databases: Vec<String>,
-    pub tables_cache: HashMap<String, Vec<String>>,
-    pub table_search: String,
-    pub selected_node: Option<SelectedNode>,
-    pub databases_info: Option<Vec<DatabaseInfo>>,
-    pub tables_info: HashMap<String, Vec<TableInfo>>,
-    pub columns_info: HashMap<(String, String), Vec<ColumnInfo>>,
-}
 
 /// Datos de la tabla activa: resultado de query, edición inline, selección de filas.
 #[derive(Default)]
@@ -89,7 +81,12 @@ pub struct TableViewState {
     pub last_selected_row: Option<usize>,
     pub drag_select_from: Option<usize>,
     pub query_loading: bool,
-    pub query_receiver: Option<std::sync::mpsc::Receiver<crate::db::QueryEvent>>,
+    /// Guardando los cambios pendientes: el grid no admite más hasta saber
+    /// el resultado.
+    pub saving: bool,
+    /// Se incrementa con cada consulta de la tabla: los resultados de una
+    /// anterior que lleguen tarde se descartan.
+    pub data_generation: u64,
 }
 
 // ── Estado compartido entre sesiones ─────────────────────────────────────────
@@ -162,6 +159,12 @@ pub struct Session {
     pub selected_profile_idx: Option<usize>,
     pub profile_name: String,
     pub save_password: bool,
+    /// Trabajos contra la BD en segundo plano.
+    jobs: Jobs,
+    /// Escrituras lanzadas y aún sin resultado.
+    writes_in_flight: usize,
+    /// Ejecuciones del editor SQL lanzadas: identifican su pestaña.
+    editor_runs: u64,
     /// Contraseñas que un hilo terminó de guardar en el llavero: (id del perfil, resultado).
     keyring_tx: mpsc::Sender<(String, Result<(), String>)>,
     keyring_rx: Receiver<(String, Result<(), String>)>,
@@ -190,6 +193,9 @@ impl Session {
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
+            jobs: Jobs::default(),
+            writes_in_flight: 0,
+            editor_runs: 0,
             keyring_tx,
             keyring_rx,
         }
@@ -203,27 +209,21 @@ impl Session {
         }
     }
 
-    /// Conectando o con una query en curso.
+    /// Conectando o cargando la tabla.
     pub fn is_busy(&self) -> bool {
-        matches!(
-            self.state,
-            ConnState::Connecting { .. } | ConnState::QueryRunning
-        )
+        matches!(self.state, ConnState::Connecting { .. })
+            || self.table_view.query_loading
+            || self.writes_in_flight > 0
     }
 
     pub fn is_connected(&self) -> bool {
-        matches!(
-            self.state,
-            ConnState::Connected(_) | ConnState::QueryRunning
-        )
+        matches!(self.state, ConnState::Connected(_))
     }
 
     /// Host y BBDD activa para la barra de estado.
     pub fn status(&self) -> (Option<String>, Option<String>) {
         let host = match &self.state {
-            ConnState::Connected(_) | ConnState::QueryRunning => {
-                Some(format!("{}:{}", self.params.host, self.params.port))
-            }
+            ConnState::Connected(_) => Some(format!("{}:{}", self.params.host, self.params.port)),
             ConnState::Connecting { host, .. } => Some(format!("Conectando a {}…", host)),
             ConnState::Disconnected => None,
         };
@@ -246,39 +246,90 @@ impl Session {
         }
     }
 
-    /// Vuelve al formulario. La query en curso, si la hay, se descarta: sin
-    /// esto su resultado reconectaba la sesión al llegar.
+    /// Vuelve al formulario. La query en curso, si la hay, se descarta: su
+    /// resultado ya no corresponde a nada que se esté mostrando.
     fn disconnect(&mut self) {
         self.state = ConnState::Disconnected;
-        self.table_view.query_receiver = None;
+        self.jobs.new_epoch();
         self.table_view.query_loading = false;
+        for tab in &mut self.sql_tabs {
+            tab.running = None;
+        }
     }
 }
 
 // ── Métodos auxiliares ────────────────────────────────────────────────────────
 
 impl Session {
-    fn run_query_async(&mut self, sql: String) {
-        let backend = match std::mem::replace(&mut self.state, ConnState::QueryRunning) {
-            ConnState::Connected(b) => b,
-            other => {
-                self.state = other;
-                return;
-            }
+    /// Lanza un trabajo en segundo plano; false si no hay conexión.
+    fn spawn_job(
+        &mut self,
+        job: impl FnOnce(&dyn DbBackend) -> JobResult + Send + 'static,
+    ) -> bool {
+        let ConnState::Connected(backend) = &self.state else {
+            return false;
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.table_view.query_receiver = Some(rx);
-        self.table_view.query_loading = true;
-        std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            let result = backend.execute_query(&sql);
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let _ = tx.send(crate::db::QueryEvent::Done {
-                result,
-                backend,
+        self.jobs.spawn(backend, job);
+        true
+    }
+
+    /// Ejecuta SQL del editor en segundo plano; el resultado irá a la pestaña
+    /// `tab_idx` (aunque cambie de posición entretanto).
+    fn run_editor(&mut self, tab_idx: usize, sql: String, db_context: String, max_rows: usize) {
+        self.editor_runs += 1;
+        let token = self.editor_runs;
+        let spawned = self.spawn_job(move |b| {
+            let start = Instant::now();
+            let db = (!db_context.is_empty()).then_some(db_context.as_str());
+            let result = b.execute_in_session(db, &sql, max_rows);
+            JobResult::Editor {
+                token,
                 sql,
-                elapsed_ms,
-            });
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                result,
+            }
+        });
+        if spawned && let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
+            tab.running = Some(token);
+        }
+    }
+
+    fn apply_editor_result(
+        &mut self,
+        token: u64,
+        sql: String,
+        elapsed_ms: u64,
+        result: DbResult<QueryResult>,
+    ) {
+        match &result {
+            Ok(data) => self.push_log(LogEntry::ok(sql, elapsed_ms, data.rows.len())),
+            Err(e) => self.push_log(LogEntry::err(sql, elapsed_ms, e.as_str())),
+        }
+        // La pestaña puede haberse cerrado mientras tanto
+        if let Some(tab) = self.sql_tabs.iter_mut().find(|t| t.running == Some(token)) {
+            tab.running = None;
+            tab.result = Some(result);
+        }
+    }
+
+    /// Carga los datos de la tabla en segundo plano. Sustituye a la consulta
+    /// en curso, si la hay.
+    fn run_query_async(&mut self, sql: String) {
+        if !self.is_connected() {
+            return;
+        }
+        self.table_view.data_generation += 1;
+        let generation = self.table_view.data_generation;
+        self.table_view.query_loading = true;
+        self.spawn_job(move |b| {
+            let start = Instant::now();
+            let result = b.execute_query(&sql);
+            JobResult::TableData {
+                generation,
+                sql,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                result,
+            }
         });
     }
 
@@ -343,85 +394,12 @@ impl Session {
         }
     }
 
-    fn load_primary_keys(&mut self, db: &str, table: &str) {
-        let result = match &mut self.state {
-            ConnState::Connected(b) => b.get_primary_keys(db, table),
-            _ => return,
-        };
-        self.table_view.primary_keys = result.unwrap_or_default();
-    }
-
-    fn load_databases_info(&mut self) {
-        let result = match &mut self.state {
-            ConnState::Connected(b) => b.get_databases_info(),
-            _ => return,
-        };
-        self.schema.databases_info = result.ok();
-    }
-
-    fn load_tables_info(&mut self, db: &str) {
-        let result = match &mut self.state {
-            ConnState::Connected(b) => b.get_tables_info(db),
-            _ => return,
-        };
-        if let Ok(info) = result {
-            self.schema.tables_info.insert(db.to_string(), info);
-        }
-    }
-
-    fn load_columns_info(&mut self, db: &str, table: &str) {
-        let result = match &mut self.state {
-            ConnState::Connected(b) => b.get_columns_info(db, table),
-            _ => return,
-        };
-        if let Ok(cols) = result {
-            self.schema
-                .columns_info
-                .insert((db.to_string(), table.to_string()), cols);
-        }
-    }
-
-    fn maybe_load_tab_data(&mut self) {
-        match self.active_tab {
-            ActiveTab::Servidor => {
-                if self.schema.databases_info.is_none() {
-                    self.load_databases_info();
-                }
-            }
-            ActiveTab::Bbdd => {
-                let db = match &self.schema.selected_node {
-                    Some(SelectedNode::Database(d)) => Some(d.clone()),
-                    Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                    _ => None,
-                };
-                if let Some(db) = db
-                    && !self.schema.tables_info.contains_key(&db)
-                {
-                    self.load_tables_info(&db);
-                }
-            }
-            ActiveTab::Tabla => {
-                let key = match &self.schema.selected_node {
-                    Some(SelectedNode::Table { db, table }) => Some((db.clone(), table.clone())),
-                    _ => None,
-                };
-                if let Some((db, table)) = key {
-                    let k = (db.clone(), table.clone());
-                    if !self.schema.columns_info.contains_key(&k) {
-                        self.load_columns_info(&db, &table);
-                    }
-                }
-            }
-            ActiveTab::Sql(_) | ActiveTab::Datos => {}
-        }
-    }
-
     /// Tras escribir en `db` (crear, clonar, vaciar…): descarta sus cachés de
     /// esquema para que se vuelvan a leer. No toca la tabla abierta.
     fn invalidate_schema(&mut self, db: &str) {
-        self.schema.databases_info = None;
+        self.schema.databases_info = Loadable::NotLoaded;
         // Recargar lista de bases de datos del sidebar
-        self.schema.databases.clear();
+        self.schema.databases = Loadable::NotLoaded;
         self.schema.tables_cache.remove(db);
         self.schema.tables_info.remove(db);
     }
@@ -479,63 +457,6 @@ impl Session {
         }
     }
 
-    /// Aplica los cambios pendientes y recarga la tabla si se guardaron todos.
-    fn apply_pending_changes(&mut self, sh: &Shared) {
-        if self.commit_pending_changes()
-            && let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-        {
-            let sql = self.build_sql(sh, db, table);
-            self.run_query_async(sql);
-        }
-    }
-
-    /// Ejecuta deletes, edits e inserts pendientes en una sola transacción:
-    /// o se guardan todos o ninguno. Devuelve true si no queda ninguno. No
-    /// recarga: el llamante decide, porque la recarga cede el backend a un
-    /// hilo y bloquearía otras operaciones.
-    fn commit_pending_changes(&mut self) -> bool {
-        if self.pending_count() == 0 {
-            return true;
-        }
-        let stmts = match self.pending_statements() {
-            Ok(stmts) => stmts,
-            Err(message) => {
-                self.modal = ModalState::Error {
-                    title: "No se pueden guardar los cambios".into(),
-                    message,
-                };
-                return false;
-            }
-        };
-        let start = Instant::now();
-        let result = match &mut self.state {
-            ConnState::Connected(b) => b.execute_transaction(&stmts),
-            _ => return false,
-        };
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let summary = format!(
-            "Guardar cambios: {} eliminación(es), {} edición(es), {} inserción(es) (transacción)",
-            self.table_view.pending_deletes.len(),
-            self.table_view.pending_edits.len(),
-            self.table_view.pending_inserts.len()
-        );
-        match result {
-            Ok(()) => {
-                self.push_log(LogEntry::ok(summary, duration_ms, stmts.len()));
-                self.discard_pending();
-                true
-            }
-            Err(e) => {
-                self.push_log(LogEntry::err(summary, duration_ms, &e));
-                self.modal = ModalState::Error {
-                    title: "Error al guardar".into(),
-                    message: e,
-                };
-                false
-            }
-        }
-    }
-
     /// Sentencias de los cambios pendientes: DELETE, UPDATE (uno por fila,
     /// con todas sus celdas editadas) e INSERT, con los valores como
     /// parámetros. Las filas existentes se identifican por su clave primaria.
@@ -547,6 +468,11 @@ impl Session {
         let data = tv.table_data.as_ref().ok_or("No hay datos cargados.")?;
         let target = format!("`{}`.`{}`", escape_ident(db), escape_ident(table));
         let edits_rows = !tv.pending_deletes.is_empty() || !tv.pending_edits.is_empty();
+        if edits_rows && self.schema.open_table_columns().is_none() {
+            return Err(
+                "Aún se está leyendo la estructura de la tabla: inténtalo de nuevo.".into(),
+            );
+        }
         if edits_rows && tv.primary_keys.is_empty() {
             return Err(
                 "La tabla no tiene clave primaria: no se pueden editar ni eliminar filas.".into(),
@@ -627,12 +553,7 @@ impl Session {
         if data.columns.is_empty() {
             return None;
         }
-        let columns_info = match &self.schema.selected_node {
-            Some(SelectedNode::Table { db, table }) => {
-                self.schema.columns_info.get(&(db.clone(), table.clone()))
-            }
-            _ => None,
-        };
+        let columns_info = self.schema.open_table_columns();
         let auto_cols: Vec<bool> = (0..data.columns.len())
             .map(|i| {
                 columns_info
@@ -774,6 +695,10 @@ impl Session {
         let Some(SelectedNode::Table { table, .. }) = &self.schema.selected_node else {
             return;
         };
+        // Al terminar de guardar ya se recarga
+        if self.table_view.saving {
+            return;
+        }
         let pending_count = self.pending_count();
         if pending_count > 0 {
             self.modal = ModalState::ConfirmReload {
@@ -810,11 +735,12 @@ impl Session {
                 self.save_table_state(sh);
             }
             Reload::Refresh => {
-                // Releer la estructura: el grid la usa para las claves, los
-                // NULL y el AUTO_INCREMENT de las filas nuevas. Antes de la
-                // query, que cede el backend a su hilo.
-                self.load_columns_info(&db, &table);
-                self.load_primary_keys(&db, &table);
+                // Releer también la estructura: el grid la usa para las
+                // claves, los NULL y el AUTO_INCREMENT de las filas nuevas.
+                self.schema
+                    .columns_info
+                    .remove(&(db.clone(), table.clone()));
+                self.request_structure(&db, &table);
             }
         }
         let sql = self.build_sql(sh, &db, &table);
@@ -831,6 +757,10 @@ impl Session {
     /// Abre una tabla en la pestaña indicada. Si hay cambios pendientes en la
     /// tabla actual, pide confirmación antes de cambiar.
     fn switch_to_table(&mut self, sh: &mut Shared, db: String, table: String, tab: ActiveTab) {
+        // Los cambios que se están guardando son de la tabla abierta
+        if self.table_view.saving {
+            return;
+        }
         let already_selected = matches!(
             &self.schema.selected_node,
             Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
@@ -884,12 +814,10 @@ impl Session {
         // 4. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
         self.table_view.sort_specs = ts.sort_specs.clone();
 
-        // 5. Cargar claves primarias e info de columnas (antes de run_query_async, que cambia el estado a QueryRunning)
-        self.load_primary_keys(&db, &table);
-        let col_key = (db.clone(), table.clone());
-        if !self.schema.columns_info.contains_key(&col_key) {
-            self.load_columns_info(&db, &table);
-        }
+        // 5. Estructura (columnas y claves primarias): de la caché o del servidor
+        self.table_view.primary_keys.clear();
+        self.request_structure(&db, &table);
+        self.sync_primary_keys();
 
         // 6. Ejecutar query (server-side sort + filter restaurados)
         let sql = self.build_sql(sh, &db, &table);
@@ -910,13 +838,11 @@ impl Session {
         settings::save(&sh.settings);
     }
 
-    fn on_connected(&mut self, backend: Box<dyn DbBackend>, sh: &mut Shared) {
+    fn on_connected(&mut self, backend: Arc<dyn DbBackend>, sh: &mut Shared) {
         self.state = ConnState::Connected(backend);
+        self.jobs.new_epoch();
         self.error_message = None;
-        self.schema.databases.clear();
-        self.schema.tables_cache.clear();
-        self.schema.table_search.clear();
-        self.schema.selected_node = None;
+        self.schema = SchemaCache::default();
         self.active_tab = ActiveTab::default();
         self.table_view.table_data = None;
         self.table_view.pending_deletes.clear();
@@ -925,7 +851,6 @@ impl Session {
         self.table_view.last_selected_row = None;
         self.table_view.drag_select_from = None;
         self.table_view.query_loading = false;
-        self.table_view.query_receiver = None;
         self.table_view.table_error = None;
         self.table_view.sort_specs.clear();
         self.table_view.sort_indices.clear();
@@ -934,9 +859,6 @@ impl Session {
         self.table_view.editing_cell = None;
         self.table_view.primary_keys.clear();
         self.modal = ModalState::None;
-        self.schema.databases_info = None;
-        self.schema.tables_info.clear();
-        self.schema.columns_info.clear();
         // Restaurar las pestañas SQL de esta conexión. Las guardadas antes de
         // haber conexiones múltiples las hereda la primera que no tenga propias.
         let key = self.params.key();
@@ -956,7 +878,7 @@ impl Session {
                 .map(|t| SqlTab {
                     db_context: t.db_context.clone(),
                     sql_text: t.sql_text.clone(),
-                    result: None,
+                    ..Default::default()
                 })
                 .collect()
         };
@@ -991,7 +913,7 @@ fn pk_condition(
 impl Session {
     /// Sondea el canal del hilo de conexión y actualiza el estado si terminó.
     fn poll_connection(&mut self, ctx: &egui::Context, sh: &mut Shared) {
-        let mut connect_result: Option<Result<Box<dyn DbBackend>, String>> = None;
+        let mut connect_result: Option<Result<Arc<dyn DbBackend>, String>> = None;
         if let ConnState::Connecting {
             receiver, status, ..
         } = &mut self.state
@@ -1029,53 +951,66 @@ impl Session {
         }
     }
 
-    /// Sondea el canal de query asíncrona y actualiza la vista si terminó.
-    fn poll_query_receiver(&mut self, ctx: &egui::Context) {
-        let mut query_done: Option<crate::db::QueryEvent> = None;
-        if let Some(rx) = &self.table_view.query_receiver {
-            match rx.try_recv() {
-                Ok(evt) => query_done = Some(evt),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(Duration::from_millis(50));
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.table_view.query_receiver = None;
-                    self.table_view.query_loading = false;
-                }
-            }
+    /// Aplica los resultados de los trabajos en segundo plano que hayan
+    /// terminado.
+    fn poll_jobs(&mut self, ctx: &egui::Context, sh: &mut Shared) {
+        while let Some(result) = self.jobs.try_recv(ctx) {
+            self.apply_job(sh, result);
         }
-        if let Some(crate::db::QueryEvent::Done {
-            result,
-            backend,
-            sql,
-            elapsed_ms,
-        }) = query_done
-        {
-            self.table_view.query_receiver = None;
-            self.table_view.query_loading = false;
-            self.state = ConnState::Connected(backend);
-            match result {
-                Ok(data) => {
-                    // Toda recarga pasa por request_reload, que antes resuelve
-                    // los cambios pendientes. Si alguna se lo salta, mejor
-                    // perderlos que aplicarlos a las filas que ahora ocupan
-                    // esas posiciones.
-                    if self.pending_count() > 0 {
-                        log::warn!("Datos recargados con cambios pendientes: se descartan");
-                        self.discard_pending();
-                    }
-                    let rows = data.rows.len();
-                    self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
-                    self.table_view.sort_indices = (0..rows).collect();
-                    self.table_view.table_data = Some(data);
-                    self.table_view.table_error = None;
+    }
+
+    fn apply_job(&mut self, sh: &mut Shared, result: JobResult) {
+        match result {
+            JobResult::TableData {
+                generation,
+                sql,
+                elapsed_ms,
+                result,
+            } => self.apply_table_data(generation, sql, elapsed_ms, result),
+            JobResult::Schema(result) => self.apply_schema_job(result),
+            JobResult::Write(done) => self.apply_write(sh, done),
+            JobResult::Editor {
+                token,
+                sql,
+                elapsed_ms,
+                result,
+            } => self.apply_editor_result(token, sql, elapsed_ms, result),
+        }
+    }
+
+    fn apply_table_data(
+        &mut self,
+        generation: u64,
+        sql: String,
+        elapsed_ms: u64,
+        result: DbResult<QueryResult>,
+    ) {
+        // Otra consulta posterior ya la ha sustituido
+        if generation != self.table_view.data_generation {
+            return;
+        }
+        self.table_view.query_loading = false;
+        match result {
+            Ok(data) => {
+                // Toda recarga pasa por request_reload, que antes resuelve
+                // los cambios pendientes. Si alguna se lo salta, mejor
+                // perderlos que aplicarlos a las filas que ahora ocupan
+                // esas posiciones.
+                if self.pending_count() > 0 {
+                    log::warn!("Datos recargados con cambios pendientes: se descartan");
+                    self.discard_pending();
                 }
-                Err(e) => {
-                    self.push_log(LogEntry::err(sql, elapsed_ms, &e));
-                    self.table_view.table_data = None;
-                    self.table_view.table_error = Some(e);
-                    self.table_view.sort_indices.clear();
-                }
+                let rows = data.rows.len();
+                self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
+                self.table_view.sort_indices = (0..rows).collect();
+                self.table_view.table_data = Some(data);
+                self.table_view.table_error = None;
+            }
+            Err(e) => {
+                self.push_log(LogEntry::err(sql, elapsed_ms, &e));
+                self.table_view.table_data = None;
+                self.table_view.table_error = Some(e);
+                self.table_view.sort_indices.clear();
             }
         }
     }
@@ -1171,31 +1106,62 @@ impl Session {
         }
     }
 
-    /// Tablas de una BBDD: usa la caché del sidebar o, si el árbol aún no
-    /// la ha cargado, las pide al backend (y las deja en la caché).
-    fn table_names(&mut self, db: &str) -> Result<Vec<String>, String> {
-        if let Some(tables) = self.schema.tables_cache.get(db) {
-            return Ok(tables.clone());
-        }
-        let ConnState::Connected(backend) = &self.state else {
-            return Err("No conectado".into());
+    /// Abre el diálogo de exportación de `db`; con `table`, solo esa sale
+    /// marcada. Si las tablas aún no están cargadas, se piden y la lista se
+    /// rellena al llegar.
+    fn open_export(&mut self, sh: &Shared, db: String, table: Option<String>) {
+        self.request_tables(&db);
+        self.modal = ModalState::ExportData {
+            source_db: db.clone(),
+            source_table: table,
+            tables: Vec::new(),
+            databases: self.schema.databases.ready().cloned().unwrap_or_default(),
+            profiles: sh.profiles.clone(),
+            destination: ExportDestination::SqlFile {
+                path: String::new(),
+            },
+            target_db_name: String::new(),
+            profile_idx: 0,
+            options: ExportOptions::default(),
+            phase: ExportPhase::Configuring,
         };
-        match backend.list_tables(db) {
-            Ok(tables) => {
-                self.schema
-                    .tables_cache
-                    .insert(db.to_string(), tables.clone());
-                Ok(tables)
-            }
-            Err(e) => {
-                self.push_log(LogEntry::err(
-                    format!("SHOW TABLES FROM `{db}`"),
-                    0,
-                    e.as_str(),
-                ));
-                Err(e)
-            }
+        self.fill_export_tables(&db);
+    }
+
+    /// Rellena la lista de tablas del diálogo de exportación de `db`, si está
+    /// abierto y esperándolas.
+    pub(super) fn fill_export_tables(&mut self, db: &str) {
+        let ModalState::ExportData {
+            source_db,
+            source_table,
+            tables: entries,
+            phase: ExportPhase::Configuring,
+            ..
+        } = &mut self.modal
+        else {
+            return;
+        };
+        if source_db != db || !entries.is_empty() {
+            return;
         }
+        let mut names = match self.schema.tables_cache.get(db) {
+            Some(Loadable::Ready(tables)) => tables.clone(),
+            Some(Loadable::Failed(_)) => Vec::new(),
+            _ => return,
+        };
+        if names.is_empty()
+            && let Some(table) = source_table
+        {
+            names.push(table.clone());
+        }
+        *entries = names
+            .into_iter()
+            .map(|name| TableExportEntry {
+                selected: source_table.as_ref().is_none_or(|t| *t == name),
+                name,
+                state: TableExportState::Pending,
+            })
+            .collect();
     }
 
     /// Procesa la acción resultante del modal activo.
@@ -1207,10 +1173,11 @@ impl Session {
             }
             ModalAction::ApplyAndSwitch { new_db, new_table } => {
                 self.modal = ModalState::None;
-                if self.commit_pending_changes() {
-                    self.on_table_selected(sh, new_db, new_table);
-                    self.active_tab = ActiveTab::Datos;
-                }
+                let then = AfterCommit::Switch {
+                    db: new_db,
+                    table: new_table,
+                };
+                self.commit_pending_changes(sh, then);
             }
             ModalAction::DiscardAndSwitch { new_db, new_table } => {
                 self.modal = ModalState::None;
@@ -1219,138 +1186,35 @@ impl Session {
             }
             ModalAction::ApplyAndReload(reload) => {
                 self.modal = ModalState::None;
-                if self.commit_pending_changes() {
-                    self.reload_now(sh, reload);
-                }
+                self.commit_pending_changes(sh, AfterCommit::Reload(reload));
             }
             ModalAction::DiscardAndReload(reload) => {
                 self.modal = ModalState::None;
                 self.discard_pending();
                 self.reload_now(sh, reload);
             }
-            ModalAction::CreateDatabase { name, charset } => {
-                let result = match &mut self.state {
-                    ConnState::Connected(b) => b.create_database(&name, &charset),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("CREATE DATABASE `{name}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("CREATE DATABASE `{name}`"), 0, e));
-                }
-                match result {
-                    Ok(()) => {
-                        self.modal = ModalState::None;
-                        self.schema.databases.clear();
-                        self.schema.databases_info = None;
-                    }
-                    Err(e) => {
-                        if let ModalState::CreateDatabase { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
+            // Escrituras: en segundo plano. Los formularios siguen abiertos
+            // hasta saber el resultado; las confirmaciones se cierran ya.
+            ModalAction::CreateDatabase { name, charset } => self.create_database(name, charset),
             ModalAction::CreateTable { db, name, columns } => {
                 let sql = modals::build_create_table_sql(&db, &name, &columns);
-                let result = self.run_write(&sql);
-                match result {
-                    Ok(_) => {
-                        self.modal = ModalState::None;
-                        self.invalidate_schema(&db);
-                    }
-                    Err(e) => {
-                        if let ModalState::CreateTable { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
+                self.create_table(db, sql);
             }
             ModalAction::DropDatabase(db) => {
-                let result = match &mut self.state {
-                    ConnState::Connected(b) => b.drop_database(&db),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("DROP DATABASE `{db}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("DROP DATABASE `{db}`"), 0, e));
-                }
                 self.modal = ModalState::None;
-                if result.is_ok() {
-                    self.on_dropped(&db, None);
-                }
+                self.drop_database(db);
             }
             ModalAction::DropTable { db, table } => {
-                let result = match &mut self.state {
-                    ConnState::Connected(b) => b.drop_table(&db, &table),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(format!("DROP TABLE `{db}`.`{table}`"), 0, 0));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(format!("DROP TABLE `{db}`.`{table}`"), 0, e));
-                }
                 self.modal = ModalState::None;
-                if result.is_ok() {
-                    self.on_dropped(&db, Some(&table));
-                }
+                self.drop_table(db, table);
             }
             ModalAction::TruncateTable { db, table } => {
-                let result = match &mut self.state {
-                    ConnState::Connected(b) => b.truncate_table(&db, &table),
-                    _ => Err("No conectado".into()),
-                };
-                if let Ok(()) = &result {
-                    self.push_log(LogEntry::ok(
-                        format!("TRUNCATE TABLE `{db}`.`{table}`"),
-                        0,
-                        0,
-                    ));
-                } else if let Err(ref e) = result {
-                    self.push_log(LogEntry::err(
-                        format!("TRUNCATE TABLE `{db}`.`{table}`"),
-                        0,
-                        e,
-                    ));
-                }
                 self.modal = ModalState::None;
-                if result.is_ok() {
-                    self.after_truncate(sh, &db, &[table]);
-                }
+                self.truncate(db, Some(vec![table]));
             }
             ModalAction::TruncateAllTables(db) => {
                 self.modal = ModalState::None;
-                // El árbol puede no haber cargado aún las tablas de esta BBDD
-                let tables = match self.table_names(&db) {
-                    Ok(tables) => tables,
-                    Err(message) => {
-                        self.modal = ModalState::Error {
-                            title: format!("No se pudieron listar las tablas de «{db}»"),
-                            message,
-                        };
-                        return;
-                    }
-                };
-                let failed: Vec<String> = tables
-                    .iter()
-                    .filter_map(|table| {
-                        self.run_write(&format!(
-                            "TRUNCATE TABLE `{}`.`{}`",
-                            escape_ident(&db),
-                            escape_ident(table)
-                        ))
-                        .err()
-                        .map(|e| format!("{table}: {e}"))
-                    })
-                    .collect();
-                self.after_truncate(sh, &db, &tables);
-                if !failed.is_empty() {
-                    self.modal = ModalState::Error {
-                        title: format!("No se pudieron vaciar todas las tablas de «{db}»"),
-                        message: failed.join("\n"),
-                    };
-                }
+                self.truncate(db, None);
             }
             ModalAction::ApplyFilter { sql_fragment } => {
                 self.modal = ModalState::None;
@@ -1395,41 +1259,7 @@ impl Session {
                 src_table,
                 new_name,
                 copy_data,
-            } => {
-                let create_sql = format!(
-                    "CREATE TABLE `{}`.`{}` LIKE `{}`.`{}`",
-                    db.replace('`', "``"),
-                    new_name.replace('`', "``"),
-                    db.replace('`', "``"),
-                    src_table.replace('`', "``")
-                );
-                match self.run_write(&create_sql) {
-                    Ok(_) => {
-                        if copy_data {
-                            let insert_sql = format!(
-                                "INSERT INTO `{}`.`{}` SELECT * FROM `{}`.`{}`",
-                                db.replace('`', "``"),
-                                new_name.replace('`', "``"),
-                                db.replace('`', "``"),
-                                src_table.replace('`', "``")
-                            );
-                            if let Err(e) = self.run_write(&insert_sql) {
-                                if let ModalState::CloneTable { error, .. } = &mut self.modal {
-                                    *error = Some(e);
-                                }
-                                return;
-                            }
-                        }
-                        self.modal = ModalState::None;
-                        self.invalidate_schema(&db);
-                    }
-                    Err(e) => {
-                        if let ModalState::CloneTable { error, .. } = &mut self.modal {
-                            *error = Some(e);
-                        }
-                    }
-                }
-            }
+            } => self.clone_table(db, src_table, new_name, copy_data),
             ModalAction::InsertRow {
                 db,
                 table,
@@ -1522,7 +1352,7 @@ impl Session {
     /// llama en todas las sesiones, no solo en la visible.
     pub fn poll(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         self.poll_connection(ctx, sh);
-        self.poll_query_receiver(ctx);
+        self.poll_jobs(ctx, sh);
         self.poll_export_progress(ctx);
         self.poll_keyring(sh);
     }
@@ -1567,7 +1397,7 @@ impl Session {
 
         // ── Proactive data loading for current tab ────────────────────────
         if matches!(&self.state, ConnState::Connected(_)) {
-            self.maybe_load_tab_data();
+            self.request_tab_data();
         }
 
         // ── Señales del frame ────────────────────────────────────────────
@@ -1577,6 +1407,8 @@ impl Session {
         let mut delete_profile = false;
         let mut profile_selected: Option<usize> = None;
         let mut sidebar_action = SidebarAction::None;
+        let mut sidebar_loads: Vec<String> = Vec::new();
+        let mut sidebar_loads_all = false;
         let mut filter_action = filter_bar::FilterAction::None;
         let mut grid_action = GridAction::None;
         let mut apply_bar_action = GridAction::None;
@@ -1670,15 +1502,10 @@ impl Session {
                 });
             }
 
-            state @ (ConnState::Connected(_) | ConnState::QueryRunning) => {
-                // Con una query en curso el backend está cedido al hilo: el
-                // sidebar trabaja con la caché (None = no hacer queries) y el
-                // contenido se muestra sin aplicar sus acciones.
-                let backend = match state {
-                    ConnState::Connected(b) => Some(b.as_ref()),
-                    _ => None,
-                };
-                let running = backend.is_none();
+            ConnState::Connected(_) => {
+                // Mientras carga la tabla, el grid se muestra sin aplicar sus
+                // acciones: irían por posición sobre los datos anteriores.
+                let running = self.table_view.query_loading || self.table_view.saving;
 
                 // ── Sidebar ───────────────────────────────────────────────
                 if show_sidebar {
@@ -1697,9 +1524,8 @@ impl Session {
                             ui.push_id(sid, |ui| {
                                 sidebar::show(
                                     ui,
-                                    backend,
-                                    &mut self.schema.databases,
-                                    &mut self.schema.tables_cache,
+                                    &self.schema.databases,
+                                    &self.schema.tables_cache,
                                     sel_db,
                                     sel_table,
                                     &mut self.schema.table_search,
@@ -1712,7 +1538,10 @@ impl Session {
                             })
                             .inner
                         });
-                    sidebar_action = sidebar_panel.inner;
+                    let output = sidebar_panel.inner;
+                    sidebar_action = output.action;
+                    sidebar_loads = output.load_tables;
+                    sidebar_loads_all = output.load_all_tables;
 
                     // Borde del árbol con el color de la conexión. Sube sobre la
                     // línea de las pestañas para no duplicar su grosor.
@@ -1772,7 +1601,7 @@ impl Session {
                     || !self.table_view.pending_inserts.is_empty();
                 if !running && self.active_tab == ActiveTab::Datos && has_pending {
                     // pk_missing solo bloquea si hay edits pendientes (DELETE e INSERT no requieren PK en la UI)
-                    let pk_missing = self.table_view.table_data.is_some()
+                    let pk_missing = self.schema.open_table_columns().is_some()
                         && self.table_view.primary_keys.is_empty()
                         && !self.table_view.pending_edits.is_empty();
                     let apply_frame =
@@ -1809,25 +1638,17 @@ impl Session {
                                     ui,
                                     &mut self.table_view.filter_text,
                                     f9 && !running,
-                                    &self.table_view.filter_history.clone(),
+                                    &self.table_view.filter_history,
                                 );
                                 if !running {
                                     filter_action = action;
                                 }
                                 ui.separator();
                             }
-                            let col_info_key = match &self.schema.selected_node {
-                                Some(SelectedNode::Table { db, table }) => {
-                                    Some((db.clone(), table.clone()))
-                                }
-                                _ => None,
-                            };
-                            let empty_cols: Vec<ColumnInfo> = Vec::new();
-                            let col_info_slice = col_info_key
-                                .as_ref()
-                                .and_then(|k| self.schema.columns_info.get(k))
-                                .map(|v| v.as_slice())
-                                .unwrap_or(empty_cols.as_slice());
+                            let col_info_slice = self
+                                .schema
+                                .open_table_columns()
+                                .map_or(&[][..], Vec::as_slice);
                             let action = results_grid::show(
                                 ui,
                                 &selected_table,
@@ -1846,7 +1667,7 @@ impl Session {
                                 &self.table_view.primary_keys,
                                 col_info_slice,
                                 // Con query en curso: spinner en el grid
-                                self.table_view.query_loading || running,
+                                running,
                             );
                             if !running {
                                 grid_action = action;
@@ -1855,17 +1676,10 @@ impl Session {
                             }
                         }
 
-                        _ if running => {
-                            ui.centered_and_justified(|ui| {
-                                ui.spinner();
-                                ui.label("Ejecutando consulta…");
-                            });
-                        }
-
-                        ActiveTab::Servidor => {
-                            let dbs = self.schema.databases_info.as_deref().unwrap_or(&[]);
-                            server_info::show(ui, &self.params.host, dbs);
-                        }
+                        ActiveTab::Servidor => match &self.schema.databases_info {
+                            Loadable::Ready(dbs) => server_info::show(ui, &self.params.host, dbs),
+                            other => show_loading(ui, other),
+                        },
 
                         ActiveTab::Bbdd => {
                             let db_name = match &self.schema.selected_node {
@@ -1874,9 +1688,14 @@ impl Session {
                                 _ => None,
                             };
                             if let Some(db) = &db_name {
-                                let empty = Vec::new();
-                                let tables = self.schema.tables_info.get(db).unwrap_or(&empty);
-                                db_info_action = db_info::show(ui, db, tables);
+                                match self.schema.tables_info.get(db) {
+                                    Some(Loadable::Ready(tables)) => {
+                                        db_info_action = db_info::show(ui, db, tables);
+                                    }
+                                    other => {
+                                        show_loading(ui, other.unwrap_or(&Loadable::NotLoaded))
+                                    }
+                                }
                             } else {
                                 ui.centered_and_justified(|ui| {
                                     ui.label("Selecciona una base de datos en el panel izquierdo");
@@ -1886,12 +1705,17 @@ impl Session {
 
                         ActiveTab::Tabla => {
                             if let Some(SelectedNode::Table { db, table }) =
-                                &self.schema.selected_node.clone()
+                                &self.schema.selected_node
                             {
                                 let key = (db.clone(), table.clone());
-                                let empty = Vec::new();
-                                let cols = self.schema.columns_info.get(&key).unwrap_or(&empty);
-                                table_structure::show(ui, db, table, cols);
+                                match self.schema.columns_info.get(&key) {
+                                    Some(Loadable::Ready(cols)) => {
+                                        table_structure::show(ui, db, table, cols);
+                                    }
+                                    other => {
+                                        show_loading(ui, other.unwrap_or(&Loadable::NotLoaded))
+                                    }
+                                }
                             } else {
                                 ui.centered_and_justified(|ui| {
                                     ui.label("Selecciona una tabla en el panel izquierdo");
@@ -1901,15 +1725,16 @@ impl Session {
 
                         ActiveTab::Sql(tab_idx) => {
                             if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
-                                let result_clone = tab.result.clone();
-                                let databases_clone = self.schema.databases.clone();
+                                let databases =
+                                    self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
                                 sql_action = sql_editor::show(
                                     ui,
                                     &mut tab.sql_text,
-                                    &result_clone,
+                                    &tab.result,
+                                    tab.running.is_some(),
                                     f9,
                                     &mut tab.db_context,
-                                    &databases_clone,
+                                    databases,
                                 );
                             }
                         }
@@ -1919,7 +1744,7 @@ impl Session {
         }
 
         // ── Modal (sobre todo) ────────────────────────────────────────────
-        let modal_action = modals_ui::show(ctx, &mut self.modal);
+        let modal_action = modals_ui::show(ctx, &mut self.modal, self.writes_in_flight > 0);
 
         // ── Aplicar señales ───────────────────────────────────────────────
 
@@ -1944,7 +1769,7 @@ impl Session {
             self.sql_tabs.push(SqlTab {
                 db_context: db_ctx,
                 sql_text: String::new(),
-                result: None,
+                ..Default::default()
             });
             self.active_tab = ActiveTab::Sql(new_idx);
             self.save_tabs_state(sh);
@@ -2015,9 +1840,7 @@ impl Session {
                     needs_focus: true,
                 });
             }
-            GridAction::ApplyEdits => {
-                self.apply_pending_changes(sh);
-            }
+            GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
             GridAction::DiscardEdits => self.discard_pending(),
             GridAction::FilterBy { sql_fragment } => {
                 self.request_reload(sh, Reload::Filter(sql_fragment));
@@ -2141,7 +1964,7 @@ impl Session {
 
         // Apply bar action (solo visible cuando hay cambios pendientes)
         match apply_bar_action {
-            GridAction::ApplyEdits => self.apply_pending_changes(sh),
+            GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
             GridAction::DiscardEdits => self.discard_pending(),
             _ => {}
         }
@@ -2156,9 +1979,6 @@ impl Session {
             SidebarAction::SelectDatabase(db) => {
                 self.schema.selected_node = Some(SelectedNode::Database(db.clone()));
                 self.active_tab = ActiveTab::Bbdd;
-                if !self.schema.tables_info.contains_key(&db) {
-                    self.load_tables_info(&db);
-                }
             }
             SidebarAction::SelectTable { db, table } => {
                 self.switch_to_table(sh, db, table, ActiveTab::Datos);
@@ -2217,12 +2037,7 @@ impl Session {
             SidebarAction::CopyTableName(name) => {
                 ctx.copy_text(name);
             }
-            SidebarAction::Refresh => {
-                self.schema.databases.clear();
-                self.schema.tables_cache.clear();
-                self.schema.databases_info = None;
-                self.schema.tables_info.clear();
-            }
+            SidebarAction::Refresh => self.schema.clear(),
             SidebarAction::Disconnect => {
                 should_disconnect = true;
             }
@@ -2244,7 +2059,7 @@ impl Session {
                 self.sql_tabs.push(SqlTab {
                     db_context: db.clone(),
                     sql_text,
-                    result: None,
+                    ..Default::default()
                 });
                 self.active_tab = ActiveTab::Sql(new_idx);
                 self.save_tabs_state(sh);
@@ -2258,62 +2073,16 @@ impl Session {
                     error: None,
                 };
             }
-            SidebarAction::ExportDatabase(db) => {
-                let tables = self.table_names(&db).unwrap_or_default();
-                let dbs = self.schema.databases.clone();
-                let profiles = sh.profiles.clone();
-                self.modal = ModalState::ExportData {
-                    source_db: db,
-                    source_table: None,
-                    tables: tables
-                        .into_iter()
-                        .map(|n| TableExportEntry {
-                            name: n,
-                            selected: true,
-                            state: TableExportState::Pending,
-                        })
-                        .collect(),
-                    databases: dbs,
-                    profiles,
-                    destination: ExportDestination::SqlFile {
-                        path: String::new(),
-                    },
-                    target_db_name: String::new(),
-                    profile_idx: 0,
-                    options: ExportOptions::default(),
-                    phase: ExportPhase::Configuring,
-                };
-            }
-            SidebarAction::ExportTable { db, table } => {
-                // Mostrar todas las tablas de la BBDD con solo la pulsada marcada.
-                let mut names = self.table_names(&db).unwrap_or_default();
-                if names.is_empty() {
-                    names.push(table.clone());
-                }
-                let dbs = self.schema.databases.clone();
-                let profiles = sh.profiles.clone();
-                self.modal = ModalState::ExportData {
-                    source_db: db,
-                    source_table: Some(table.clone()),
-                    tables: names
-                        .into_iter()
-                        .map(|n| TableExportEntry {
-                            selected: n == table,
-                            name: n,
-                            state: TableExportState::Pending,
-                        })
-                        .collect(),
-                    databases: dbs,
-                    profiles,
-                    destination: ExportDestination::SqlFile {
-                        path: String::new(),
-                    },
-                    target_db_name: String::new(),
-                    profile_idx: 0,
-                    options: ExportOptions::default(),
-                    phase: ExportPhase::Configuring,
-                };
-            }
+            SidebarAction::ExportDatabase(db) => self.open_export(sh, db, None),
+            SidebarAction::ExportTable { db, table } => self.open_export(sh, db, Some(table)),
+        }
+
+        // Datos que el sidebar necesita para dibujar el árbol
+        for db in &sidebar_loads {
+            self.request_tables(db);
+        }
+        if sidebar_loads_all {
+            self.request_all_tables();
         }
 
         if should_disconnect {
@@ -2355,31 +2124,10 @@ impl Session {
         }
 
         // SQL editor
-        if let SqlEditorAction::Execute { sql, db_context } = sql_action {
-            let db = (!db_context.is_empty()).then_some(db_context.as_str());
-            let start = Instant::now();
-            let result = match &self.state {
-                ConnState::Connected(b) => b.execute_in_session(db, &sql),
-                _ => return outcome,
-            };
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let query_result = match result {
-                Ok(data) => {
-                    let rows = data.rows.len();
-                    self.push_log(LogEntry::ok(&sql, duration_ms, rows));
-                    Some(Ok(data))
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err(&sql, duration_ms, &e));
-                    Some(Err(e))
-                }
-            };
-            // Store result in active SQL tab
-            if let ActiveTab::Sql(tab_idx) = self.active_tab
-                && let Some(tab) = self.sql_tabs.get_mut(tab_idx)
-            {
-                tab.result = query_result.clone();
-            }
+        if let SqlEditorAction::Execute { sql, db_context } = sql_action
+            && let ActiveTab::Sql(tab_idx) = self.active_tab
+        {
+            self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
         }
 
         // Modal action
@@ -2487,8 +2235,9 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::schema::SchemaResult;
     use super::*;
-    use crate::db::{DbResult, QueryEvent};
+    use crate::db::{ColumnInfo, DatabaseInfo, DbResult, TableInfo};
 
     /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
     struct FakeBackend;
@@ -2504,9 +2253,15 @@ mod tests {
             Ok(QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
+                ..Default::default()
             })
         }
-        fn execute_in_session(&self, _: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+        fn execute_in_session(
+            &self,
+            _: Option<&str>,
+            sql: &str,
+            _: usize,
+        ) -> DbResult<QueryResult> {
             self.execute_query(sql)
         }
         fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
@@ -2518,25 +2273,25 @@ mod tests {
         fn get_columns_info(&self, _: &str, _: &str) -> DbResult<Vec<ColumnInfo>> {
             Ok(Vec::new())
         }
-        fn get_primary_keys(&self, _: &str, _: &str) -> DbResult<Vec<String>> {
+        fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
             Ok(Vec::new())
         }
-        fn execute_write(&mut self, _: &str) -> DbResult<u64> {
+        fn execute_write(&self, _: &str) -> DbResult<u64> {
             Ok(0)
         }
-        fn create_database(&mut self, _: &str, _: &str) -> DbResult<()> {
+        fn create_database(&self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn drop_database(&mut self, _: &str) -> DbResult<()> {
+        fn drop_database(&self, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn drop_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+        fn drop_table(&self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn truncate_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+        fn truncate_table(&self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn execute_transaction(&mut self, _: &[Statement]) -> DbResult<()> {
+        fn execute_transaction(&self, _: &[Statement]) -> DbResult<()> {
             Ok(())
         }
     }
@@ -2553,19 +2308,36 @@ mod tests {
         QueryResult {
             columns: vec!["id".into()],
             rows: ids.iter().map(|id| vec![Some(id.to_string())]).collect(),
+            ..Default::default()
         }
     }
 
-    /// Sesión conectada con `db.t` abierta y sus datos cargados.
+    fn column(name: &str, key: &str, extra: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            col_type: "INT".into(),
+            is_nullable: true,
+            default_val: None,
+            column_key: key.into(),
+            extra: extra.into(),
+        }
+    }
+
+    /// Sesión conectada con `db.t` (clave primaria `id`) abierta y sus datos
+    /// y estructura cargados.
     fn session_with_table() -> Session {
         let mut s = Session::new(0);
-        s.state = ConnState::Connected(Box::new(FakeBackend));
+        s.state = ConnState::Connected(Arc::new(FakeBackend));
         s.schema.selected_node = Some(SelectedNode::Table {
             db: "db".into(),
             table: "t".into(),
         });
         s.table_view.table_data = Some(data(&["1", "2"]));
-        s.table_view.primary_keys = vec!["id".into()];
+        s.schema.columns_info.insert(
+            ("db".into(), "t".into()),
+            Loadable::Ready(vec![column("id", "PRI", ""), column("v", "", "")]),
+        );
+        s.sync_primary_keys();
         s
     }
 
@@ -2593,7 +2365,7 @@ mod tests {
         let mut s = session_with_table();
         s.request_reload(&mut shared(), Reload::Refresh);
         assert!(matches!(s.modal, ModalState::None));
-        assert!(matches!(s.state, ConnState::QueryRunning));
+        assert!(s.table_view.query_loading);
     }
 
     #[test]
@@ -2605,25 +2377,45 @@ mod tests {
             &mut shared(),
         );
         assert_eq!(s.pending_count(), 0);
-        assert!(matches!(s.state, ConnState::QueryRunning));
+        assert!(s.table_view.query_loading);
     }
 
     #[test]
     fn datos_nuevos_no_heredan_cambios_por_posicion() {
         let mut s = session_with_table();
-        s.state = ConnState::QueryRunning;
         s.table_view.pending_deletes.insert(0);
-        let (tx, rx) = mpsc::channel();
-        s.table_view.query_receiver = Some(rx);
-        tx.send(QueryEvent::Done {
-            result: Ok(data(&["7", "8"])),
-            backend: Box::new(FakeBackend),
-            sql: String::new(),
-            elapsed_ms: 0,
-        })
-        .unwrap();
-        s.poll_query_receiver(&egui::Context::default());
+        s.apply_job(
+            &mut shared(),
+            JobResult::TableData {
+                generation: s.table_view.data_generation,
+                sql: String::new(),
+                elapsed_ms: 0,
+                result: Ok(data(&["7", "8"])),
+            },
+        );
         assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn los_datos_de_una_consulta_sustituida_se_descartan() {
+        let mut s = session_with_table();
+        s.request_reload(&mut shared(), Reload::Refresh);
+        let stale = s.table_view.data_generation;
+        s.request_reload(&mut shared(), Reload::Refresh);
+        s.apply_job(
+            &mut shared(),
+            JobResult::TableData {
+                generation: stale,
+                sql: String::new(),
+                elapsed_ms: 0,
+                result: Ok(data(&["viejo"])),
+            },
+        );
+        assert_eq!(s.table_view.table_data, Some(data(&["1", "2"])));
+        assert!(
+            s.table_view.query_loading,
+            "la consulta nueva sigue en curso"
+        );
     }
 
     fn open_table(s: &Session) -> Option<(&str, &str)> {
@@ -2640,14 +2432,16 @@ mod tests {
         s.table_view.pending_deletes.insert(0);
         let mut col = NewColumnDef::new();
         col.name = "id".into();
+        let mut sh = shared();
         s.handle_modal_action(
             ModalAction::CreateTable {
                 db: "db".into(),
                 name: "nueva".into(),
                 columns: vec![col],
             },
-            &mut shared(),
+            &mut sh,
         );
+        finish_jobs(&mut s, &mut sh);
         assert_eq!(open_table(&s), Some(("db", "t")));
         assert_eq!(s.active_tab, ActiveTab::Datos);
         assert_eq!(s.pending_count(), 1);
@@ -2662,7 +2456,9 @@ mod tests {
             db: "db".into(),
             table: "t".into(),
         };
-        s.handle_modal_action(action, &mut shared());
+        let mut sh = shared();
+        s.handle_modal_action(action, &mut sh);
+        finish_jobs(&mut s, &mut sh);
         assert_eq!(
             s.schema.selected_node,
             Some(SelectedNode::Database("db".into()))
@@ -2680,7 +2476,9 @@ mod tests {
             db: "db".into(),
             table: "otra".into(),
         };
-        s.handle_modal_action(action, &mut shared());
+        let mut sh = shared();
+        s.handle_modal_action(action, &mut sh);
+        finish_jobs(&mut s, &mut sh);
         assert_eq!(open_table(&s), Some(("db", "t")));
         assert_eq!(s.pending_count(), 1);
     }
@@ -2689,7 +2487,9 @@ mod tests {
     fn borrar_la_bbdd_desde_una_pestana_sql_no_cambia_de_pestana() {
         let mut s = session_with_table();
         s.active_tab = ActiveTab::Sql(0);
-        s.handle_modal_action(ModalAction::DropDatabase("db".into()), &mut shared());
+        let mut sh = shared();
+        s.handle_modal_action(ModalAction::DropDatabase("db".into()), &mut sh);
+        finish_jobs(&mut s, &mut sh);
         assert_eq!(s.schema.selected_node, Some(SelectedNode::Server));
         assert_eq!(s.active_tab, ActiveTab::Sql(0));
     }
@@ -2708,10 +2508,16 @@ mod tests {
             db: "db".into(),
             table: "t".into(),
         };
-        s.handle_modal_action(action, &mut shared());
+        let mut sh = shared();
+        s.handle_modal_action(action, &mut sh);
+        finish_jobs(&mut s, &mut sh);
         assert_eq!(open_table(&s), Some(("db", "t")));
         assert_eq!(s.pending_count(), 0);
-        assert!(matches!(s.state, ConnState::QueryRunning));
+        // Recargada: FakeBackend devuelve una tabla vacía
+        assert_eq!(
+            s.table_view.table_data.as_ref().map(|d| d.rows.len()),
+            Some(0)
+        );
     }
 
     fn edit(row_idx: usize, col_idx: usize, value: Option<&str>) -> PendingEdit {
@@ -2732,6 +2538,7 @@ mod tests {
                 vec![Some("1".into()), Some("a".into())],
                 vec![Some("2".into()), None],
             ],
+            ..Default::default()
         });
         s.table_view.pending_deletes.insert(1);
         // Clave primaria y otra columna de la misma fila: un único UPDATE
@@ -2770,7 +2577,7 @@ mod tests {
         let mut s = session_with_table();
         s.table_view.primary_keys.clear();
         s.table_view.pending_deletes.insert(0);
-        assert!(!s.commit_pending_changes());
+        s.commit_pending_changes(&mut shared(), AfterCommit::ReloadData);
         assert!(matches!(s.modal, ModalState::Error { .. }));
         assert_eq!(s.pending_count(), 1);
     }
@@ -2778,7 +2585,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn guardar_cambios_contra_el_servidor() {
-        let mut b = crate::db::test_server::backend();
+        let b = crate::db::test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_grid")
             .unwrap();
         b.execute_write("CREATE DATABASE rustql_test_grid").unwrap();
@@ -2792,12 +2599,17 @@ mod tests {
 
         let mut s = Session::new(0);
         s.table_view.table_data = Some(b.execute_query(select).unwrap());
-        s.state = ConnState::Connected(Box::new(b));
+        let columns = b.get_columns_info("rustql_test_grid", "t").unwrap();
+        s.schema.columns_info.insert(
+            ("rustql_test_grid".into(), "t".into()),
+            Loadable::Ready(columns),
+        );
+        s.state = ConnState::Connected(Arc::new(b));
         s.schema.selected_node = Some(SelectedNode::Table {
             db: "rustql_test_grid".into(),
             table: "t".into(),
         });
-        s.table_view.primary_keys = vec!["id".into()];
+        s.sync_primary_keys();
         s.table_view.pending_deletes.insert(2);
         s.table_view.pending_edits = vec![edit(0, 0, Some("a'\\x")), edit(0, 1, None)];
         s.table_view.pending_inserts.push(PendingInsert {
@@ -2808,8 +2620,11 @@ mod tests {
             auto_cols: vec![false, false],
         });
 
-        let saved = s.commit_pending_changes();
-        let ConnState::Connected(b) = &mut s.state else {
+        let mut sh = shared();
+        s.commit_pending_changes(&mut sh, AfterCommit::ReloadData);
+        finish_jobs(&mut s, &mut sh);
+        let saved = s.pending_count() == 0;
+        let ConnState::Connected(b) = &s.state else {
             unreachable!()
         };
         let rows = b.execute_query(select).map(|r| r.rows);
@@ -2871,7 +2686,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn vaciar_todas_sin_haber_desplegado_el_arbol() {
-        let mut b = crate::db::test_server::backend();
+        let b = crate::db::test_server::backend();
         for sql in [
             "DROP DATABASE IF EXISTS rustql_test_truncate",
             "CREATE DATABASE rustql_test_truncate",
@@ -2886,14 +2701,16 @@ mod tests {
             b.execute_write(sql).unwrap();
         }
         let mut s = Session::new(0);
-        s.state = ConnState::Connected(Box::new(b));
+        s.state = ConnState::Connected(Arc::new(b));
         assert!(s.schema.tables_cache.is_empty());
 
+        let mut sh = shared();
         s.handle_modal_action(
             ModalAction::TruncateAllTables("rustql_test_truncate".into()),
-            &mut shared(),
+            &mut sh,
         );
-        let ConnState::Connected(b) = &mut s.state else {
+        finish_jobs(&mut s, &mut sh);
+        let ConnState::Connected(b) = &s.state else {
             unreachable!()
         };
         let count = |t: &str| {
@@ -2923,18 +2740,15 @@ mod tests {
         s.table_view.table_data = Some(QueryResult {
             columns: vec!["id".into(), "v".into(), "n".into()],
             rows: vec![vec![Some("1".into()), Some("a".into()), None]],
+            ..Default::default()
         });
-        let col = |name: &str, extra: &str| ColumnInfo {
-            name: name.into(),
-            col_type: "INT".into(),
-            is_nullable: true,
-            default_val: Some("CURRENT_TIMESTAMP".into()),
-            column_key: String::new(),
-            extra: extra.into(),
-        };
         s.schema.columns_info.insert(
             ("db".into(), "t".into()),
-            vec![col("id", "auto_increment"), col("v", ""), col("n", "")],
+            Loadable::Ready(vec![
+                column("id", "PRI", "auto_increment"),
+                column("v", "", ""),
+                column("n", "", ""),
+            ]),
         );
         s
     }
@@ -2978,7 +2792,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn fila_nueva_contra_el_servidor() {
-        let mut b = crate::db::test_server::backend();
+        let b = crate::db::test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_insert")
             .unwrap();
         b.execute_write("CREATE DATABASE rustql_test_insert")
@@ -2995,20 +2809,26 @@ mod tests {
         s.table_view.table_data = Some(QueryResult {
             columns: vec!["id".into(), "creado".into(), "n".into(), "v".into()],
             rows: Vec::new(),
+            ..Default::default()
         });
         let key = ("rustql_test_insert".to_string(), "t".to_string());
         let columns = b.get_columns_info(&key.0, &key.1).unwrap();
-        s.schema.columns_info.insert(key.clone(), columns);
+        s.schema
+            .columns_info
+            .insert(key.clone(), Loadable::Ready(columns));
         s.schema.selected_node = Some(SelectedNode::Table {
             db: key.0,
             table: key.1,
         });
-        s.state = ConnState::Connected(Box::new(b));
+        s.state = ConnState::Connected(Arc::new(b));
         let row = s.new_insert_row(None).unwrap();
         s.table_view.pending_inserts.push(row);
 
-        let saved = s.commit_pending_changes();
-        let ConnState::Connected(b) = &mut s.state else {
+        let mut sh = shared();
+        s.commit_pending_changes(&mut sh, AfterCommit::ReloadData);
+        finish_jobs(&mut s, &mut sh);
+        let saved = s.pending_count() == 0;
+        let ConnState::Connected(b) = &s.state else {
             unreachable!()
         };
         let rows = b.execute_query(select).map(|r| r.rows);
@@ -3017,5 +2837,182 @@ mod tests {
         assert!(saved, "{:?}", s.modal);
         let some = |v: &str| Some(v.to_string());
         assert_eq!(rows.unwrap(), [[some("1"), some("1"), None, some("x")]]);
+    }
+
+    /// Espera a que terminen los trabajos en segundo plano y los aplica.
+    fn finish_jobs(s: &mut Session, sh: &mut Shared) {
+        let start = Instant::now();
+        while s.jobs.pending() > 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "trabajos sin terminar"
+            );
+            s.poll_jobs(&egui::Context::default(), sh);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn tables<'a>(s: &'a Session, db: &str) -> Option<&'a Vec<String>> {
+        s.schema.tables_cache.get(db).and_then(Loadable::ready)
+    }
+
+    fn ticket<T>(slot: Option<&Loadable<T>>) -> u64 {
+        match slot {
+            Some(Loadable::Loading(ticket)) => *ticket,
+            _ => panic!("no está cargando"),
+        }
+    }
+
+    #[test]
+    fn un_fallo_de_esquema_no_se_reintenta_solo() {
+        let mut s = session_with_table();
+        s.schema.databases = Loadable::Failed("sin permiso".into());
+        s.request_tab_data();
+        assert!(matches!(s.schema.databases, Loadable::Failed(_)));
+        // Refrescar sí lo vuelve a pedir
+        s.schema.clear();
+        s.request_tab_data();
+        assert!(matches!(s.schema.databases, Loadable::Loading(_)));
+    }
+
+    #[test]
+    fn la_respuesta_de_una_peticion_invalidada_se_descarta() {
+        let mut s = session_with_table();
+        s.request_tables("db");
+        let old = ticket(s.schema.tables_cache.get("db"));
+        s.invalidate_schema("db");
+        s.request_tables("db");
+        let new = ticket(s.schema.tables_cache.get("db"));
+        s.apply_schema_job(SchemaResult::Tables {
+            ticket: old,
+            db: "db".into(),
+            result: Ok(vec!["vieja".into()]),
+        });
+        assert!(matches!(s.schema.tables_cache["db"], Loadable::Loading(t) if t == new));
+        s.apply_schema_job(SchemaResult::Tables {
+            ticket: new,
+            db: "db".into(),
+            result: Ok(vec!["nueva".into()]),
+        });
+        assert_eq!(tables(&s, "db"), Some(&vec!["nueva".to_string()]));
+    }
+
+    #[test]
+    fn el_buscador_pide_todas_las_tablas_en_una_consulta() {
+        let mut s = session_with_table();
+        s.schema.databases = Loadable::Ready(vec!["a".into(), "b".into(), "c".into()]);
+        s.schema
+            .tables_cache
+            .insert("a".into(), Loadable::Ready(vec!["ya".into()]));
+        s.request_all_tables();
+        let t = ticket(s.schema.tables_cache.get("b"));
+        assert_eq!(
+            ticket(s.schema.tables_cache.get("c")),
+            t,
+            "una sola petición"
+        );
+        s.apply_schema_job(SchemaResult::AllTables {
+            ticket: t,
+            result: Ok(vec![("b".into(), "x".into()), ("otra".into(), "y".into())]),
+        });
+        assert_eq!(tables(&s, "a"), Some(&vec!["ya".to_string()]));
+        assert_eq!(tables(&s, "b"), Some(&vec!["x".to_string()]));
+        assert_eq!(tables(&s, "c"), Some(&Vec::new()), "BBDD sin tablas");
+    }
+
+    #[test]
+    fn exportar_rellena_las_tablas_cuando_llegan() {
+        let mut s = session_with_table();
+        s.open_export(&shared(), "db".into(), Some("t2".into()));
+        let t = ticket(s.schema.tables_cache.get("db"));
+        s.apply_schema_job(SchemaResult::Tables {
+            ticket: t,
+            db: "db".into(),
+            result: Ok(vec!["t1".into(), "t2".into()]),
+        });
+        let ModalState::ExportData { tables, .. } = &s.modal else {
+            panic!("{:?}", s.modal)
+        };
+        let marked: Vec<_> = tables
+            .iter()
+            .map(|e| (e.name.as_str(), e.selected))
+            .collect();
+        assert_eq!(marked, [("t1", false), ("t2", true)]);
+    }
+
+    #[test]
+    fn la_clave_primaria_sale_de_la_estructura() {
+        let mut s = session_with_table();
+        s.reload_now(&mut shared(), Reload::Refresh);
+        let t = ticket(s.schema.columns_info.get(&("db".into(), "t".into())));
+        s.apply_schema_job(SchemaResult::Structure {
+            ticket: t,
+            db: "db".into(),
+            table: "t".into(),
+            result: Ok(vec![column("a", "PRI", ""), column("b", "PRI", "")]),
+        });
+        assert_eq!(s.table_view.primary_keys, ["a", "b"]);
+    }
+
+    #[test]
+    fn el_formulario_espera_al_resultado_de_la_escritura() {
+        let mut s = session_with_table();
+        s.modal = ModalState::CreateDatabase {
+            name: "nueva".into(),
+            charset: "utf8mb4".into(),
+            error: None,
+        };
+        let mut sh = shared();
+        let action = ModalAction::CreateDatabase {
+            name: "nueva".into(),
+            charset: "utf8mb4".into(),
+        };
+        s.handle_modal_action(action, &mut sh);
+        assert!(matches!(s.modal, ModalState::CreateDatabase { .. }));
+        assert!(s.is_busy());
+        finish_jobs(&mut s, &mut sh);
+        assert!(matches!(s.modal, ModalState::None));
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn mientras_se_guarda_no_se_recarga_ni_se_cambia_de_tabla() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(0);
+        let mut sh = shared();
+        s.commit_pending_changes(&mut sh, AfterCommit::ReloadData);
+        assert!(s.table_view.saving);
+        s.request_reload(&mut sh, Reload::Refresh);
+        assert!(
+            matches!(s.modal, ModalState::None),
+            "sin diálogo de recarga"
+        );
+        s.switch_to_table(&mut sh, "db".into(), "otra".into(), ActiveTab::Datos);
+        assert_eq!(open_table(&s), Some(("db", "t")));
+        finish_jobs(&mut s, &mut sh);
+        assert!(!s.table_view.saving);
+        assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn el_resultado_del_editor_va_a_su_pestana() {
+        let mut s = session_with_table();
+        s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
+        s.run_editor(1, "SELECT 1".into(), String::new(), 10);
+        assert!(s.sql_tabs[1].running.is_some());
+        // Se cierra la primera: la que ejecuta pasa a ser la 0
+        s.sql_tabs.remove(0);
+        finish_jobs(&mut s, &mut shared());
+        assert!(s.sql_tabs[0].running.is_none());
+        assert!(matches!(s.sql_tabs[0].result, Some(Ok(_))));
+        assert_eq!(s.query_log.len(), 1);
+    }
+
+    #[test]
+    fn desconectar_no_deja_el_editor_esperando() {
+        let mut s = session_with_table();
+        s.run_editor(0, "SELECT 1".into(), String::new(), 10);
+        s.disconnect();
+        assert!(s.sql_tabs[0].running.is_none());
     }
 }
