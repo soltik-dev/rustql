@@ -133,6 +133,11 @@ pub trait DbBackend: Send {
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
 
+    /// SQL del editor, en una conexión propia que se mantiene entre
+    /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
+    /// tablas temporales siguen vivas en la siguiente. Con `db`, antes `USE`.
+    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
+
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;

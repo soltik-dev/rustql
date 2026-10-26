@@ -2434,17 +2434,10 @@ impl Session {
 
         // SQL editor
         if let SqlEditorAction::Execute { sql, db_context } = sql_action {
-            // Ejecutar USE por separado para que el log muestre solo la query del usuario
-            if !db_context.is_empty() {
-                let use_sql = format!("USE `{}`", db_context.replace('`', "``"));
-                let _ = match &mut self.state {
-                    ConnState::Connected(b) => b.execute_write(&use_sql),
-                    _ => return outcome,
-                };
-            }
+            let db = (!db_context.is_empty()).then_some(db_context.as_str());
             let start = Instant::now();
-            let result = match &mut self.state {
-                ConnState::Connected(b) => b.execute_query(&sql),
+            let result = match &self.state {
+                ConnState::Connected(b) => b.execute_in_session(db, &sql),
                 _ => return outcome,
             };
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -2590,6 +2583,9 @@ mod tests {
                 columns: Vec::new(),
                 rows: Vec::new(),
             })
+        }
+        fn execute_in_session(&self, _: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+            self.execute_query(sql)
         }
         fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
             Ok(Vec::new())

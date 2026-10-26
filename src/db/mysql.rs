@@ -1,4 +1,6 @@
-use mysql::{Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use mysql::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
@@ -59,6 +61,12 @@ fn col(row: &[Option<String>], i: usize) -> String {
 /// al solicitar una nueva conexión mediante get_conn().
 pub struct MysqlBackend {
     pool: Pool,
+    opts: Opts,
+    /// Conexión propia del editor SQL, fuera del pool: el pool resetea cada
+    /// conexión al devolverla (COM_RESET_CONNECTION), lo que deshace
+    /// transacciones, variables y tablas temporales entre ejecuciones.
+    /// Se abre al primer uso.
+    session: Arc<Mutex<Option<Conn>>>,
 }
 
 impl MysqlBackend {
@@ -83,14 +91,18 @@ impl MysqlBackend {
             .pool_opts(pool_opts)
             .into();
 
-        let pool = Pool::new(opts).map_err(|e| format!("Error de conexión: {e}"))?;
+        let pool = Pool::new(opts.clone()).map_err(|e| format!("Error de conexión: {e}"))?;
 
         on_status("Autenticando...");
         pool.get_conn()
             .map_err(|e| format!("No se pudo conectar: {e}"))?;
 
         on_status("Conexión establecida.");
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            opts,
+            session: Arc::default(),
+        })
     }
 
     /// Obtiene una conexión del pool. Si la conexión previa había muerto,
@@ -134,6 +146,34 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("Error en query: {e}"))?;
 
         Ok(rows_to_result(raw_rows))
+    }
+
+    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+        let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        let conn = match &mut *session {
+            Some(conn) => conn,
+            None => session.insert(
+                Conn::new(self.opts.clone())
+                    .map_err(|e| format!("No se pudo abrir la sesión del editor: {e}"))?,
+            ),
+        };
+        let result = (|| {
+            if let Some(db) = db {
+                conn.query_drop(format!("USE `{}`", escape_ident(db)))?;
+            }
+            conn.query::<mysql::Row, _>(sql)
+        })();
+        match result {
+            Ok(raw_rows) => Ok(rows_to_result(raw_rows)),
+            Err(e) => {
+                // Conexión perdida (servidor reiniciado, timeout…): la próxima
+                // ejecución abre otra; el estado de la sesión ya se ha perdido.
+                if conn.ping().is_err() {
+                    *session = None;
+                }
+                Err(format!("Error en query: {e}"))
+            }
+        }
     }
 
     fn execute_write(&mut self, sql: &str) -> DbResult<u64> {
@@ -309,5 +349,38 @@ mod tests {
         assert!(columns[0].extra.contains("auto_increment"));
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
         assert_eq!(pks.unwrap(), ["id"]);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
+        let mut b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session").unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
+        let db = Some("rustql_test_session");
+        let run = |sql: &str| b.execute_in_session(db, sql).unwrap().rows;
+        let count = || {
+            b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
+                .unwrap()
+                .rows[0][0]
+                .clone()
+        };
+
+        // Cada línea es una ejecución (F9) distinta
+        run("SET @x = 42");
+        run("START TRANSACTION");
+        run("INSERT INTO t VALUES (1)");
+        assert_eq!(run("SELECT @x, COUNT(*) FROM t")[0], [Some("42".into()), Some("1".into())]);
+        assert_eq!(count(), Some("0".into()), "sin COMMIT, el resto no la ve");
+        run("ROLLBACK");
+        assert_eq!(run("SELECT COUNT(*) FROM t")[0], [Some("0".into())]);
+
+        run("START TRANSACTION");
+        run("INSERT INTO t VALUES (2)");
+        run("COMMIT");
+        assert_eq!(count(), Some("1".into()));
+
+        b.execute_write("DROP DATABASE rustql_test_session").unwrap();
     }
 }
