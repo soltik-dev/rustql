@@ -1638,7 +1638,7 @@ impl Session {
                                     ui,
                                     &mut self.table_view.filter_text,
                                     f9 && !running,
-                                    &self.table_view.filter_history.clone(),
+                                    &self.table_view.filter_history,
                                 );
                                 if !running {
                                     filter_action = action;
@@ -1705,7 +1705,7 @@ impl Session {
 
                         ActiveTab::Tabla => {
                             if let Some(SelectedNode::Table { db, table }) =
-                                &self.schema.selected_node.clone()
+                                &self.schema.selected_node
                             {
                                 let key = (db.clone(), table.clone());
                                 match self.schema.columns_info.get(&key) {
@@ -1725,17 +1725,16 @@ impl Session {
 
                         ActiveTab::Sql(tab_idx) => {
                             if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
-                                let result_clone = tab.result.clone();
-                                let databases_clone =
-                                    self.schema.databases.ready().cloned().unwrap_or_default();
+                                let databases =
+                                    self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
                                 sql_action = sql_editor::show(
                                     ui,
                                     &mut tab.sql_text,
-                                    &result_clone,
+                                    &tab.result,
                                     tab.running.is_some(),
                                     f9,
                                     &mut tab.db_context,
-                                    &databases_clone,
+                                    databases,
                                 );
                             }
                         }
