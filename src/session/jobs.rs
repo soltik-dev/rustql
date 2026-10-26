@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui;
 
+use super::schema::SchemaResult;
 use crate::db::{DbBackend, DbResult, QueryResult};
 
 /// Resultado de un trabajo, con lo necesario para aplicarlo a la sesión.
@@ -22,6 +23,7 @@ pub enum JobResult {
         elapsed_ms: u64,
         result: DbResult<QueryResult>,
     },
+    Schema(SchemaResult),
 }
 
 pub struct Jobs {

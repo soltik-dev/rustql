@@ -140,6 +140,15 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("Error en query: {e}"))
     }
 
+    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
+        self.conn()?
+            .query(
+                "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            )
+            .map_err(|e| format!("Error en query: {e}"))
+    }
+
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult> {
         let raw_rows: Vec<mysql::Row> = self
             .conn()?
@@ -255,15 +264,6 @@ impl DbBackend for MysqlBackend {
             .collect())
     }
 
-    fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>> {
-        let sql = "SELECT COLUMN_NAME \
-                   FROM information_schema.COLUMNS \
-                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY='PRI' \
-                   ORDER BY ORDINAL_POSITION";
-        let r = self.query_with(sql, vec![Some(db.into()), Some(table.into())])?;
-        Ok(r.rows.iter().map(|row| col(row, 0)).collect())
-    }
-
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()> {
         validate_charset(charset)?;
         let sql = format!(
@@ -337,7 +337,7 @@ mod tests {
 
         let tables = b.get_tables_info(db);
         let columns = b.get_columns_info(db, "t");
-        let pks = b.get_primary_keys(db, "t");
+        let all = b.list_all_tables();
         b.execute_write(&format!("DROP DATABASE {qdb}")).unwrap();
 
         let tables = tables.unwrap();
@@ -349,7 +349,8 @@ mod tests {
         assert_eq!(names, ["id", "v", "n"]);
         assert!(columns[0].extra.contains("auto_increment"));
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
-        assert_eq!(pks.unwrap(), ["id"]);
+        assert_eq!(columns[0].column_key, "PRI");
+        assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
     }
 
     #[test]

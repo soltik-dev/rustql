@@ -134,6 +134,8 @@ pub trait DbBackend: Send + Sync {
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
     fn list_tables(&self, database: &str) -> DbResult<Vec<String>>;
+    /// Pares (BBDD, tabla) de todo el servidor, en una sola consulta.
+    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>>;
 
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
@@ -145,8 +147,8 @@ pub trait DbBackend: Send + Sync {
 
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
+    /// Columnas en orden; las de la clave primaria tienen `column_key` «PRI».
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;
-    fn get_primary_keys(&self, db: &str, table: &str) -> DbResult<Vec<String>>;
 
     // ── Escritura (modifican datos en el servidor) ─────────────────────────────
 
