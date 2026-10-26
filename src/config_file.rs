@@ -122,8 +122,11 @@ mod tests {
 
         fn backups(&self) -> Vec<PathBuf> {
             let prefix = format!("{}.", self.0);
-            std::fs::read_dir(dir().unwrap())
-                .unwrap()
+            // El directorio no existe hasta el primer guardado
+            let Ok(entries) = std::fs::read_dir(dir().unwrap()) else {
+                return Vec::new();
+            };
+            entries
                 .filter_map(|e| Some(e.ok()?.path()))
                 .filter(|p| {
                     let name = p.file_name().unwrap().to_string_lossy().into_owned();
