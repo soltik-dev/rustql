@@ -23,7 +23,7 @@ use crate::ui::modals::{
     TableExportEntry, TableExportState, TruncateKind,
 };
 use crate::ui::results_grid::{
-    EditingCell, GridAction, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec,
+    EditingCell, GridAction, InsertValue, PendingEdit, PendingInsert, RowRef, SortDir, SortSpec,
 };
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
@@ -592,15 +592,20 @@ impl Session {
             });
         }
 
+        // Las columnas en DEFAULT se omiten para que el servidor ponga su
+        // valor por defecto; si son todas, `INSERT INTO t () VALUES ()`.
         for ins in &tv.pending_inserts {
             let (cols, params): (Vec<String>, Vec<Option<String>>) = data
                 .columns
                 .iter()
-                .enumerate()
-                .filter(|(i, _)| !ins.auto_cols.get(*i).copied().unwrap_or(false))
-                .map(|(i, col)| {
-                    let value = ins.values.get(i).cloned().flatten();
-                    (format!("`{}`", escape_ident(col)), value)
+                .zip(&ins.values)
+                .filter_map(|(col, value)| {
+                    let param = match value {
+                        InsertValue::Default => return None,
+                        InsertValue::Null => None,
+                        InsertValue::Value(v) => Some(v.clone()),
+                    };
+                    Some((format!("`{}`", escape_ident(col)), param))
                 })
                 .unzip();
             let placeholders = vec!["?"; cols.len()].join(", ");
@@ -615,6 +620,38 @@ impl Session {
         Ok(stmts)
     }
 
+    /// Fila nueva para el grid: vacía (todo DEFAULT, que el servidor
+    /// completa) o copia de `source_row`. Las AUTO_INCREMENT, siempre DEFAULT.
+    fn new_insert_row(&self, source_row: Option<usize>) -> Option<PendingInsert> {
+        let data = self.table_view.table_data.as_ref()?;
+        if data.columns.is_empty() {
+            return None;
+        }
+        let columns_info = match &self.schema.selected_node {
+            Some(SelectedNode::Table { db, table }) => {
+                self.schema.columns_info.get(&(db.clone(), table.clone()))
+            }
+            _ => None,
+        };
+        let auto_cols: Vec<bool> = (0..data.columns.len())
+            .map(|i| {
+                columns_info
+                    .and_then(|ci| ci.get(i))
+                    .is_some_and(|c| c.extra.contains("auto_increment"))
+            })
+            .collect();
+        let source = source_row.and_then(|r| data.rows.get(r));
+        let values = auto_cols
+            .iter()
+            .enumerate()
+            .map(|(i, &auto)| match source {
+                Some(row) if !auto => InsertValue::from(row.get(i).cloned().flatten()),
+                _ => InsertValue::Default,
+            })
+            .collect();
+        Some(PendingInsert { values, auto_cols })
+    }
+
     /// Registra el valor nuevo de una celda (`None` = NULL). En una fila
     /// existente, volver al valor original quita el cambio pendiente.
     fn record_edit(&mut self, row: RowRef, col_idx: usize, value: Option<String>) {
@@ -626,7 +663,7 @@ impl Session {
                     .get_mut(insert_idx)
                     .and_then(|ins| ins.values.get_mut(col_idx))
                 {
-                    *slot = value;
+                    *slot = InsertValue::from(value);
                 }
             }
             RowRef::Existing(row_idx) => {
@@ -656,12 +693,14 @@ impl Session {
     fn cell_text(&self, row: RowRef, col_idx: usize) -> String {
         let tv = &self.table_view;
         let value = match row {
-            RowRef::Insert(insert_idx) => tv
+            RowRef::Insert(insert_idx) => match tv
                 .pending_inserts
                 .get(insert_idx)
                 .and_then(|ins| ins.values.get(col_idx))
-                .cloned()
-                .flatten(),
+            {
+                Some(InsertValue::Value(v)) => Some(v.clone()),
+                _ => None,
+            },
             RowRef::Existing(row_idx) => {
                 match tv
                     .pending_edits
@@ -2010,96 +2049,13 @@ impl Session {
                 }
             }
             GridAction::InsertRow => {
-                // Create blank insert row at the bottom
-                let col_count = self
-                    .table_view
-                    .table_data
-                    .as_ref()
-                    .map(|d| d.columns.len())
-                    .unwrap_or(0);
-                if col_count == 0 {
-                } else {
-                    let col_info_key = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { db, table }) => {
-                            Some((db.clone(), table.clone()))
-                        }
-                        _ => None,
-                    };
-                    let empty_cols: Vec<ColumnInfo> = Vec::new();
-                    let ci = col_info_key
-                        .as_ref()
-                        .and_then(|k| self.schema.columns_info.get(k))
-                        .map(|v| v.as_slice())
-                        .unwrap_or(empty_cols.as_slice());
-                    let auto_cols: Vec<bool> = (0..col_count)
-                        .map(|i| {
-                            ci.get(i)
-                                .map(|c| c.extra.contains("auto_increment"))
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    let values: Vec<Option<String>> = (0..col_count)
-                        .map(|i| {
-                            if auto_cols.get(i).copied().unwrap_or(false) {
-                                None
-                            } else {
-                                ci.get(i)
-                                    .and_then(|c| c.default_val.clone())
-                                    .map(Some)
-                                    .unwrap_or(Some(String::new()))
-                            }
-                        })
-                        .collect();
-                    self.table_view
-                        .pending_inserts
-                        .push(PendingInsert { values, auto_cols });
+                if let Some(row) = self.new_insert_row(None) {
+                    self.table_view.pending_inserts.push(row);
                 }
             }
             GridAction::CloneRow { row_idx } => {
-                let col_count = self
-                    .table_view
-                    .table_data
-                    .as_ref()
-                    .map(|d| d.columns.len())
-                    .unwrap_or(0);
-                if col_count == 0 {
-                } else {
-                    let col_info_key = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { db, table }) => {
-                            Some((db.clone(), table.clone()))
-                        }
-                        _ => None,
-                    };
-                    let empty_cols: Vec<ColumnInfo> = Vec::new();
-                    let ci = col_info_key
-                        .as_ref()
-                        .and_then(|k| self.schema.columns_info.get(k))
-                        .map(|v| v.as_slice())
-                        .unwrap_or(empty_cols.as_slice());
-                    let auto_cols: Vec<bool> = (0..col_count)
-                        .map(|i| {
-                            ci.get(i)
-                                .map(|c| c.extra.contains("auto_increment"))
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    let row_data = self
-                        .table_view
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx));
-                    let values: Vec<Option<String>> = (0..col_count)
-                        .map(|i| {
-                            if auto_cols.get(i).copied().unwrap_or(false) {
-                                None // Skip auto_increment columns
-                            } else {
-                                row_data.and_then(|r| r.get(i)).cloned().unwrap_or(None)
-                            }
-                        })
-                        .collect();
-                    self.table_view
-                        .pending_inserts
-                        .push(PendingInsert { values, auto_cols });
+                if let Some(row) = self.new_insert_row(Some(row_idx)) {
+                    self.table_view.pending_inserts.push(row);
                 }
             }
             GridAction::RemoveInsertRow { insert_idx } => {
@@ -2781,7 +2737,10 @@ mod tests {
         // Clave primaria y otra columna de la misma fila: un único UPDATE
         s.table_view.pending_edits = vec![edit(0, 0, Some("10")), edit(0, 1, None)];
         s.table_view.pending_inserts.push(PendingInsert {
-            values: vec![Some("3".into()), Some("x'y".into())],
+            values: vec![
+                InsertValue::Value("3".into()),
+                InsertValue::Value("x'y".into()),
+            ],
             auto_cols: vec![false, false],
         });
 
@@ -2842,7 +2801,10 @@ mod tests {
         s.table_view.pending_deletes.insert(2);
         s.table_view.pending_edits = vec![edit(0, 0, Some("a'\\x")), edit(0, 1, None)];
         s.table_view.pending_inserts.push(PendingInsert {
-            values: vec![Some("d".into()), Some("it's \\ fine".into())],
+            values: vec![
+                InsertValue::Value("d".into()),
+                InsertValue::Value("it's \\ fine".into()),
+            ],
             auto_cols: vec![false, false],
         });
 
@@ -2893,7 +2855,7 @@ mod tests {
         s.table_view.table_data.as_mut().unwrap().columns =
             vec!["id".into(), "a".into(), "b".into()];
         s.table_view.pending_inserts.push(PendingInsert {
-            values: vec![None, None, None],
+            values: vec![InsertValue::Default; 3],
             auto_cols: vec![true, false, false],
         });
         let row = RowRef::Insert(0);
@@ -2953,5 +2915,107 @@ mod tests {
             "{:?}",
             s.modal
         );
+    }
+
+    /// `db.t` con columnas id (AUTO_INCREMENT), v y n.
+    fn session_with_auto_id() -> Session {
+        let mut s = session_with_table();
+        s.table_view.table_data = Some(QueryResult {
+            columns: vec!["id".into(), "v".into(), "n".into()],
+            rows: vec![vec![Some("1".into()), Some("a".into()), None]],
+        });
+        let col = |name: &str, extra: &str| ColumnInfo {
+            name: name.into(),
+            col_type: "INT".into(),
+            is_nullable: true,
+            default_val: Some("CURRENT_TIMESTAMP".into()),
+            column_key: String::new(),
+            extra: extra.into(),
+        };
+        s.schema.columns_info.insert(
+            ("db".into(), "t".into()),
+            vec![col("id", "auto_increment"), col("v", ""), col("n", "")],
+        );
+        s
+    }
+
+    #[test]
+    fn fila_nueva_deja_los_valores_por_defecto_al_servidor() {
+        let mut s = session_with_auto_id();
+        let row = s.new_insert_row(None).unwrap();
+        // Antes: '' en v y n, y el texto «CURRENT_TIMESTAMP» como valor
+        assert_eq!(row.values, vec![InsertValue::Default; 3]);
+        s.table_view.pending_inserts.push(row);
+        s.record_edit(RowRef::Insert(0), 1, Some("x".into()));
+        let stmts = s.pending_statements().unwrap();
+        assert_eq!(stmts[0].sql, "INSERT INTO `db`.`t` (`v`) VALUES (?)");
+        assert_eq!(stmts[0].params, [Some("x".to_string())]);
+    }
+
+    #[test]
+    fn fila_nueva_sin_tocar_inserta_todo_por_defecto() {
+        let mut s = session_with_auto_id();
+        let row = s.new_insert_row(None).unwrap();
+        s.table_view.pending_inserts.push(row);
+        let stmts = s.pending_statements().unwrap();
+        assert_eq!(stmts[0].sql, "INSERT INTO `db`.`t` () VALUES ()");
+    }
+
+    #[test]
+    fn clonar_fila_copia_valores_y_nulls_salvo_el_auto_increment() {
+        let s = session_with_auto_id();
+        let row = s.new_insert_row(Some(0)).unwrap();
+        assert_eq!(
+            row.values,
+            [
+                InsertValue::Default,
+                InsertValue::Value("a".into()),
+                InsertValue::Null
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn fila_nueva_contra_el_servidor() {
+        let mut b = crate::db::test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_insert")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_insert")
+            .unwrap();
+        b.execute_write(
+            "CREATE TABLE rustql_test_insert.t (id INT AUTO_INCREMENT PRIMARY KEY, \
+             creado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, n INT NULL, \
+             v VARCHAR(10) NOT NULL DEFAULT 'x')",
+        )
+        .unwrap();
+        let select = "SELECT id, creado IS NOT NULL, n, v FROM rustql_test_insert.t";
+
+        let mut s = Session::new(0);
+        s.table_view.table_data = Some(QueryResult {
+            columns: vec!["id".into(), "creado".into(), "n".into(), "v".into()],
+            rows: Vec::new(),
+        });
+        let key = ("rustql_test_insert".to_string(), "t".to_string());
+        let columns = b.get_columns_info(&key.0, &key.1).unwrap();
+        s.schema.columns_info.insert(key.clone(), columns);
+        s.schema.selected_node = Some(SelectedNode::Table {
+            db: key.0,
+            table: key.1,
+        });
+        s.state = ConnState::Connected(Box::new(b));
+        let row = s.new_insert_row(None).unwrap();
+        s.table_view.pending_inserts.push(row);
+
+        let saved = s.commit_pending_changes();
+        let ConnState::Connected(b) = &mut s.state else {
+            unreachable!()
+        };
+        let rows = b.execute_query(select).map(|r| r.rows);
+        b.execute_write("DROP DATABASE rustql_test_insert").unwrap();
+
+        assert!(saved, "{:?}", s.modal);
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(rows.unwrap(), [[some("1"), some("1"), None, some("x")]]);
     }
 }

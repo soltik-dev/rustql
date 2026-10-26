@@ -44,12 +44,28 @@ pub enum RowRef {
     Insert(usize),
 }
 
+/// Valor de una celda de una fila nueva.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertValue {
+    /// Se omite del INSERT: el servidor pone el DEFAULT de la columna (o el
+    /// siguiente AUTO_INCREMENT).
+    Default,
+    Null,
+    Value(String),
+}
+
+impl From<Option<String>> for InsertValue {
+    fn from(value: Option<String>) -> Self {
+        value.map_or(Self::Null, Self::Value)
+    }
+}
+
 /// A pending insert row at the bottom of the grid.
 #[derive(Debug, Clone)]
 pub struct PendingInsert {
-    /// Values per column. None = use DEFAULT/AUTO (displayed as "(AUTO)" for auto_increment, "" otherwise)
-    pub values: Vec<Option<String>>,
-    /// Which columns are auto_increment (shown as "(AUTO)", excluded from INSERT SQL)
+    /// Valor por columna; las no tocadas, `Default`.
+    pub values: Vec<InsertValue>,
+    /// Which columns are auto_increment (shown as "(AUTO)", not editable)
     pub auto_cols: Vec<bool>,
 }
 
@@ -1309,11 +1325,13 @@ pub fn show(
                                         }
                                     } else {
                                         // Show insert value, double-click to edit
-                                        let val = ins
-                                            .values
-                                            .get(col_i)
-                                            .and_then(|v| v.as_deref())
-                                            .unwrap_or("");
+                                        let (val, val_color) = match ins.values.get(col_i) {
+                                            Some(InsertValue::Value(v)) => {
+                                                (v.as_str(), p.grid_insert_fg)
+                                            }
+                                            Some(InsertValue::Null) => ("NULL", p.null_text),
+                                            _ => ("(DEFAULT)", p.null_text),
+                                        };
                                         let resp =
                                             ui.allocate_rect(cell_rect, egui::Sense::click());
 
@@ -1331,17 +1349,21 @@ pub fn show(
                                                 &painter,
                                                 pos,
                                                 val,
-                                                p.grid_insert_fg,
+                                                val_color,
                                                 text_clip.width(),
                                             );
                                         }
 
                                         if resp.double_clicked() {
+                                            let current_value = match ins.values.get(col_i) {
+                                                Some(InsertValue::Value(v)) => v.clone(),
+                                                _ => String::new(),
+                                            };
                                             *grid_action_rc.borrow_mut() =
                                                 GridAction::CellEditStarted {
                                                     row: RowRef::Insert(insert_idx),
                                                     col_idx: col_i,
-                                                    current_value: val.to_string(),
+                                                    current_value,
                                                 };
                                         }
 
