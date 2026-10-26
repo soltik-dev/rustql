@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::db::ConnectionParams;
-use crate::profiles::ConnectionProfile;
+use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::ui::theme;
 
 /// Resultado de la interacción con el formulario de conexión.
@@ -35,7 +35,13 @@ pub fn show_favorites(
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, profile) in profiles.iter().enumerate() {
                 let is_selected = selected_idx.is_some_and(|s| s == i);
-                let resp = ui.selectable_label(is_selected, &profile.name);
+                let resp = ui
+                    .horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        color_dot(ui, profile.color);
+                        ui.selectable_label(is_selected, &profile.name)
+                    })
+                    .inner;
                 if resp.clicked() {
                     clicked = Some(i);
                 }
@@ -50,7 +56,23 @@ pub fn show_favorites(
     (clicked, connect_now)
 }
 
+/// Punto con el color del perfil; anillo apagado si no tiene color.
+fn color_dot(ui: &mut egui::Ui, color: Option<ConnColor>) {
+    let p = theme::get(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    match color {
+        Some(c) => {
+            ui.painter().circle_filled(rect.center(), 4.0, p.conn(c));
+        }
+        None => {
+            ui.painter()
+                .circle_stroke(rect.center(), 3.5, egui::Stroke::new(1.0, p.text_disabled));
+        }
+    }
+}
+
 /// Panel derecho: formulario de conexión + botones de gestión.
+#[allow(clippy::too_many_arguments)]
 pub fn show_form(
     ui: &mut egui::Ui,
     params: &mut ConnectionParams,
@@ -58,6 +80,7 @@ pub fn show_form(
     error_message: &Option<String>,
     profile_name: &mut String,
     save_password: &mut bool,
+    color: &mut Option<ConnColor>,
     selected_idx: &Option<usize>,
 ) -> FormResult {
     let mut result = FormResult::default();
@@ -85,6 +108,7 @@ pub fn show_form(
                     error_message,
                     profile_name,
                     save_password,
+                    color,
                     selected_idx,
                     &mut result,
                 );
@@ -102,6 +126,7 @@ fn show_form_fields(
     error_message: &Option<String>,
     profile_name: &mut String,
     save_password: &mut bool,
+    color: &mut Option<ConnColor>,
     selected_idx: &Option<usize>,
     result: &mut FormResult,
 ) {
@@ -162,6 +187,10 @@ fn show_form_fields(
                     .min_size(egui::vec2(220.0, 0.0)),
             );
             ui.end_row();
+
+            ui.label("Color:");
+            color_swatches(ui, color);
+            ui.end_row();
         });
 
     ui.add_space(6.0);
@@ -189,4 +218,108 @@ fn show_form_fields(
             result.connect = true;
         }
     });
+}
+
+/// Muestras para elegir el color de la conexión: «sin color», los presets de
+/// la paleta y uno personalizado que abre el selector libre.
+fn color_swatches(ui: &mut egui::Ui, color: &mut Option<ConnColor>) {
+    let p = theme::get(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+
+        if swatch(ui, None, color.is_none(), None)
+            .on_hover_text("Sin color")
+            .clicked()
+        {
+            *color = None;
+        }
+        for preset in ConnColor::PRESETS {
+            if swatch(ui, Some(p.conn(preset)), *color == Some(preset), None)
+                .on_hover_text(preset.label())
+                .clicked()
+            {
+                *color = Some(preset);
+            }
+        }
+
+        let custom = color.filter(|c| matches!(c, ConnColor::Custom(_)));
+        let glyph = if custom.is_some() { None } else { Some("+") };
+        let resp = swatch(ui, custom.map(|c| p.conn(c)), custom.is_some(), glyph)
+            .on_hover_text("Personalizado…");
+        egui::Popup::menu(&resp)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                // Parte del color actual para que el selector no arranque en negro
+                let mut c = p.conn(color.unwrap_or(ConnColor::Blue));
+                if egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut c,
+                    egui::color_picker::Alpha::Opaque,
+                ) {
+                    *color = Some(ConnColor::Custom([c.r(), c.g(), c.b()]));
+                }
+            });
+    });
+}
+
+/// Muestra cuadrada clicable. Sin `fill` se dibuja hueca: con `glyph` encima
+/// (personalizado) o con una diagonal («sin color»).
+fn swatch(
+    ui: &mut egui::Ui,
+    fill: Option<egui::Color32>,
+    selected: bool,
+    glyph: Option<&str>,
+) -> egui::Response {
+    let p = theme::get(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+    let inner = rect.shrink(4.0);
+    let painter = ui.painter();
+
+    match fill {
+        Some(c) => {
+            painter.rect_filled(inner, theme::RADIUS_SM, c);
+        }
+        None => {
+            painter.rect_stroke(
+                inner,
+                theme::RADIUS_SM,
+                egui::Stroke::new(1.0, p.border_strong),
+                egui::StrokeKind::Inside,
+            );
+            match glyph {
+                Some(g) => {
+                    painter.text(
+                        inner.center(),
+                        egui::Align2::CENTER_CENTER,
+                        g,
+                        egui::FontId::proportional(12.0),
+                        p.text_muted,
+                    );
+                }
+                None => {
+                    painter.line_segment(
+                        [inner.left_bottom(), inner.right_top()],
+                        egui::Stroke::new(1.0, p.text_disabled),
+                    );
+                }
+            }
+        }
+    }
+
+    let ring = if selected {
+        Some(egui::Stroke::new(1.5, p.text_primary))
+    } else if resp.hovered() {
+        Some(egui::Stroke::new(1.0, p.border_strong))
+    } else {
+        None
+    };
+    if let Some(stroke) = ring {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            theme::RADIUS_MD,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    resp
 }

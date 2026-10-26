@@ -3,6 +3,8 @@
 
 use eframe::egui::{self, Color32, CornerRadius, Shadow, Stroke};
 
+use crate::profiles::ConnColor;
+
 // Radios de esquina (egui 0.35 usa u8)
 pub const RADIUS_SM: u8 = 4;
 pub const RADIUS_MD: u8 = 6;
@@ -57,6 +59,8 @@ pub struct Palette {
     pub badge_pk: Color32,
     pub badge_uni: Color32,
     pub badge_idx: Color32,
+    // Colores de conexión, en el orden de ConnColor::PRESETS
+    pub conn_presets: [Color32; 8],
 }
 
 pub const DARK: Palette = Palette {
@@ -96,6 +100,16 @@ pub const DARK: Palette = Palette {
     badge_pk: Color32::from_rgb(100, 150, 220),
     badge_uni: Color32::from_rgb(100, 200, 100),
     badge_idx: Color32::from_rgb(180, 140, 80),
+    conn_presets: [
+        Color32::from_rgb(76, 141, 255),  // azul
+        Color32::from_rgb(45, 186, 186),  // turquesa
+        Color32::from_rgb(63, 185, 104),  // verde
+        Color32::from_rgb(222, 190, 60),  // amarillo
+        Color32::from_rgb(240, 136, 62),  // naranja
+        Color32::from_rgb(229, 83, 75),   // rojo
+        Color32::from_rgb(232, 106, 168), // rosa
+        Color32::from_rgb(163, 113, 247), // morado
+    ],
 };
 
 pub const LIGHT: Palette = Palette {
@@ -135,7 +149,35 @@ pub const LIGHT: Palette = Palette {
     badge_pk: Color32::from_rgb(30, 90, 190),
     badge_uni: Color32::from_rgb(26, 127, 55),
     badge_idx: Color32::from_rgb(140, 100, 30),
+    conn_presets: [
+        Color32::from_rgb(31, 111, 235), // azul
+        Color32::from_rgb(0, 128, 128),  // turquesa
+        Color32::from_rgb(26, 127, 55),  // verde
+        Color32::from_rgb(176, 136, 0),  // amarillo
+        Color32::from_rgb(196, 90, 10),  // naranja
+        Color32::from_rgb(207, 34, 46),  // rojo
+        Color32::from_rgb(191, 57, 137), // rosa
+        Color32::from_rgb(130, 80, 223), // morado
+    ],
 };
+
+impl Palette {
+    /// Color de una conexión resuelto para este tema.
+    pub fn conn(&self, color: ConnColor) -> Color32 {
+        let idx = match color {
+            ConnColor::Blue => 0,
+            ConnColor::Teal => 1,
+            ConnColor::Green => 2,
+            ConnColor::Yellow => 3,
+            ConnColor::Orange => 4,
+            ConnColor::Red => 5,
+            ConnColor::Pink => 6,
+            ConnColor::Purple => 7,
+            ConnColor::Custom([r, g, b]) => return Color32::from_rgb(r, g, b),
+        };
+        self.conn_presets[idx]
+    }
+}
 
 pub fn of(dark: bool) -> &'static Palette {
     if dark { &DARK } else { &LIGHT }

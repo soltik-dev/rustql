@@ -11,6 +11,14 @@ pub struct ConnectionParams {
     pub password: String,
 }
 
+impl ConnectionParams {
+    /// Identidad estable de la conexión («user@host:port») para guardar
+    /// estado por servidor, independiente del nombre del perfil.
+    pub fn key(&self) -> String {
+        format!("{}@{}:{}", self.user, self.host, self.port)
+    }
+}
+
 impl Default for ConnectionParams {
     fn default() -> Self {
         Self {

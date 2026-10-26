@@ -4,6 +4,7 @@ mod app;
 mod db;
 mod log;
 mod profiles;
+mod session;
 mod settings;
 mod table_state;
 mod ui;

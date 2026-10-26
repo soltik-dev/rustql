@@ -41,6 +41,7 @@ pub enum SidebarAction {
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
+/// `conn_color` (color de la conexión) tiñe la raíz del árbol y la selección.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -54,6 +55,7 @@ pub fn show(
     show_only_fav: &mut bool,
     host: &str,
     server_name: &str,
+    conn_color: Option<egui::Color32>,
 ) -> SidebarAction {
     let action: RefCell<SidebarAction> = RefCell::new(SidebarAction::None);
     let p = theme::get(ui);
@@ -131,6 +133,8 @@ pub fn show(
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             let dbs = databases.clone();
 
+            // Hueco para el fondo de la raíz: se rellena al conocer su rect.
+            let server_bg = ui.painter().add(egui::Shape::Noop);
             let server_ch =
                 egui::CollapsingHeader::new(&server_label)
                     .id_salt("server_root")
@@ -269,7 +273,8 @@ pub fn show(
                                     // Fondo hover/selected
                                     let is_hovered = resp.hovered() || fav_resp.hovered();
                                     let bg = if is_selected {
-                                        p.grid_sel_row_bg
+                                        conn_color
+                                            .map_or(p.grid_sel_row_bg, |c| c.gamma_multiply(0.3))
                                     } else if is_hovered {
                                         p.bg_surface
                                     } else {
@@ -446,6 +451,17 @@ pub fn show(
                             });
                         }
                     });
+
+            if let Some(c) = conn_color {
+                let rect = egui::Rect::from_x_y_ranges(
+                    ui.max_rect().x_range(),
+                    server_ch.header_response.rect.y_range(),
+                );
+                ui.painter().set(
+                    server_bg,
+                    egui::epaint::RectShape::filled(rect, theme::RADIUS_SM, c.gamma_multiply(0.22)),
+                );
+            }
 
             if server_ch.header_response.clicked() {
                 *action.borrow_mut() = SidebarAction::SelectServer;
