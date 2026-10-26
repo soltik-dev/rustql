@@ -40,13 +40,13 @@ pub fn show(
     ui.horizontal_wrapped(|ui| {
         // Servidor tab
         let srv_label = format!("{DATABASE} {}", ellipsize(server_name, 18));
-        if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true) {
+        if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true).clicked() {
             result.tab_clicked = Some(ActiveTab::Servidor);
         }
 
         // BBDD tab
         let db_label = format!("{DATABASE} {}", ellipsize(db_name.unwrap_or("BBDD"), 18));
-        if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db) {
+        if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db).clicked() {
             result.tab_clicked = Some(ActiveTab::Bbdd);
         }
 
@@ -55,13 +55,13 @@ pub fn show(
             "{EDIT} {}",
             ellipsize(table_name.unwrap_or("Estructura"), 18)
         );
-        if tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table) {
+        if tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table).clicked() {
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
         // Datos tab
         let datos_label = format!("{GRID} {}", ellipsize(table_name.unwrap_or("Datos"), 18));
-        if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table) {
+        if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table).clicked() {
             result.tab_clicked = Some(ActiveTab::Datos);
         }
 
@@ -71,13 +71,15 @@ pub fn show(
         for i in 0..sql_tab_count {
             let is_active = active == ActiveTab::Sql(i);
             let label = format!("{CODE} SQL {}", i + 1);
-            if tab_btn(ui, &label, is_active, true) {
+            let tab = tab_btn(ui, &label, is_active, true);
+            if tab.clicked() {
                 result.tab_clicked = Some(ActiveTab::Sql(i));
             }
             let close_resp = ui
                 .add(egui::Button::new("×").small().frame(false))
-                .on_hover_text("Cerrar pestaña SQL");
-            if close_resp.clicked() {
+                .on_hover_text("Cerrar pestaña SQL (o clic central en la pestaña)");
+            // Clic central, como en las pestañas de conexión
+            if close_resp.clicked() || tab.middle_clicked() {
                 result.close_sql_tab = Some(i);
             }
         }
@@ -107,12 +109,11 @@ fn tab_separator(ui: &mut egui::Ui) {
 
 /// Pestaña: fondo transparente, hover en superficie y subrayado de acento si
 /// está activa.
-fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool {
+fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> egui::Response {
     let p = theme::get(ui);
     if !enabled {
         let text = egui::RichText::new(label).color(p.text_disabled);
-        ui.add_enabled(false, egui::Button::new(text).frame(false));
-        return false;
+        return ui.add_enabled(false, egui::Button::new(text).frame(false));
     }
 
     let text_color = if active { p.text_primary } else { p.text_muted };
@@ -140,5 +141,5 @@ fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> bool 
             egui::Stroke::new(2.0, p.accent),
         );
     }
-    resp.clicked()
+    resp
 }

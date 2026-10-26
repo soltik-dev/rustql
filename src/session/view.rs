@@ -371,7 +371,7 @@ impl Session {
                             &mut tab.sql_text,
                             &tab.result,
                             tab.running.is_some(),
-                            f9,
+                            ctrl_enter || f9,
                             &mut tab.db_context,
                             databases,
                         );

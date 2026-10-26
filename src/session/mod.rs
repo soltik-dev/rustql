@@ -1977,4 +1977,47 @@ mod tests {
         assert!(s.table_view.table_data.is_none());
         assert!(s.table_view.query_loading);
     }
+
+    /// Un frame en el que solo se pulsa F5.
+    fn press_f5(s: &mut Session, sh: &mut Shared) {
+        let sorts = s.table_view.sort_specs.clone();
+        let ctx = egui::Context::default();
+        s.apply_signals(&ctx, sh, Default::default(), true, false, sorts);
+    }
+
+    #[test]
+    fn f5_en_una_pestana_sql_ejecuta_su_consulta() {
+        let mut s = session_with_table();
+        s.sql_tabs[0].sql_text = "SELECT 1".into();
+        s.active_tab = ActiveTab::Sql(0);
+        let mut sh = shared();
+        press_f5(&mut s, &mut sh);
+        assert!(s.sql_tabs[0].running.is_some());
+        assert!(!s.table_view.query_loading, "no recarga la tabla abierta");
+        finish_jobs(&mut s, &mut sh);
+        assert!(matches!(s.sql_tabs[0].result, Some(Ok(_))));
+    }
+
+    #[test]
+    fn f5_en_estructura_relee_las_columnas_y_no_los_datos() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Tabla;
+        press_f5(&mut s, &mut shared());
+        assert!(s.schema.open_table_columns().is_none());
+        assert!(!s.table_view.query_loading);
+        s.request_tab_data();
+        let key = ("db".to_string(), "t".to_string());
+        assert!(matches!(
+            s.schema.columns_info.get(&key),
+            Some(Loadable::Loading(_))
+        ));
+    }
+
+    #[test]
+    fn f5_en_datos_recarga_la_tabla() {
+        let mut s = session_with_table();
+        s.active_tab = ActiveTab::Datos;
+        press_f5(&mut s, &mut shared());
+        assert!(s.table_view.query_loading);
+    }
 }
