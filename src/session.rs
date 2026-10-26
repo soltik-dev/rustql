@@ -615,6 +615,93 @@ impl Session {
         Ok(stmts)
     }
 
+    /// Registra el valor nuevo de una celda (`None` = NULL). En una fila
+    /// existente, volver al valor original quita el cambio pendiente.
+    fn record_edit(&mut self, row: RowRef, col_idx: usize, value: Option<String>) {
+        let tv = &mut self.table_view;
+        match row {
+            RowRef::Insert(insert_idx) => {
+                if let Some(slot) = tv
+                    .pending_inserts
+                    .get_mut(insert_idx)
+                    .and_then(|ins| ins.values.get_mut(col_idx))
+                {
+                    *slot = value;
+                }
+            }
+            RowRef::Existing(row_idx) => {
+                let original = tv
+                    .table_data
+                    .as_ref()
+                    .and_then(|d| d.rows.get(row_idx))
+                    .and_then(|r| r.get(col_idx))
+                    .cloned()
+                    .flatten();
+                tv.pending_edits
+                    .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
+                if value != original {
+                    tv.pending_edits.push(PendingEdit {
+                        row_idx,
+                        col_idx,
+                        is_null: value.is_none(),
+                        new_value: value.unwrap_or_default(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Texto que muestra el grid en una celda: el del cambio pendiente si lo
+    /// hay, si no el de los datos. NULL se edita como texto vacío.
+    fn cell_text(&self, row: RowRef, col_idx: usize) -> String {
+        let tv = &self.table_view;
+        let value = match row {
+            RowRef::Insert(insert_idx) => tv
+                .pending_inserts
+                .get(insert_idx)
+                .and_then(|ins| ins.values.get(col_idx))
+                .cloned()
+                .flatten(),
+            RowRef::Existing(row_idx) => {
+                match tv
+                    .pending_edits
+                    .iter()
+                    .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
+                {
+                    Some(edit) => (!edit.is_null).then(|| edit.new_value.clone()),
+                    None => tv
+                        .table_data
+                        .as_ref()
+                        .and_then(|d| d.rows.get(row_idx))
+                        .and_then(|r| r.get(col_idx))
+                        .cloned()
+                        .flatten(),
+                }
+            }
+        };
+        value.unwrap_or_default()
+    }
+
+    /// Columna a la que salta Tab: la siguiente editable (en una fila nueva,
+    /// las AUTO_INCREMENT no lo son), volviendo a la primera al final.
+    fn next_editable_col(&self, row: RowRef, col_idx: usize) -> usize {
+        let tv = &self.table_view;
+        let col_count = tv.table_data.as_ref().map_or(1, |d| d.columns.len().max(1));
+        let is_auto = |c: usize| match row {
+            RowRef::Insert(insert_idx) => tv
+                .pending_inserts
+                .get(insert_idx)
+                .and_then(|ins| ins.auto_cols.get(c))
+                .copied()
+                .unwrap_or(false),
+            RowRef::Existing(_) => false,
+        };
+        (1..=col_count)
+            .map(|step| (col_idx + step) % col_count)
+            .find(|&c| !is_auto(c))
+            .unwrap_or(col_idx)
+    }
+
     /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
     fn save_table_state(&mut self, sh: &mut Shared) {
         if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
@@ -1846,35 +1933,7 @@ impl Session {
             }
             GridAction::CellSetNull { row, col_idx } => {
                 self.table_view.editing_cell = None;
-                match row {
-                    RowRef::Insert(insert_idx) => {
-                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
-                            && col_idx < ins.values.len()
-                        {
-                            ins.values[col_idx] = None;
-                        }
-                    }
-                    RowRef::Existing(row_idx) => {
-                        let original = self
-                            .table_view
-                            .table_data
-                            .as_ref()
-                            .and_then(|d| d.rows.get(row_idx))
-                            .and_then(|r| r.get(col_idx))
-                            .cloned()
-                            .unwrap_or_default();
-                        self.table_view
-                            .pending_edits
-                            .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                        self.table_view.pending_edits.push(PendingEdit {
-                            row_idx,
-                            col_idx,
-                            original,
-                            new_value: String::new(),
-                            is_null: true,
-                        });
-                    }
-                }
+                self.record_edit(row, col_idx, None);
             }
             GridAction::CellEditCommitted {
                 row,
@@ -1882,59 +1941,7 @@ impl Session {
                 new_value,
             } => {
                 self.table_view.editing_cell = None;
-                match row {
-                    RowRef::Insert(insert_idx) => {
-                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
-                            && col_idx < ins.values.len()
-                        {
-                            ins.values[col_idx] = Some(new_value);
-                        }
-                    }
-                    RowRef::Existing(row_idx) => {
-                        let original = self
-                            .table_view
-                            .table_data
-                            .as_ref()
-                            .and_then(|d| d.rows.get(row_idx))
-                            .and_then(|r| r.get(col_idx))
-                            .cloned()
-                            .unwrap_or_default();
-
-                        if original.as_deref() == Some(new_value.as_str()) {
-                            self.table_view
-                                .pending_edits
-                                .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                        } else if let Some(existing) = self
-                            .table_view
-                            .pending_edits
-                            .iter_mut()
-                            .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                        {
-                            if existing.original.as_deref() == Some(new_value.as_str())
-                                && !existing.is_null
-                            {
-                                let idx = self
-                                    .table_view
-                                    .pending_edits
-                                    .iter()
-                                    .position(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                                    .unwrap();
-                                self.table_view.pending_edits.remove(idx);
-                            } else {
-                                existing.new_value = new_value;
-                                existing.is_null = false;
-                            }
-                        } else {
-                            self.table_view.pending_edits.push(PendingEdit {
-                                row_idx,
-                                col_idx,
-                                original,
-                                new_value,
-                                is_null: false,
-                            });
-                        }
-                    }
-                }
+                self.record_edit(row, col_idx, Some(new_value));
             }
             GridAction::CellEditCancelled => {
                 self.table_view.editing_cell = None;
@@ -1944,69 +1951,12 @@ impl Session {
                 col_idx,
                 new_value,
             } => {
-                // Commit current value, then move focus to next column
-                match row {
-                    RowRef::Insert(insert_idx) => {
-                        if let Some(ins) = self.table_view.pending_inserts.get_mut(insert_idx)
-                            && col_idx < ins.values.len()
-                        {
-                            ins.values[col_idx] = Some(new_value);
-                        }
-                    }
-                    RowRef::Existing(row_idx) => {
-                        let original = self
-                            .table_view
-                            .table_data
-                            .as_ref()
-                            .and_then(|d| d.rows.get(row_idx))
-                            .and_then(|r| r.get(col_idx))
-                            .cloned()
-                            .unwrap_or_default();
-                        if original.as_deref() != Some(new_value.as_str()) {
-                            self.table_view
-                                .pending_edits
-                                .retain(|e| !(e.row_idx == row_idx && e.col_idx == col_idx));
-                            self.table_view.pending_edits.push(PendingEdit {
-                                row_idx,
-                                col_idx,
-                                original,
-                                new_value,
-                                is_null: false,
-                            });
-                        }
-                    }
-                }
-                // Move to next column
-                let col_count = self
-                    .table_view
-                    .table_data
-                    .as_ref()
-                    .map(|d| d.columns.len())
-                    .unwrap_or(1);
-                let next_col = (col_idx + 1) % col_count;
-                let next_val = match row {
-                    RowRef::Insert(insert_idx) => self
-                        .table_view
-                        .pending_inserts
-                        .get(insert_idx)
-                        .and_then(|ins| ins.values.get(next_col))
-                        .and_then(|v| v.as_deref())
-                        .unwrap_or("")
-                        .to_string(),
-                    RowRef::Existing(row_idx) => self
-                        .table_view
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx))
-                        .and_then(|r| r.get(next_col))
-                        .and_then(|v| v.as_deref())
-                        .unwrap_or("")
-                        .to_string(),
-                };
+                self.record_edit(row, col_idx, Some(new_value));
+                let next_col = self.next_editable_col(row, col_idx);
                 self.table_view.editing_cell = Some(EditingCell {
                     row,
                     col_idx: next_col,
-                    buffer: next_val,
+                    buffer: self.cell_text(row, next_col),
                     needs_focus: true,
                 });
             }
@@ -2779,7 +2729,6 @@ mod tests {
         s.table_view.pending_edits.push(PendingEdit {
             row_idx: 0,
             col_idx: 0,
-            original: Some("1".into()),
             new_value: "9".into(),
             is_null: false,
         });
@@ -2797,7 +2746,6 @@ mod tests {
         PendingEdit {
             row_idx,
             col_idx,
-            original: None,
             new_value: value.unwrap_or_default().into(),
             is_null: value.is_none(),
         }
@@ -2899,5 +2847,46 @@ mod tests {
                 row("d", Some("it's \\ fine")),
             ]
         );
+    }
+
+    #[test]
+    fn volver_al_valor_original_quita_el_cambio() {
+        let mut s = session_with_table();
+        let cell = RowRef::Existing(0);
+        s.record_edit(cell, 0, Some("9".into()));
+        assert_eq!(s.cell_text(cell, 0), "9");
+        // Tab o Enter con el valor original: antes, Tab dejaba el «9» pendiente
+        s.record_edit(cell, 0, Some("1".into()));
+        assert!(s.table_view.pending_edits.is_empty());
+        assert_eq!(s.cell_text(cell, 0), "1");
+    }
+
+    #[test]
+    fn null_sobre_null_no_es_un_cambio() {
+        let mut s = session_with_table();
+        s.table_view.table_data.as_mut().unwrap().rows[0][0] = None;
+        s.record_edit(RowRef::Existing(0), 0, None);
+        assert!(s.table_view.pending_edits.is_empty());
+        s.record_edit(RowRef::Existing(0), 0, Some(String::new()));
+        assert_eq!(s.table_view.pending_edits.len(), 1, "NULL → '' sí cambia");
+    }
+
+    #[test]
+    fn tab_salta_las_columnas_auto_de_una_fila_nueva() {
+        let mut s = session_with_table();
+        s.table_view.table_data.as_mut().unwrap().columns =
+            vec!["id".into(), "a".into(), "b".into()];
+        s.table_view.pending_inserts.push(PendingInsert {
+            values: vec![None, None, None],
+            auto_cols: vec![true, false, false],
+        });
+        let row = RowRef::Insert(0);
+        assert_eq!(s.next_editable_col(row, 1), 2);
+        assert_eq!(
+            s.next_editable_col(row, 2),
+            1,
+            "da la vuelta sin pasar por id"
+        );
+        assert_eq!(s.next_editable_col(RowRef::Existing(0), 2), 0);
     }
 }

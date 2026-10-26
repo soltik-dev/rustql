@@ -30,7 +30,6 @@ pub struct PendingEdit {
     /// Índice real en `QueryResult.rows` (no el índice de visualización con sort).
     pub row_idx: usize,
     pub col_idx: usize,
-    pub original: Option<String>,
     pub new_value: String,
     /// Si true, el UPDATE usa `= NULL` en lugar de `= 'valor'`.
     pub is_null: bool,
