@@ -14,6 +14,7 @@ use crate::db::{
 };
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
+use crate::secrets;
 use crate::settings::{self, AppSettings, SavedSqlTab};
 use crate::table_state::{self, TableStates};
 use crate::ui::db_info::DbInfoAction;
@@ -161,12 +162,16 @@ pub struct Session {
     pub selected_profile_idx: Option<usize>,
     pub profile_name: String,
     pub save_password: bool,
+    /// Contraseñas que un hilo terminó de guardar en el llavero: (id del perfil, resultado).
+    keyring_tx: mpsc::Sender<(String, Result<(), String>)>,
+    keyring_rx: Receiver<(String, Result<(), String>)>,
 }
 
 impl Session {
     pub fn new(id: u64) -> Self {
         let params = ConnectionParams::default();
         let port_str = params.port.to_string();
+        let (keyring_tx, keyring_rx) = mpsc::channel();
         Self {
             id,
             state: ConnState::Disconnected,
@@ -185,6 +190,8 @@ impl Session {
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
+            keyring_tx,
+            keyring_rx,
         }
     }
 
@@ -1344,6 +1351,26 @@ impl Session {
         self.poll_connection(ctx, sh);
         self.poll_query_receiver(ctx);
         self.poll_export_progress(ctx);
+        self.poll_keyring(sh);
+    }
+
+    /// Marca los perfiles cuya contraseña ya está guardada en el llavero.
+    fn poll_keyring(&mut self, sh: &mut Shared) {
+        while let Ok((id, result)) = self.keyring_rx.try_recv() {
+            match result {
+                Ok(()) => {
+                    if let Some(p) = sh.profiles.iter_mut().find(|p| p.id == id) {
+                        p.password_in_keyring = true;
+                        p.password = None;
+                        profiles::save(&sh.profiles);
+                    }
+                }
+                Err(e) => {
+                    self.error_message =
+                        Some(format!("No se guardó la contraseña en el llavero: {e}"));
+                }
+            }
+        }
     }
 
     /// Dibuja la sesión y aplica las acciones del frame. Los paneles globales
@@ -2462,7 +2489,7 @@ impl Session {
             self.params = profile.to_params();
             self.port_str = self.params.port.to_string();
             self.profile_name = profile.name.clone();
-            self.save_password = profile.password.is_some();
+            self.save_password = profile.has_password();
             self.color = profile.color;
             self.selected_profile_idx = Some(idx);
             self.error_message = None;
@@ -2472,37 +2499,52 @@ impl Session {
             if let Ok(p) = self.port_str.parse::<u16>() {
                 self.params.port = p;
             }
-            let password = if self.save_password {
-                Some(self.params.password.clone())
-            } else {
-                None
-            };
+            let name = self.profile_name.trim().to_string();
+            let idx = self
+                .selected_profile_idx
+                .or_else(|| sh.profiles.iter().position(|p| p.name == name));
+            let previous = idx.map(|i| &sh.profiles[i]);
+            let had_keyring = previous.is_some_and(|p| p.password_in_keyring);
             let profile = ConnectionProfile {
-                name: self.profile_name.trim().to_string(),
+                id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
+                name,
                 host: self.params.host.clone(),
                 port: self.params.port,
                 user: self.params.user.clone(),
-                password,
+                // Una contraseña nueva se marca cuando el llavero la confirma
+                // (poll_keyring). Con el campo vacío se conserva la que había.
+                password_in_keyring: had_keyring && self.save_password,
+                password: None,
                 color: self.color,
             };
-            if let Some(idx) = self.selected_profile_idx {
-                sh.profiles[idx] = profile;
-            } else if let Some(pos) = sh
-                .profiles
-                .iter()
-                .position(|p| p.name == self.profile_name.trim())
-            {
-                sh.profiles[pos] = profile;
-                self.selected_profile_idx = Some(pos);
-            } else {
-                sh.profiles.push(profile);
-                self.selected_profile_idx = Some(sh.profiles.len() - 1);
+            if self.save_password && !self.params.password.is_empty() {
+                let id = profile.id.clone();
+                let label = profile.keyring_label();
+                let password = self.params.password.clone();
+                let tx = self.keyring_tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let result = secrets::set(&id, &label, &password);
+                    let _ = tx.send((id, result));
+                    ctx.request_repaint();
+                });
+            } else if had_keyring && !self.save_password {
+                secrets::delete_in_background(profile.id.clone());
             }
+            self.params.keyring_id = profile.password_in_keyring.then(|| profile.id.clone());
+            match idx {
+                Some(i) => sh.profiles[i] = profile,
+                None => sh.profiles.push(profile),
+            }
+            self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
             profiles::save(&sh.profiles);
         }
 
         if delete_profile && let Some(idx) = self.selected_profile_idx {
-            sh.profiles.remove(idx);
+            let removed = sh.profiles.remove(idx);
+            if removed.password_in_keyring {
+                secrets::delete_in_background(removed.id);
+            }
             self.selected_profile_idx = None;
             self.profile_name.clear();
             profiles::save(&sh.profiles);

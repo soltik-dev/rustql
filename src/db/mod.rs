@@ -9,6 +9,9 @@ pub struct ConnectionParams {
     pub port: u16,
     pub user: String,
     pub password: String,
+    /// Perfil con la contraseña en el llavero del sistema: si `password` está
+    /// vacía, se lee de ahí al conectar.
+    pub keyring_id: Option<String>,
 }
 
 impl ConnectionParams {
@@ -16,6 +19,21 @@ impl ConnectionParams {
     /// estado por servidor, independiente del nombre del perfil.
     pub fn key(&self) -> String {
         format!("{}@{}:{}", self.user, self.host, self.port)
+    }
+
+    /// La contraseña escrita o, si está vacía, la del llavero. Puede bloquear
+    /// (el llavero puede pedir desbloqueo): solo desde hilos de trabajo.
+    pub fn resolve_password(&self) -> DbResult<String> {
+        match &self.keyring_id {
+            Some(id) if self.password.is_empty() => crate::secrets::get(id)
+                .map_err(|e| format!("No se pudo leer la contraseña del llavero: {e}"))?
+                .ok_or_else(|| {
+                    "La contraseña de este perfil ya no está en el llavero del sistema: \
+                     escríbela y vuelve a guardar el perfil."
+                        .into()
+                }),
+            _ => Ok(self.password.clone()),
+        }
     }
 }
 
@@ -26,6 +44,7 @@ impl Default for ConnectionParams {
             port: 3306,
             user: "root".into(),
             password: String::new(),
+            keyring_id: None,
         }
     }
 }
