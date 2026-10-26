@@ -3,7 +3,7 @@ use std::sync::Arc;
 use eframe::egui;
 
 use crate::db::QueryResult;
-use crate::ui::{sql_highlight, theme};
+use crate::ui::{CMD, sql_highlight, theme};
 
 #[derive(Default, Clone)]
 pub struct SqlTab {
@@ -25,13 +25,14 @@ pub enum SqlEditorAction {
 }
 
 /// Panel "SQL": editor de consultas libre. Con `running`, la consulta
-/// anterior aún no ha terminado y no se puede lanzar otra.
+/// anterior aún no ha terminado y no se puede lanzar otra. `run_pressed`: el
+/// atajo de ejecutar (Ctrl+Enter, o F9 como en HeidiSQL).
 pub fn show(
     ui: &mut egui::Ui,
     sql_text: &mut String,
     last_result: &Option<Result<QueryResult, String>>,
     running: bool,
-    f9_pressed: bool,
+    run_pressed: bool,
     db_context: &mut String,
     databases: &[String],
 ) -> SqlEditorAction {
@@ -66,9 +67,9 @@ pub fn show(
         let execute = theme::primary_button_enabled(
             ui,
             !running,
-            format!("{} Ejecutar  F9", crate::ui::icons::CODE),
+            format!("{} Ejecutar  {CMD}Enter", crate::ui::icons::CODE),
         );
-        if !running && (execute.clicked() || f9_pressed) {
+        if !running && (execute.clicked() || run_pressed) {
             let sql = sql_text.trim().to_string();
             if !sql.is_empty() {
                 action = SqlEditorAction::Execute {
@@ -125,8 +126,10 @@ pub fn show(
         None => {
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    egui::RichText::new("Escribe una consulta y pulsa F9 o el botón Ejecutar")
-                        .color(p.text_muted),
+                    egui::RichText::new(format!(
+                        "Escribe una consulta y pulsa {CMD}Enter o el botón Ejecutar"
+                    ))
+                    .color(p.text_muted),
                 );
             });
         }
