@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -41,7 +40,10 @@ fn default_font_family() -> String {
     EMBEDDED_FONT_NAME.to_owned()
 }
 
+/// Los campos que falten en el JSON (ficheros de versiones anteriores) toman
+/// su valor de `AppSettings::default()`.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub theme: Theme,
     pub font_size: f32,
@@ -309,18 +311,10 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
     ctx.set_fonts(fonts);
 }
 
-fn settings_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rustql").join("settings.json"))
-}
+const SETTINGS_FILE: &str = "settings.json";
 
 pub fn load() -> AppSettings {
-    let Some(path) = settings_path() else {
-        return AppSettings::default();
-    };
-    let Ok(data) = std::fs::read_to_string(path) else {
-        return AppSettings::default();
-    };
-    let mut s: AppSettings = serde_json::from_str(&data).unwrap_or_default();
+    let mut s: AppSettings = crate::config_file::load(SETTINGS_FILE);
     // "Liberation Sans" era el default auto-inyectado antes de embeber Inter,
     // no una elección del usuario: migrarlo a la fuente integrada.
     if s.font_family == "Liberation Sans" {
@@ -330,13 +324,7 @@ pub fn load() -> AppSettings {
 }
 
 pub fn save(s: &AppSettings) {
-    let Some(path) = settings_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(data) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(path, data);
-    }
+    crate::config_file::save(SETTINGS_FILE, s, false);
 }
 
 /// Aplica el tema y el tamaño de fuente al contexto egui.
@@ -369,4 +357,19 @@ fn detect_system_mode() -> Option<dark_light::Mode> {
     rx.recv_timeout(std::time::Duration::from_millis(250))
         .ok()?
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ajustes_incompletos_toman_los_valores_por_defecto() {
+        // Antes, sin font_size el JSON no se podía leer y se perdía todo
+        let s: AppSettings = serde_json::from_str(r#"{"theme": "Dark"}"#).unwrap();
+        assert!(s.theme == Theme::Dark);
+        assert_eq!(s.font_size, 13.0);
+        assert_eq!(s.query_limit, 500);
+        assert!(s.show_sidebar);
+    }
 }

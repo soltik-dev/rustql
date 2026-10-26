@@ -1,6 +1,3 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
 use serde::{Deserialize, Serialize};
 
 use crate::db::ConnectionParams;
@@ -113,18 +110,10 @@ pub fn legacy_passwords(profiles: &[ConnectionProfile]) -> Vec<(String, String, 
         .collect()
 }
 
-fn profiles_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rustql").join("connections.json"))
-}
+const PROFILES_FILE: &str = "connections.json";
 
 pub fn load() -> Vec<ConnectionProfile> {
-    let Some(path) = profiles_path() else {
-        return vec![];
-    };
-    let Ok(data) = std::fs::read_to_string(path) else {
-        return vec![];
-    };
-    let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(&data).unwrap_or_default();
+    let mut profiles: Vec<ConnectionProfile> = crate::config_file::load(PROFILES_FILE);
     if normalize(&mut profiles) {
         save(&profiles);
     }
@@ -148,36 +137,10 @@ fn normalize(profiles: &mut [ConnectionProfile]) -> bool {
     changed
 }
 
+/// Legible solo por el usuario: puede contener contraseñas heredadas en
+/// claro (sin llavero disponible).
 pub fn save(profiles: &[ConnectionProfile]) {
-    let Some(path) = profiles_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-    if let Ok(data) = serde_json::to_string_pretty(profiles) {
-        let _ = write_private(&path, &data);
-    }
-}
-
-/// Escribe el fichero legible solo por el usuario (0600 en Unix), también si
-/// ya existía con otros permisos.
-fn write_private(path: &Path, data: &str) -> std::io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    // `mode` solo cuenta al crearlo: corrige los de versiones anteriores.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(data.as_bytes())
+    crate::config_file::save(PROFILES_FILE, &profiles, true);
 }
 
 #[cfg(test)]
