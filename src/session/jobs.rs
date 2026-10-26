@@ -26,6 +26,13 @@ pub enum JobResult {
     },
     Schema(SchemaResult),
     Write(WriteResult),
+    /// Resultado del editor SQL para la pestaña que lanzó `token`.
+    Editor {
+        token: u64,
+        sql: String,
+        elapsed_ms: u64,
+        result: DbResult<QueryResult>,
+    },
 }
 
 pub struct Jobs {

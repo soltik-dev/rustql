@@ -36,20 +36,22 @@ fn rows_to_result(raw_rows: Vec<mysql::Row>) -> QueryResult {
         })
         .unwrap_or_default();
 
-    let rows = raw_rows
-        .into_iter()
-        .map(|mut row| {
-            let n = row.len();
-            (0..n)
-                .map(|i| {
-                    let v: Value = row.take(i).unwrap_or(Value::NULL);
-                    value_to_string(v)
-                })
-                .collect()
-        })
-        .collect();
+    let rows = raw_rows.into_iter().map(row_values).collect();
 
-    QueryResult { columns, rows }
+    QueryResult {
+        columns,
+        rows,
+        truncated: false,
+    }
+}
+
+fn row_values(mut row: mysql::Row) -> Vec<Option<String>> {
+    (0..row.len())
+        .map(|i| {
+            let v: Value = row.take(i).unwrap_or(Value::NULL);
+            value_to_string(v)
+        })
+        .collect()
 }
 
 fn col(row: &[Option<String>], i: usize) -> String {
@@ -158,7 +160,12 @@ impl DbBackend for MysqlBackend {
         Ok(rows_to_result(raw_rows))
     }
 
-    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+    fn execute_in_session(
+        &self,
+        db: Option<&str>,
+        sql: &str,
+        max_rows: usize,
+    ) -> DbResult<QueryResult> {
         let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
         let conn = match &mut *session {
             Some(conn) => conn,
@@ -171,10 +178,32 @@ impl DbBackend for MysqlBackend {
             if let Some(db) = db {
                 conn.query_drop(format!("USE `{}`", escape_ident(db)))?;
             }
-            conn.query::<mysql::Row, _>(sql)
+            // Del primer conjunto de resultados, como mucho max_rows filas.
+            // Al soltar `set`, el crate lee y descarta el resto.
+            let mut set = conn.query_iter(sql)?;
+            let columns = set
+                .columns()
+                .as_ref()
+                .iter()
+                .map(|c| c.name_str().into_owned())
+                .collect();
+            let mut rows = Vec::new();
+            let mut truncated = false;
+            for row in set.by_ref() {
+                if rows.len() == max_rows {
+                    truncated = true;
+                    break;
+                }
+                rows.push(row_values(row?));
+            }
+            Ok::<_, mysql::Error>(QueryResult {
+                columns,
+                rows,
+                truncated,
+            })
         })();
         match result {
-            Ok(raw_rows) => Ok(rows_to_result(raw_rows)),
+            Ok(data) => Ok(data),
             Err(e) => {
                 // Conexión perdida (servidor reiniciado, timeout…): la próxima
                 // ejecución abre otra; el estado de la sesión ya se ha perdido.
@@ -361,7 +390,7 @@ mod tests {
         b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
         b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
         let db = Some("rustql_test_session");
-        let run = |sql: &str| b.execute_in_session(db, sql).unwrap().rows;
+        let run = |sql: &str| b.execute_in_session(db, sql, 100).unwrap().rows;
         let count = || {
             b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
                 .unwrap()
@@ -384,5 +413,34 @@ mod tests {
         assert_eq!(count(), Some("1".into()));
 
         b.execute_write("DROP DATABASE rustql_test_session").unwrap();
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn el_editor_lee_como_mucho_max_rows() {
+        let b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap").unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_cap").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)").unwrap();
+        b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
+            .unwrap();
+        let db = Some("rustql_test_cap");
+        let capped = b.execute_in_session(db, "SELECT * FROM t ORDER BY id", 3);
+        let exact = b.execute_in_session(db, "SELECT * FROM t", 5);
+        let empty = b.execute_in_session(db, "SELECT id AS n FROM t WHERE 1 = 0", 3);
+        // Tras recortar, la sesión sigue utilizable
+        let after = b.execute_in_session(db, "SELECT COUNT(*) FROM t", 3);
+        b.execute_write("DROP DATABASE rustql_test_cap").unwrap();
+
+        let capped = capped.unwrap();
+        assert_eq!(capped.rows.len(), 3);
+        assert!(capped.truncated);
+        let exact = exact.unwrap();
+        assert_eq!(exact.rows.len(), 5);
+        assert!(!exact.truncated);
+        let empty = empty.unwrap();
+        assert_eq!(empty.columns, ["n"], "columnas aunque no haya filas");
+        assert!(empty.rows.is_empty());
+        assert_eq!(after.unwrap().rows, [[Some("5".to_string())]]);
     }
 }

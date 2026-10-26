@@ -163,6 +163,8 @@ pub struct Session {
     jobs: Jobs,
     /// Escrituras lanzadas y aún sin resultado.
     writes_in_flight: usize,
+    /// Ejecuciones del editor SQL lanzadas: identifican su pestaña.
+    editor_runs: u64,
     /// Contraseñas que un hilo terminó de guardar en el llavero: (id del perfil, resultado).
     keyring_tx: mpsc::Sender<(String, Result<(), String>)>,
     keyring_rx: Receiver<(String, Result<(), String>)>,
@@ -193,6 +195,7 @@ impl Session {
             save_password: false,
             jobs: Jobs::default(),
             writes_in_flight: 0,
+            editor_runs: 0,
             keyring_tx,
             keyring_rx,
         }
@@ -249,6 +252,9 @@ impl Session {
         self.state = ConnState::Disconnected;
         self.jobs.new_epoch();
         self.table_view.query_loading = false;
+        for tab in &mut self.sql_tabs {
+            tab.running = None;
+        }
     }
 }
 
@@ -265,6 +271,45 @@ impl Session {
         };
         self.jobs.spawn(backend, job);
         true
+    }
+
+    /// Ejecuta SQL del editor en segundo plano; el resultado irá a la pestaña
+    /// `tab_idx` (aunque cambie de posición entretanto).
+    fn run_editor(&mut self, tab_idx: usize, sql: String, db_context: String, max_rows: usize) {
+        self.editor_runs += 1;
+        let token = self.editor_runs;
+        let spawned = self.spawn_job(move |b| {
+            let start = Instant::now();
+            let db = (!db_context.is_empty()).then_some(db_context.as_str());
+            let result = b.execute_in_session(db, &sql, max_rows);
+            JobResult::Editor {
+                token,
+                sql,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                result,
+            }
+        });
+        if spawned && let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
+            tab.running = Some(token);
+        }
+    }
+
+    fn apply_editor_result(
+        &mut self,
+        token: u64,
+        sql: String,
+        elapsed_ms: u64,
+        result: DbResult<QueryResult>,
+    ) {
+        match &result {
+            Ok(data) => self.push_log(LogEntry::ok(sql, elapsed_ms, data.rows.len())),
+            Err(e) => self.push_log(LogEntry::err(sql, elapsed_ms, e.as_str())),
+        }
+        // La pestaña puede haberse cerrado mientras tanto
+        if let Some(tab) = self.sql_tabs.iter_mut().find(|t| t.running == Some(token)) {
+            tab.running = None;
+            tab.result = Some(result);
+        }
     }
 
     /// Carga los datos de la tabla en segundo plano. Sustituye a la consulta
@@ -833,7 +878,7 @@ impl Session {
                 .map(|t| SqlTab {
                     db_context: t.db_context.clone(),
                     sql_text: t.sql_text.clone(),
-                    result: None,
+                    ..Default::default()
                 })
                 .collect()
         };
@@ -924,6 +969,12 @@ impl Session {
             } => self.apply_table_data(generation, sql, elapsed_ms, result),
             JobResult::Schema(result) => self.apply_schema_job(result),
             JobResult::Write(done) => self.apply_write(sh, done),
+            JobResult::Editor {
+                token,
+                sql,
+                elapsed_ms,
+                result,
+            } => self.apply_editor_result(token, sql, elapsed_ms, result),
         }
     }
 
@@ -1681,6 +1732,7 @@ impl Session {
                                     ui,
                                     &mut tab.sql_text,
                                     &result_clone,
+                                    tab.running.is_some(),
                                     f9,
                                     &mut tab.db_context,
                                     &databases_clone,
@@ -1718,7 +1770,7 @@ impl Session {
             self.sql_tabs.push(SqlTab {
                 db_context: db_ctx,
                 sql_text: String::new(),
-                result: None,
+                ..Default::default()
             });
             self.active_tab = ActiveTab::Sql(new_idx);
             self.save_tabs_state(sh);
@@ -2008,7 +2060,7 @@ impl Session {
                 self.sql_tabs.push(SqlTab {
                     db_context: db.clone(),
                     sql_text,
-                    result: None,
+                    ..Default::default()
                 });
                 self.active_tab = ActiveTab::Sql(new_idx);
                 self.save_tabs_state(sh);
@@ -2073,31 +2125,10 @@ impl Session {
         }
 
         // SQL editor
-        if let SqlEditorAction::Execute { sql, db_context } = sql_action {
-            let db = (!db_context.is_empty()).then_some(db_context.as_str());
-            let start = Instant::now();
-            let result = match &self.state {
-                ConnState::Connected(b) => b.execute_in_session(db, &sql),
-                _ => return outcome,
-            };
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let query_result = match result {
-                Ok(data) => {
-                    let rows = data.rows.len();
-                    self.push_log(LogEntry::ok(&sql, duration_ms, rows));
-                    Some(Ok(data))
-                }
-                Err(e) => {
-                    self.push_log(LogEntry::err(&sql, duration_ms, &e));
-                    Some(Err(e))
-                }
-            };
-            // Store result in active SQL tab
-            if let ActiveTab::Sql(tab_idx) = self.active_tab
-                && let Some(tab) = self.sql_tabs.get_mut(tab_idx)
-            {
-                tab.result = query_result.clone();
-            }
+        if let SqlEditorAction::Execute { sql, db_context } = sql_action
+            && let ActiveTab::Sql(tab_idx) = self.active_tab
+        {
+            self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
         }
 
         // Modal action
@@ -2223,9 +2254,15 @@ mod tests {
             Ok(QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
+                ..Default::default()
             })
         }
-        fn execute_in_session(&self, _: Option<&str>, sql: &str) -> DbResult<QueryResult> {
+        fn execute_in_session(
+            &self,
+            _: Option<&str>,
+            sql: &str,
+            _: usize,
+        ) -> DbResult<QueryResult> {
             self.execute_query(sql)
         }
         fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
@@ -2272,6 +2309,7 @@ mod tests {
         QueryResult {
             columns: vec!["id".into()],
             rows: ids.iter().map(|id| vec![Some(id.to_string())]).collect(),
+            ..Default::default()
         }
     }
 
@@ -2501,6 +2539,7 @@ mod tests {
                 vec![Some("1".into()), Some("a".into())],
                 vec![Some("2".into()), None],
             ],
+            ..Default::default()
         });
         s.table_view.pending_deletes.insert(1);
         // Clave primaria y otra columna de la misma fila: un único UPDATE
@@ -2702,6 +2741,7 @@ mod tests {
         s.table_view.table_data = Some(QueryResult {
             columns: vec!["id".into(), "v".into(), "n".into()],
             rows: vec![vec![Some("1".into()), Some("a".into()), None]],
+            ..Default::default()
         });
         s.schema.columns_info.insert(
             ("db".into(), "t".into()),
@@ -2770,6 +2810,7 @@ mod tests {
         s.table_view.table_data = Some(QueryResult {
             columns: vec!["id".into(), "creado".into(), "n".into(), "v".into()],
             rows: Vec::new(),
+            ..Default::default()
         });
         let key = ("rustql_test_insert".to_string(), "t".to_string());
         let columns = b.get_columns_info(&key.0, &key.1).unwrap();
@@ -2952,5 +2993,27 @@ mod tests {
         finish_jobs(&mut s, &mut sh);
         assert!(!s.table_view.saving);
         assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn el_resultado_del_editor_va_a_su_pestana() {
+        let mut s = session_with_table();
+        s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
+        s.run_editor(1, "SELECT 1".into(), String::new(), 10);
+        assert!(s.sql_tabs[1].running.is_some());
+        // Se cierra la primera: la que ejecuta pasa a ser la 0
+        s.sql_tabs.remove(0);
+        finish_jobs(&mut s, &mut shared());
+        assert!(s.sql_tabs[0].running.is_none());
+        assert!(matches!(s.sql_tabs[0].result, Some(Ok(_))));
+        assert_eq!(s.query_log.len(), 1);
+    }
+
+    #[test]
+    fn desconectar_no_deja_el_editor_esperando() {
+        let mut s = session_with_table();
+        s.run_editor(0, "SELECT 1".into(), String::new(), 10);
+        s.disconnect();
+        assert!(s.sql_tabs[0].running.is_none());
     }
 }

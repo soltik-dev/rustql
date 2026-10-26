@@ -61,11 +61,13 @@ pub struct Statement {
     pub params: Vec<Option<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     /// Cada celda es `None` si el valor es NULL en la base de datos.
     pub rows: Vec<Vec<Option<String>>>,
+    /// Había más filas de las que se leyeron (tope del editor SQL).
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +145,13 @@ pub trait DbBackend: Send + Sync {
     /// SQL del editor, en una conexión propia que se mantiene entre
     /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
     /// tablas temporales siguen vivas en la siguiente. Con `db`, antes `USE`.
-    fn execute_in_session(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
+    /// Lee como mucho `max_rows` filas (el resto se descarta, `truncated`).
+    fn execute_in_session(
+        &self,
+        db: Option<&str>,
+        sql: &str,
+        max_rows: usize,
+    ) -> DbResult<QueryResult>;
 
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;

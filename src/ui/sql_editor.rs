@@ -10,6 +10,8 @@ pub struct SqlTab {
     pub db_context: String,
     pub sql_text: String,
     pub result: Option<Result<QueryResult, String>>,
+    /// Ejecución en curso (su número), si la hay.
+    pub running: Option<u64>,
 }
 
 pub enum SqlEditorAction {
@@ -17,11 +19,13 @@ pub enum SqlEditorAction {
     Execute { sql: String, db_context: String },
 }
 
-/// Panel "SQL": editor de consultas libre.
+/// Panel "SQL": editor de consultas libre. Con `running`, la consulta
+/// anterior aún no ha terminado y no se puede lanzar otra.
 pub fn show(
     ui: &mut egui::Ui,
     sql_text: &mut String,
     last_result: &Option<Result<QueryResult, String>>,
+    running: bool,
     f9_pressed: bool,
     db_context: &mut String,
     databases: &[String],
@@ -54,9 +58,12 @@ pub fn show(
 
         ui.separator();
         ui.label("SQL libre:");
-        if theme::primary_button(ui, format!("{} Ejecutar  F9", crate::ui::icons::CODE)).clicked()
-            || f9_pressed
-        {
+        let execute = theme::primary_button_enabled(
+            ui,
+            !running,
+            format!("{} Ejecutar  F9", crate::ui::icons::CODE),
+        );
+        if !running && (execute.clicked() || f9_pressed) {
             let sql = sql_text.trim().to_string();
             if !sql.is_empty() {
                 action = SqlEditorAction::Execute {
@@ -67,6 +74,10 @@ pub fn show(
         }
         if ui.button("Limpiar").clicked() {
             sql_text.clear();
+        }
+        if running {
+            ui.spinner();
+            ui.label("Ejecutando…");
         }
     });
     ui.separator();
@@ -127,6 +138,15 @@ pub fn show(
                     ))
                     .color(p.text_muted),
                 );
+                if data.truncated {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "· solo las primeras {} (hay más; el tope se cambia en Ajustes)",
+                            data.rows.len()
+                        ))
+                        .color(p.warning),
+                    );
+                }
             });
             ui.separator();
 

@@ -87,5 +87,10 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
         .add(egui::Slider::new(&mut settings.query_limit, 100..=10000).step_by(100.0))
         .changed();
 
+    theme::section_label(ui, "Máx. filas en el editor SQL");
+    changed |= ui
+        .add(egui::Slider::new(&mut settings.sql_editor_max_rows, 1_000..=100_000).step_by(1_000.0))
+        .changed();
+
     changed
 }

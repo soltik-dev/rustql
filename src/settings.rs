@@ -66,6 +66,8 @@ pub struct AppSettings {
     pub copy_format: CopyFormat,
     #[serde(default = "default_query_limit")]
     pub query_limit: usize,
+    /// Tope de filas que lee el editor SQL; el resto se descarta.
+    pub sql_editor_max_rows: usize,
 }
 
 impl Default for AppSettings {
@@ -81,6 +83,7 @@ impl Default for AppSettings {
             sql_tabs_by_conn: HashMap::new(),
             copy_format: CopyFormat::Csv,
             query_limit: 500,
+            sql_editor_max_rows: 10_000,
         }
     }
 }
@@ -370,6 +373,7 @@ mod tests {
         assert!(s.theme == Theme::Dark);
         assert_eq!(s.font_size, 13.0);
         assert_eq!(s.query_limit, 500);
+        assert_eq!(s.sql_editor_max_rows, 10_000);
         assert!(s.show_sidebar);
     }
 }
