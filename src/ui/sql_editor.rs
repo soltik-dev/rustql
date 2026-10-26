@@ -14,9 +14,14 @@ pub struct SqlTab {
     pub running: Option<u64>,
 }
 
+#[derive(Default)]
 pub enum SqlEditorAction {
+    #[default]
     None,
-    Execute { sql: String, db_context: String },
+    Execute {
+        sql: String,
+        db_context: String,
+    },
 }
 
 /// Panel "SQL": editor de consultas libre. Con `running`, la consulta

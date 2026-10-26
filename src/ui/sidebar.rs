@@ -17,31 +17,63 @@ fn has_favorite(fav_tables: &std::collections::HashSet<String>, db: &str) -> boo
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SidebarAction {
+    #[default]
     None,
     SelectServer,
     SelectDatabase(String),
-    SelectTable { db: String, table: String },
+    SelectTable {
+        db: String,
+        table: String,
+    },
     CreateDatabase,
-    CreateTable { db: String },
-    DropDatabase { db: String },
-    TruncateAllTables { db: String },
-    DropTable { db: String, table: String },
-    TruncateTable { db: String, table: String },
+    CreateTable {
+        db: String,
+    },
+    DropDatabase {
+        db: String,
+    },
+    TruncateAllTables {
+        db: String,
+    },
+    DropTable {
+        db: String,
+        table: String,
+    },
+    TruncateTable {
+        db: String,
+        table: String,
+    },
     CopyTableName(String),
     Refresh,
     Disconnect,
-    ToggleFav { db: String, table: String },
-    OpenTableStructure { db: String, table: String },
-    OpenInSql { db: String, table: String },
-    CloneTable { db: String, table: String },
+    ToggleFav {
+        db: String,
+        table: String,
+    },
+    OpenTableStructure {
+        db: String,
+        table: String,
+    },
+    OpenInSql {
+        db: String,
+        table: String,
+    },
+    CloneTable {
+        db: String,
+        table: String,
+    },
     ExportDatabase(String),
-    ExportTable { db: String, table: String },
+    ExportTable {
+        db: String,
+        table: String,
+    },
 }
 
 /// Lo que el sidebar pide a la sesión: la acción del usuario y los datos
 /// que le faltan para dibujar el árbol (los carga la sesión en segundo plano).
+#[derive(Default)]
 pub struct SidebarOutput {
     pub action: SidebarAction,
     /// BBDD desplegadas cuyas tablas aún no se han pedido.

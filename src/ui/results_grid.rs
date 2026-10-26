@@ -79,8 +79,9 @@ pub struct EditingCell {
     pub needs_focus: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum GridAction {
+    #[default]
     None,
     SortChanged,
     CellEditStarted {
