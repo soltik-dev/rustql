@@ -1511,16 +1511,15 @@ impl Session {
                         });
                     sidebar_action = sidebar_panel.inner;
 
-                    // Franja con el color de la conexión en el borde izquierdo
+                    // Borde del árbol con el color de la conexión. Sube sobre la
+                    // línea de las pestañas para no duplicar su grosor.
                     if let Some(c) = conn_color {
                         let r = sidebar_panel.response.rect;
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_max(
-                                r.left_top(),
-                                egui::pos2(r.left() + 3.0, r.bottom()),
-                            ),
+                        ui.painter().rect_stroke(
+                            r.with_min_y(r.top() - theme::CONN_FRAME_WIDTH),
                             0.0,
-                            c,
+                            egui::Stroke::new(theme::CONN_FRAME_WIDTH, c),
+                            egui::StrokeKind::Inside,
                         );
                     }
                 }

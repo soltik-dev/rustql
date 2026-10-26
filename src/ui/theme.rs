@@ -10,6 +10,10 @@ pub const RADIUS_SM: u8 = 4;
 pub const RADIUS_MD: u8 = 6;
 pub const RADIUS_LG: u8 = 8;
 
+/// Grosor del marco con el color de la conexión: línea bajo las pestañas,
+/// borde de la ventana y borde del árbol del sidebar.
+pub const CONN_FRAME_WIDTH: f32 = 2.0;
+
 /// Familia registrada en setup_fonts para etiquetas de sección (Inter Medium).
 pub const MEDIUM_FAMILY: &str = "InterMedium";
 

@@ -103,8 +103,8 @@ impl RustqlApp {
     }
 
     /// Barra superior a todo el ancho, con una línea inferior del color de la
-    /// conexión activa que enlaza con la franja del sidebar.
-    fn show_conn_tabs(&self, ui: &mut egui::Ui) -> ConnTabsAction {
+    /// conexión activa. Devuelve también el rect de la barra.
+    fn show_conn_tabs(&self, ui: &mut egui::Ui) -> (ConnTabsAction, egui::Rect) {
         let p = theme::get(ui);
         let tabs: Vec<ConnTab> = self
             .sessions
@@ -139,13 +139,13 @@ impl RustqlApp {
 
         let rect = panel.response.rect;
         let stroke = match tabs[self.active].color {
-            Some(c) => egui::Stroke::new(2.0, c),
+            Some(c) => egui::Stroke::new(theme::CONN_FRAME_WIDTH, c),
             None => egui::Stroke::new(1.0, p.border_subtle),
         };
         ui.painter()
             .hline(rect.x_range(), rect.bottom() - stroke.width / 2.0, stroke);
 
-        panel.inner
+        (panel.inner, rect)
     }
 }
 
@@ -154,6 +154,7 @@ impl RustqlApp {
 impl eframe::App for RustqlApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        let window_rect = ui.max_rect();
         // Aplicar ajustes si cambiaron
         if self.ui.settings_dirty {
             settings::setup_fonts(ctx, &self.shared.settings);
@@ -193,7 +194,7 @@ impl eframe::App for RustqlApp {
                 });
         }
 
-        let tabs_action = self.show_conn_tabs(ui);
+        let (tabs_action, tabs_rect) = self.show_conn_tabs(ui);
 
         let session = &self.sessions[self.active];
         if session.is_connected() && self.ui.show_log {
@@ -217,6 +218,24 @@ impl eframe::App for RustqlApp {
         // ── Sesión activa ─────────────────────────────────────────────────
         let outcome =
             self.sessions[self.active].show(ui, &mut self.shared, keys, self.ui.show_sidebar);
+
+        // Marco de la ventana con el color de la conexión activa, por encima de
+        // todos los paneles. Su lado superior es la línea de las pestañas.
+        if let Some(color) = self.sessions[self.active].color {
+            let frame = egui::Rect::from_min_max(
+                egui::pos2(
+                    window_rect.left(),
+                    tabs_rect.bottom() - theme::CONN_FRAME_WIDTH,
+                ),
+                window_rect.max,
+            );
+            ui.painter().rect_stroke(
+                frame,
+                0.0,
+                egui::Stroke::new(theme::CONN_FRAME_WIDTH, theme::get(ui).conn(color)),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         // ── Aplicar señales ───────────────────────────────────────────────
 
