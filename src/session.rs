@@ -19,7 +19,7 @@ use crate::settings::{self, AppSettings, SavedSqlTab};
 use crate::table_state::{self, TableStates};
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::modals::{
-    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef,
+    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
     TableExportEntry, TableExportState, TruncateKind,
 };
 use crate::ui::results_grid::{
@@ -696,6 +696,73 @@ impl Session {
             + self.table_view.pending_inserts.len()
     }
 
+    fn discard_pending(&mut self) {
+        self.table_view.pending_edits.clear();
+        self.table_view.pending_deletes.clear();
+        self.table_view.pending_inserts.clear();
+        self.table_view.editing_cell = None;
+    }
+
+    /// Recarga la tabla abierta. Si hay cambios pendientes pregunta antes qué
+    /// hacer con ellos: van por posición de fila y con los datos nuevos
+    /// apuntarían a otras filas.
+    fn request_reload(&mut self, sh: &mut Shared, reload: Reload) {
+        let Some(SelectedNode::Table { table, .. }) = &self.schema.selected_node else {
+            return;
+        };
+        let pending_count = self.pending_count();
+        if pending_count > 0 {
+            self.modal = ModalState::ConfirmReload {
+                reload,
+                pending_count,
+                current_table: table.clone(),
+            };
+        } else {
+            self.reload_now(sh, reload);
+        }
+    }
+
+    fn reload_now(&mut self, sh: &mut Shared, reload: Reload) {
+        let Some(SelectedNode::Table { db, table }) = self.schema.selected_node.clone() else {
+            return;
+        };
+        // La celda en edición también va por posición.
+        self.table_view.editing_cell = None;
+        match reload {
+            Reload::Sort(specs) => {
+                self.table_view.sort_specs = specs;
+                self.clear_row_selection();
+                self.save_table_state(sh);
+            }
+            Reload::Filter(filter) => {
+                if !filter.is_empty() {
+                    let history = &mut self.table_view.filter_history;
+                    history.retain(|f| f != &filter);
+                    history.insert(0, filter.clone());
+                    history.truncate(20);
+                }
+                self.table_view.filter_text = filter;
+                self.clear_row_selection();
+                self.save_table_state(sh);
+            }
+            Reload::Refresh => {
+                // Invalidar caché de columnas para reflejar cambios estructurales
+                self.schema
+                    .columns_info
+                    .remove(&(db.clone(), table.clone()));
+            }
+        }
+        let sql = self.build_sql(sh, &db, &table);
+        self.run_query_async(sql);
+    }
+
+    fn clear_row_selection(&mut self) {
+        self.table_view.selected_cell = None;
+        self.table_view.selected_rows.clear();
+        self.table_view.last_selected_row = None;
+        self.table_view.drag_select_from = None;
+    }
+
     /// Abre una tabla en la pestaña indicada. Si hay cambios pendientes en la
     /// tabla actual, pide confirmación antes de cambiar.
     fn switch_to_table(&mut self, sh: &mut Shared, db: String, table: String, tab: ActiveTab) {
@@ -905,6 +972,14 @@ impl Session {
             self.state = ConnState::Connected(backend);
             match result {
                 Ok(data) => {
+                    // Toda recarga pasa por request_reload, que antes resuelve
+                    // los cambios pendientes. Si alguna se lo salta, mejor
+                    // perderlos que aplicarlos a las filas que ahora ocupan
+                    // esas posiciones.
+                    if self.pending_count() > 0 {
+                        log::warn!("Datos recargados con cambios pendientes: se descartan");
+                        self.discard_pending();
+                    }
                     let rows = data.rows.len();
                     self.push_log(LogEntry::ok(sql, elapsed_ms, rows));
                     self.table_view.sort_indices = (0..rows).collect();
@@ -1058,6 +1133,17 @@ impl Session {
                 self.on_table_selected(sh, new_db, new_table);
                 self.active_tab = ActiveTab::Datos;
             }
+            ModalAction::ApplyAndReload(reload) => {
+                self.modal = ModalState::None;
+                if self.commit_pending_changes() {
+                    self.reload_now(sh, reload);
+                }
+            }
+            ModalAction::DiscardAndReload(reload) => {
+                self.modal = ModalState::None;
+                self.discard_pending();
+                self.reload_now(sh, reload);
+            }
             ModalAction::CreateDatabase { name, charset } => {
                 let result = match &mut self.state {
                     ConnState::Connected(b) => b.create_database(&name, &charset),
@@ -1176,12 +1262,7 @@ impl Session {
             }
             ModalAction::ApplyFilter { sql_fragment } => {
                 self.modal = ModalState::None;
-                self.table_view.filter_text = sql_fragment;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
+                self.request_reload(sh, Reload::Filter(sql_fragment));
             }
             ModalAction::DeleteRow { db, table, row_idx } => {
                 self.modal = ModalState::None;
@@ -1416,6 +1497,9 @@ impl Session {
         // (árbol expandido, scroll, cursores) sea propio de cada sesión.
         let sid = self.id;
         let conn_color = self.color.map(|c| theme::get(ui).conn(c));
+        // El grid cambia la ordenación al pulsar una cabecera; se restaura si
+        // la recarga no llega a hacerse (query en curso o el usuario cancela).
+        let sorts_before = self.table_view.sort_specs.clone();
 
         // ── Contenido principal según estado ─────────────────────────────
         match &self.state {
@@ -1674,6 +1758,8 @@ impl Session {
                             );
                             if !running {
                                 grid_action = action;
+                            } else if matches!(action, GridAction::SortChanged) {
+                                self.table_view.sort_specs = sorts_before.clone();
                             }
                         }
 
@@ -1793,12 +1879,8 @@ impl Session {
         match grid_action {
             GridAction::SortChanged => {
                 // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
-                self.save_table_state(sh);
+                let sorts = std::mem::replace(&mut self.table_view.sort_specs, sorts_before);
+                self.request_reload(sh, Reload::Sort(sorts));
             }
             GridAction::CellEditStarted {
                 row,
@@ -1981,32 +2063,17 @@ impl Session {
             GridAction::ApplyEdits => {
                 self.apply_pending_changes(sh);
             }
-            GridAction::DiscardEdits => {
-                self.table_view.pending_edits.clear();
-                self.table_view.pending_deletes.clear();
-                self.table_view.pending_inserts.clear();
-                self.table_view.editing_cell = None;
-            }
+            GridAction::DiscardEdits => self.discard_pending(),
             GridAction::FilterBy { sql_fragment } => {
-                self.table_view.filter_text = sql_fragment;
-                if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
+                self.request_reload(sh, Reload::Filter(sql_fragment));
             }
             GridAction::FilterByClipboard { col_name } => {
                 match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                     Ok(text) => {
                         let esc_col = format!("`{}`", col_name.replace('`', "``"));
                         let esc_val = escape_sql(&text);
-                        self.table_view.filter_text = format!("{esc_col} = '{esc_val}'");
-                        if let Some(SelectedNode::Table { db, table }) =
-                            &self.schema.selected_node.clone()
-                        {
-                            let sql = self.build_sql(sh, db, table);
-                            self.run_query_async(sql);
-                        }
+                        let filter = format!("{esc_col} = '{esc_val}'");
+                        self.request_reload(sh, Reload::Filter(filter));
                     }
                     Err(e) => {
                         self.table_view.table_error =
@@ -2203,12 +2270,7 @@ impl Session {
         // Apply bar action (solo visible cuando hay cambios pendientes)
         match apply_bar_action {
             GridAction::ApplyEdits => self.apply_pending_changes(sh),
-            GridAction::DiscardEdits => {
-                self.table_view.pending_edits.clear();
-                self.table_view.pending_deletes.clear();
-                self.table_view.pending_inserts.clear();
-                self.table_view.editing_cell = None;
-            }
+            GridAction::DiscardEdits => self.discard_pending(),
             _ => {}
         }
 
@@ -2387,40 +2449,18 @@ impl Session {
         }
 
         // F5: recargar grid (invalida también caché de estructura de la tabla)
-        if f5 && let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
-            // Invalidar caché de columnas para reflejar cambios estructurales
-            self.schema
-                .columns_info
-                .remove(&(db.clone(), table.clone()));
-            let sql = self.build_sql(sh, db, table);
-            self.run_query_async(sql);
+        if f5 {
+            self.request_reload(sh, Reload::Refresh);
         }
 
         // Filter action
         match filter_action {
             filter_bar::FilterAction::Apply => {
-                if let Some(SelectedNode::Table { db, table }) =
-                    self.schema.selected_node.clone().as_ref()
-                {
-                    // Añadir al historial de la tabla si hay texto
-                    let filter = self.table_view.filter_text.trim().to_string();
-                    if !filter.is_empty() {
-                        self.table_view.filter_history.retain(|f| f != &filter);
-                        self.table_view.filter_history.insert(0, filter);
-                        self.table_view.filter_history.truncate(20);
-                    }
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                    self.save_table_state(sh);
-                }
+                let filter = self.table_view.filter_text.trim().to_string();
+                self.request_reload(sh, Reload::Filter(filter));
             }
             filter_bar::FilterAction::Clear => {
-                if let Some(SelectedNode::Table { db, table }) =
-                    self.schema.selected_node.clone().as_ref()
-                {
-                    let sql = self.build_sql(sh, db, table);
-                    self.run_query_async(sql);
-                }
+                self.request_reload(sh, Reload::Filter(String::new()));
             }
             filter_bar::FilterAction::None => {}
         }
@@ -2577,5 +2617,144 @@ impl Session {
         }
 
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{DbResult, QueryEvent};
+
+    /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
+    struct FakeBackend;
+
+    impl DbBackend for FakeBackend {
+        fn list_databases(&self) -> DbResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn list_tables(&self, _: &str) -> DbResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn execute_query(&self, _: &str) -> DbResult<QueryResult> {
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            })
+        }
+        fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
+            Ok(Vec::new())
+        }
+        fn get_tables_info(&self, _: &str) -> DbResult<Vec<TableInfo>> {
+            Ok(Vec::new())
+        }
+        fn get_columns_info(&self, _: &str, _: &str) -> DbResult<Vec<ColumnInfo>> {
+            Ok(Vec::new())
+        }
+        fn get_primary_keys(&self, _: &str, _: &str) -> DbResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn execute_write(&mut self, _: &str) -> DbResult<u64> {
+            Ok(0)
+        }
+        fn create_database(&mut self, _: &str, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn drop_database(&mut self, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn drop_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn truncate_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+            Ok(())
+        }
+        fn execute_transaction(&mut self, _: &[String]) -> DbResult<()> {
+            Ok(())
+        }
+    }
+
+    fn shared() -> Shared {
+        Shared {
+            settings: AppSettings::default(),
+            profiles: Vec::new(),
+            table_states: TableStates::default(),
+        }
+    }
+
+    fn data(ids: &[&str]) -> QueryResult {
+        QueryResult {
+            columns: vec!["id".into()],
+            rows: ids.iter().map(|id| vec![Some(id.to_string())]).collect(),
+        }
+    }
+
+    /// Sesión conectada con `db.t` abierta y sus datos cargados.
+    fn session_with_table() -> Session {
+        let mut s = Session::new(0);
+        s.state = ConnState::Connected(Box::new(FakeBackend));
+        s.schema.selected_node = Some(SelectedNode::Table {
+            db: "db".into(),
+            table: "t".into(),
+        });
+        s.table_view.table_data = Some(data(&["1", "2"]));
+        s.table_view.primary_keys = vec!["id".into()];
+        s
+    }
+
+    #[test]
+    fn recargar_con_cambios_pendientes_pide_confirmacion() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(0);
+        s.request_reload(&mut shared(), Reload::Refresh);
+        assert!(matches!(
+            s.modal,
+            ModalState::ConfirmReload {
+                pending_count: 1,
+                ..
+            }
+        ));
+        assert!(
+            matches!(s.state, ConnState::Connected(_)),
+            "no debe recargar"
+        );
+        assert_eq!(s.table_view.pending_deletes.len(), 1);
+    }
+
+    #[test]
+    fn recargar_sin_cambios_lanza_la_query() {
+        let mut s = session_with_table();
+        s.request_reload(&mut shared(), Reload::Refresh);
+        assert!(matches!(s.modal, ModalState::None));
+        assert!(matches!(s.state, ConnState::QueryRunning));
+    }
+
+    #[test]
+    fn descartar_y_recargar_limpia_los_cambios() {
+        let mut s = session_with_table();
+        s.table_view.pending_deletes.insert(1);
+        s.handle_modal_action(
+            ModalAction::DiscardAndReload(Reload::Refresh),
+            &mut shared(),
+        );
+        assert_eq!(s.pending_count(), 0);
+        assert!(matches!(s.state, ConnState::QueryRunning));
+    }
+
+    #[test]
+    fn datos_nuevos_no_heredan_cambios_por_posicion() {
+        let mut s = session_with_table();
+        s.state = ConnState::QueryRunning;
+        s.table_view.pending_deletes.insert(0);
+        let (tx, rx) = mpsc::channel();
+        s.table_view.query_receiver = Some(rx);
+        tx.send(QueryEvent::Done {
+            result: Ok(data(&["7", "8"])),
+            backend: Box::new(FakeBackend),
+            sql: String::new(),
+            elapsed_ms: 0,
+        })
+        .unwrap();
+        s.poll_query_receiver(&egui::Context::default());
+        assert_eq!(s.pending_count(), 0);
     }
 }
