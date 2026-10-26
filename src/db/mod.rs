@@ -193,3 +193,30 @@ pub fn connect_mysql_progress(
         .map(|b| -> Box<dyn DbBackend> { Box::new(b) });
     let _ = tx.send(ConnectEvent::Done(result));
 }
+
+/// Servidor real para los tests marcados `#[ignore]`:
+/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto cargo test -- --ignored`.
+/// Crean y borran sus propias BBDD `rustql_test_*`.
+#[cfg(test)]
+pub mod test_server {
+    use super::ConnectionParams;
+
+    pub fn params() -> ConnectionParams {
+        let url = std::env::var("RUSTQL_TEST_MYSQL")
+            .expect("RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto");
+        let (auth, addr) = url.rsplit_once('@').expect("falta @");
+        let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
+        let (host, port) = addr.rsplit_once(':').expect("falta :puerto");
+        ConnectionParams {
+            host: host.into(),
+            port: port.parse().expect("puerto"),
+            user: user.into(),
+            password: password.into(),
+            keyring_id: None,
+        }
+    }
+
+    pub fn backend() -> super::mysql::MysqlBackend {
+        super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
+    }
+}

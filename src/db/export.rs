@@ -81,6 +81,13 @@ fn run_export(
 ) {
     let start = std::time::Instant::now();
 
+    if let ExportDestination::SameServerDb { target_db } = &destination
+        && *target_db == source_db
+    {
+        let _ = tx.send(ExportEvent::Failed(SAME_TARGET_ERROR.into()));
+        return;
+    }
+
     // Conectar a la fuente
     let backend = match MysqlBackend::connect_with_progress(&params, |_| {}) {
         Ok(b)  => b,
@@ -108,6 +115,23 @@ fn run_export(
                     return;
                 }
             };
+            // Otro perfil (u otro nombre de host) puede llevar al mismo servidor:
+            // copiar una BBDD sobre sí misma borra (DROP) o duplica sus datos.
+            if *target_db == source_db {
+                match same_server(&backend, &dest_backend) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        let _ = tx.send(ExportEvent::Failed(SAME_TARGET_ERROR.into()));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ExportEvent::Failed(format!(
+                            "No se pudo comprobar si el destino es el mismo servidor: {e}"
+                        )));
+                        return;
+                    }
+                }
+            }
             export_to_remote(&backend, &dest_backend, &source_db, &tables, &options, target_db, &cancel, &tx)
         }
     };
@@ -420,6 +444,22 @@ fn copy_table_remote(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const SAME_TARGET_ERROR: &str =
+    "El destino es la misma base de datos del mismo servidor que el origen: \
+     la copia borraría o duplicaría sus datos. Elige otra base de datos destino.";
+
+/// Si dos conexiones llegan al mismo servidor, según el propio servidor
+/// (host, puerto y directorio de datos), no según los parámetros usados.
+fn same_server(a: &MysqlBackend, b: &MysqlBackend) -> Result<bool, String> {
+    let identity = |backend: &MysqlBackend| {
+        backend
+            .execute_query("SELECT @@hostname, @@port, @@datadir")
+            .map(|r| r.rows.into_iter().next())
+    };
+    let (id_a, id_b) = (identity(a)?, identity(b)?);
+    Ok(id_a.is_some() && id_a == id_b)
+}
+
 /// Obtiene el DDL de una tabla con SHOW CREATE TABLE.
 fn get_create_table_ddl(
     backend:   &MysqlBackend,
@@ -520,4 +560,54 @@ fn export_table_to_writer(
     }
 
     Ok(total_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_server;
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn no_copia_una_bbdd_sobre_si_misma() {
+        let mut b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_export").unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_export").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_export.t (id INT PRIMARY KEY)").unwrap();
+        b.execute_write("INSERT INTO rustql_test_export.t VALUES (1)").unwrap();
+
+        // Mismo servidor a través de un perfil «remoto», con DROP IF EXISTS
+        let rx = spawn_export(
+            test_server::params(),
+            "rustql_test_export".into(),
+            vec!["t".into()],
+            ExportDestination::RemoteServer {
+                params: test_server::params(),
+                target_db: "rustql_test_export".into(),
+            },
+            ExportOptions {
+                drop_if_exists: true,
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let events: Vec<ExportEvent> = rx.iter().collect();
+        let rows = b
+            .execute_query("SELECT COUNT(*) FROM rustql_test_export.t")
+            .map(|r| r.rows[0][0].clone());
+        b.execute_write("DROP DATABASE rustql_test_export").unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [ExportEvent::Failed(e)] if e == SAME_TARGET_ERROR),
+            "debe abortar antes de tocar nada"
+        );
+        assert_eq!(rows, Ok(Some("1".into())), "la tabla de origen sigue intacta");
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn misma_conexion_es_el_mismo_servidor() {
+        let (a, b) = (test_server::backend(), test_server::backend());
+        assert!(same_server(&a, &b).unwrap());
+    }
 }

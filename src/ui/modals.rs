@@ -1484,6 +1484,15 @@ fn render_export_config(
                                     }
                                 }
                             });
+                        if profiles.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Guarda antes un perfil con el servidor destino.",
+                                )
+                                .color(theme::get(ui).text_muted)
+                                .small(),
+                            );
+                        }
                         ui.horizontal(|ui| {
                             ui.label("BBDD destino:");
                             ui.add(egui::TextEdit::singleline(target_db_name).desired_width(130.0));
@@ -1511,7 +1520,8 @@ fn render_export_config(
             action = ModalAction::CloseExport;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_export = selected_count > 0 && is_destination_valid(destination);
+            let can_export =
+                selected_count > 0 && is_destination_valid(destination, !profiles.is_empty());
             let btn =
                 theme::primary_button_enabled(ui, can_export, format!("{EXPORT}  Exportar →"));
             if btn.clicked() {
@@ -1540,12 +1550,14 @@ fn render_export_config(
     action
 }
 
-fn is_destination_valid(dest: &ExportDestination) -> bool {
+/// Sin perfiles, el destino remoto no apunta a ningún servidor elegido (sus
+/// parámetros serían los por defecto, root@127.0.0.1).
+fn is_destination_valid(dest: &ExportDestination, has_profiles: bool) -> bool {
     match dest {
         ExportDestination::SqlFile { path } => !path.is_empty(),
         ExportDestination::Folder { path } => !path.is_empty(),
         ExportDestination::SameServerDb { target_db } => !target_db.is_empty(),
-        ExportDestination::RemoteServer { target_db, .. } => !target_db.is_empty(),
+        ExportDestination::RemoteServer { target_db, .. } => has_profiles && !target_db.is_empty(),
     }
 }
 
@@ -1830,5 +1842,20 @@ fn format_rows(n: u64) -> String {
         format!("{:.1}K f.", n as f64 / 1_000.0)
     } else {
         format!("{n} f.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destino_remoto_sin_perfiles_no_es_valido() {
+        let dest = ExportDestination::RemoteServer {
+            params: Default::default(),
+            target_db: "copia".into(),
+        };
+        assert!(!is_destination_valid(&dest, false));
+        assert!(is_destination_valid(&dest, true));
     }
 }
