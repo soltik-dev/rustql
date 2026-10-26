@@ -43,10 +43,8 @@ pub enum ConnState {
         status: String,
         start: Instant,
     },
-    Connected(Box<dyn DbBackend>),
-    /// Backend cedido temporalmente a un hilo de query; la UI sigue mostrando
-    /// la pantalla connected (con spinner en el grid).
-    QueryRunning,
+    /// Compartido con los hilos de trabajo.
+    Connected(Arc<dyn DbBackend>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,27 +201,19 @@ impl Session {
         }
     }
 
-    /// Conectando o con una query en curso.
+    /// Conectando o cargando la tabla.
     pub fn is_busy(&self) -> bool {
-        matches!(
-            self.state,
-            ConnState::Connecting { .. } | ConnState::QueryRunning
-        )
+        matches!(self.state, ConnState::Connecting { .. }) || self.table_view.query_loading
     }
 
     pub fn is_connected(&self) -> bool {
-        matches!(
-            self.state,
-            ConnState::Connected(_) | ConnState::QueryRunning
-        )
+        matches!(self.state, ConnState::Connected(_))
     }
 
     /// Host y BBDD activa para la barra de estado.
     pub fn status(&self) -> (Option<String>, Option<String>) {
         let host = match &self.state {
-            ConnState::Connected(_) | ConnState::QueryRunning => {
-                Some(format!("{}:{}", self.params.host, self.params.port))
-            }
+            ConnState::Connected(_) => Some(format!("{}:{}", self.params.host, self.params.port)),
             ConnState::Connecting { host, .. } => Some(format!("Conectando a {}…", host)),
             ConnState::Disconnected => None,
         };
@@ -246,8 +236,8 @@ impl Session {
         }
     }
 
-    /// Vuelve al formulario. La query en curso, si la hay, se descarta: sin
-    /// esto su resultado reconectaba la sesión al llegar.
+    /// Vuelve al formulario. La query en curso, si la hay, se descarta: su
+    /// resultado ya no corresponde a nada que se esté mostrando.
     fn disconnect(&mut self) {
         self.state = ConnState::Disconnected;
         self.table_view.query_receiver = None;
@@ -259,13 +249,10 @@ impl Session {
 
 impl Session {
     fn run_query_async(&mut self, sql: String) {
-        let backend = match std::mem::replace(&mut self.state, ConnState::QueryRunning) {
-            ConnState::Connected(b) => b,
-            other => {
-                self.state = other;
-                return;
-            }
+        let ConnState::Connected(backend) = &self.state else {
+            return;
         };
+        let backend = Arc::clone(backend);
         let (tx, rx) = std::sync::mpsc::channel();
         self.table_view.query_receiver = Some(rx);
         self.table_view.query_loading = true;
@@ -275,7 +262,6 @@ impl Session {
             let elapsed_ms = start.elapsed().as_millis() as u64;
             let _ = tx.send(crate::db::QueryEvent::Done {
                 result,
-                backend,
                 sql,
                 elapsed_ms,
             });
@@ -884,7 +870,7 @@ impl Session {
         // 4. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
         self.table_view.sort_specs = ts.sort_specs.clone();
 
-        // 5. Cargar claves primarias e info de columnas (antes de run_query_async, que cambia el estado a QueryRunning)
+        // 5. Cargar claves primarias e info de columnas
         self.load_primary_keys(&db, &table);
         let col_key = (db.clone(), table.clone());
         if !self.schema.columns_info.contains_key(&col_key) {
@@ -910,7 +896,7 @@ impl Session {
         settings::save(&sh.settings);
     }
 
-    fn on_connected(&mut self, backend: Box<dyn DbBackend>, sh: &mut Shared) {
+    fn on_connected(&mut self, backend: Arc<dyn DbBackend>, sh: &mut Shared) {
         self.state = ConnState::Connected(backend);
         self.error_message = None;
         self.schema.databases.clear();
@@ -991,7 +977,7 @@ fn pk_condition(
 impl Session {
     /// Sondea el canal del hilo de conexión y actualiza el estado si terminó.
     fn poll_connection(&mut self, ctx: &egui::Context, sh: &mut Shared) {
-        let mut connect_result: Option<Result<Box<dyn DbBackend>, String>> = None;
+        let mut connect_result: Option<Result<Arc<dyn DbBackend>, String>> = None;
         if let ConnState::Connecting {
             receiver, status, ..
         } = &mut self.state
@@ -1046,14 +1032,12 @@ impl Session {
         }
         if let Some(crate::db::QueryEvent::Done {
             result,
-            backend,
             sql,
             elapsed_ms,
         }) = query_done
         {
             self.table_view.query_receiver = None;
             self.table_view.query_loading = false;
-            self.state = ConnState::Connected(backend);
             match result {
                 Ok(data) => {
                     // Toda recarga pasa por request_reload, que antes resuelve
@@ -1670,15 +1654,11 @@ impl Session {
                 });
             }
 
-            state @ (ConnState::Connected(_) | ConnState::QueryRunning) => {
-                // Con una query en curso el backend está cedido al hilo: el
-                // sidebar trabaja con la caché (None = no hacer queries) y el
-                // contenido se muestra sin aplicar sus acciones.
-                let backend = match state {
-                    ConnState::Connected(b) => Some(b.as_ref()),
-                    _ => None,
-                };
-                let running = backend.is_none();
+            ConnState::Connected(backend) => {
+                let backend = Some(backend.as_ref());
+                // Mientras carga la tabla, el grid se muestra sin aplicar sus
+                // acciones: irían por posición sobre los datos anteriores.
+                let running = self.table_view.query_loading;
 
                 // ── Sidebar ───────────────────────────────────────────────
                 if show_sidebar {
@@ -1846,20 +1826,13 @@ impl Session {
                                 &self.table_view.primary_keys,
                                 col_info_slice,
                                 // Con query en curso: spinner en el grid
-                                self.table_view.query_loading || running,
+                                running,
                             );
                             if !running {
                                 grid_action = action;
                             } else if matches!(action, GridAction::SortChanged) {
                                 self.table_view.sort_specs = sorts_before.clone();
                             }
-                        }
-
-                        _ if running => {
-                            ui.centered_and_justified(|ui| {
-                                ui.spinner();
-                                ui.label("Ejecutando consulta…");
-                            });
                         }
 
                         ActiveTab::Servidor => {
@@ -2521,22 +2494,22 @@ mod tests {
         fn get_primary_keys(&self, _: &str, _: &str) -> DbResult<Vec<String>> {
             Ok(Vec::new())
         }
-        fn execute_write(&mut self, _: &str) -> DbResult<u64> {
+        fn execute_write(&self, _: &str) -> DbResult<u64> {
             Ok(0)
         }
-        fn create_database(&mut self, _: &str, _: &str) -> DbResult<()> {
+        fn create_database(&self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn drop_database(&mut self, _: &str) -> DbResult<()> {
+        fn drop_database(&self, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn drop_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+        fn drop_table(&self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn truncate_table(&mut self, _: &str, _: &str) -> DbResult<()> {
+        fn truncate_table(&self, _: &str, _: &str) -> DbResult<()> {
             Ok(())
         }
-        fn execute_transaction(&mut self, _: &[Statement]) -> DbResult<()> {
+        fn execute_transaction(&self, _: &[Statement]) -> DbResult<()> {
             Ok(())
         }
     }
@@ -2559,7 +2532,7 @@ mod tests {
     /// Sesión conectada con `db.t` abierta y sus datos cargados.
     fn session_with_table() -> Session {
         let mut s = Session::new(0);
-        s.state = ConnState::Connected(Box::new(FakeBackend));
+        s.state = ConnState::Connected(Arc::new(FakeBackend));
         s.schema.selected_node = Some(SelectedNode::Table {
             db: "db".into(),
             table: "t".into(),
@@ -2593,7 +2566,7 @@ mod tests {
         let mut s = session_with_table();
         s.request_reload(&mut shared(), Reload::Refresh);
         assert!(matches!(s.modal, ModalState::None));
-        assert!(matches!(s.state, ConnState::QueryRunning));
+        assert!(s.table_view.query_loading);
     }
 
     #[test]
@@ -2605,19 +2578,18 @@ mod tests {
             &mut shared(),
         );
         assert_eq!(s.pending_count(), 0);
-        assert!(matches!(s.state, ConnState::QueryRunning));
+        assert!(s.table_view.query_loading);
     }
 
     #[test]
     fn datos_nuevos_no_heredan_cambios_por_posicion() {
         let mut s = session_with_table();
-        s.state = ConnState::QueryRunning;
+        s.table_view.query_loading = true;
         s.table_view.pending_deletes.insert(0);
         let (tx, rx) = mpsc::channel();
         s.table_view.query_receiver = Some(rx);
         tx.send(QueryEvent::Done {
             result: Ok(data(&["7", "8"])),
-            backend: Box::new(FakeBackend),
             sql: String::new(),
             elapsed_ms: 0,
         })
@@ -2711,7 +2683,7 @@ mod tests {
         s.handle_modal_action(action, &mut shared());
         assert_eq!(open_table(&s), Some(("db", "t")));
         assert_eq!(s.pending_count(), 0);
-        assert!(matches!(s.state, ConnState::QueryRunning));
+        assert!(s.table_view.query_loading);
     }
 
     fn edit(row_idx: usize, col_idx: usize, value: Option<&str>) -> PendingEdit {
@@ -2778,7 +2750,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn guardar_cambios_contra_el_servidor() {
-        let mut b = crate::db::test_server::backend();
+        let b = crate::db::test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_grid")
             .unwrap();
         b.execute_write("CREATE DATABASE rustql_test_grid").unwrap();
@@ -2792,7 +2764,7 @@ mod tests {
 
         let mut s = Session::new(0);
         s.table_view.table_data = Some(b.execute_query(select).unwrap());
-        s.state = ConnState::Connected(Box::new(b));
+        s.state = ConnState::Connected(Arc::new(b));
         s.schema.selected_node = Some(SelectedNode::Table {
             db: "rustql_test_grid".into(),
             table: "t".into(),
@@ -2809,7 +2781,7 @@ mod tests {
         });
 
         let saved = s.commit_pending_changes();
-        let ConnState::Connected(b) = &mut s.state else {
+        let ConnState::Connected(b) = &s.state else {
             unreachable!()
         };
         let rows = b.execute_query(select).map(|r| r.rows);
@@ -2871,7 +2843,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn vaciar_todas_sin_haber_desplegado_el_arbol() {
-        let mut b = crate::db::test_server::backend();
+        let b = crate::db::test_server::backend();
         for sql in [
             "DROP DATABASE IF EXISTS rustql_test_truncate",
             "CREATE DATABASE rustql_test_truncate",
@@ -2886,14 +2858,14 @@ mod tests {
             b.execute_write(sql).unwrap();
         }
         let mut s = Session::new(0);
-        s.state = ConnState::Connected(Box::new(b));
+        s.state = ConnState::Connected(Arc::new(b));
         assert!(s.schema.tables_cache.is_empty());
 
         s.handle_modal_action(
             ModalAction::TruncateAllTables("rustql_test_truncate".into()),
             &mut shared(),
         );
-        let ConnState::Connected(b) = &mut s.state else {
+        let ConnState::Connected(b) = &s.state else {
             unreachable!()
         };
         let count = |t: &str| {
@@ -2978,7 +2950,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn fila_nueva_contra_el_servidor() {
-        let mut b = crate::db::test_server::backend();
+        let b = crate::db::test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_insert")
             .unwrap();
         b.execute_write("CREATE DATABASE rustql_test_insert")
@@ -3003,12 +2975,12 @@ mod tests {
             db: key.0,
             table: key.1,
         });
-        s.state = ConnState::Connected(Box::new(b));
+        s.state = ConnState::Connected(Arc::new(b));
         let row = s.new_insert_row(None).unwrap();
         s.table_view.pending_inserts.push(row);
 
         let saved = s.commit_pending_changes();
-        let ConnState::Connected(b) = &mut s.state else {
+        let ConnState::Connected(b) = &s.state else {
             unreachable!()
         };
         let rows = b.execute_query(select).map(|r| r.rows);

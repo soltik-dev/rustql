@@ -1,6 +1,8 @@
 pub mod mysql;
 pub mod export;
 
+use std::sync::Arc;
+
 pub use export::{ExportDestination, ExportEvent, ExportOptions};
 
 #[derive(Debug, Clone)]
@@ -124,7 +126,10 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
     }
 }
 
-pub trait DbBackend: Send {
+/// Backend de una conexión. Es `Sync` y todos sus métodos toman `&self`: se
+/// comparte (`Arc`) entre la UI y los hilos de trabajo, que piden conexiones
+/// a su pool cuando las necesitan.
+pub trait DbBackend: Send + Sync {
     // ── Lectura (no modifican el estado del backend) ───────────────────────────
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
@@ -146,16 +151,16 @@ pub trait DbBackend: Send {
     // ── Escritura (modifican datos en el servidor) ─────────────────────────────
 
     /// Ejecuta SQL de escritura (INSERT/UPDATE/DELETE/DDL). Devuelve filas afectadas.
-    fn execute_write(&mut self, sql: &str) -> DbResult<u64>;
+    fn execute_write(&self, sql: &str) -> DbResult<u64>;
 
-    fn create_database(&mut self, name: &str, charset: &str) -> DbResult<()>;
-    fn drop_database(&mut self, name: &str) -> DbResult<()>;
-    fn drop_table(&mut self, db: &str, table: &str) -> DbResult<()>;
-    fn truncate_table(&mut self, db: &str, table: &str) -> DbResult<()>;
+    fn create_database(&self, name: &str, charset: &str) -> DbResult<()>;
+    fn drop_database(&self, name: &str) -> DbResult<()>;
+    fn drop_table(&self, db: &str, table: &str) -> DbResult<()>;
+    fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla se hace ROLLBACK y se devuelve el error.
-    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()>;
+    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
 
     // ── Helpers con implementación por defecto ─────────────────────────────────
 
@@ -187,13 +192,12 @@ pub trait DbBackend: Send {
 
 pub enum ConnectEvent {
     Status(String),
-    Done(DbResult<Box<dyn DbBackend>>),
+    Done(DbResult<Arc<dyn DbBackend>>),
 }
 
 pub enum QueryEvent {
     Done {
         result: DbResult<QueryResult>,
-        backend: Box<dyn DbBackend>,
         sql: String,
         elapsed_ms: u64,
     },
@@ -207,7 +211,7 @@ pub fn connect_mysql_progress(
         let _ = tx.send(ConnectEvent::Status(msg.to_string()));
     };
     let result = mysql::MysqlBackend::connect_with_progress(params, send_status)
-        .map(|b| -> Box<dyn DbBackend> { Box::new(b) });
+        .map(|b| -> Arc<dyn DbBackend> { Arc::new(b) });
     let _ = tx.send(ConnectEvent::Done(result));
 }
 

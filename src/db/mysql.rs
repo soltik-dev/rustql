@@ -79,9 +79,10 @@ impl MysqlBackend {
         }
         let password = params.resolve_password()?;
         on_status("Estableciendo conexión TCP...");
-        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10)
-        // para un cliente GUI con un solo usuario basta con min:0, max:1
-        let pool_constraints = PoolConstraints::new(0, 1).unwrap();
+        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
+        // max:4 deja que los trabajos en segundo plano (datos, metadatos,
+        // escrituras) no esperen unos a otros; el editor SQL va aparte.
+        let pool_constraints = PoolConstraints::new(0, 4).unwrap();
         let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
         let opts: Opts = OptsBuilder::new()
             .ip_or_hostname(Some(params.host.as_str()))
@@ -176,7 +177,7 @@ impl DbBackend for MysqlBackend {
         }
     }
 
-    fn execute_write(&mut self, sql: &str) -> DbResult<u64> {
+    fn execute_write(&self, sql: &str) -> DbResult<u64> {
         let mut conn = self.conn()?;
         conn.query_drop(sql)
             .map_err(|e| format!("Error en escritura: {e}"))?;
@@ -263,7 +264,7 @@ impl DbBackend for MysqlBackend {
         Ok(r.rows.iter().map(|row| col(row, 0)).collect())
     }
 
-    fn create_database(&mut self, name: &str, charset: &str) -> DbResult<()> {
+    fn create_database(&self, name: &str, charset: &str) -> DbResult<()> {
         validate_charset(charset)?;
         let sql = format!(
             "CREATE DATABASE `{}` CHARACTER SET {}",
@@ -273,12 +274,12 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn drop_database(&mut self, name: &str) -> DbResult<()> {
+    fn drop_database(&self, name: &str) -> DbResult<()> {
         let sql = format!("DROP DATABASE `{}`", escape_ident(name));
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn drop_table(&mut self, db: &str, table: &str) -> DbResult<()> {
+    fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!(
             "DROP TABLE `{}`.`{}`",
             escape_ident(db),
@@ -287,7 +288,7 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn truncate_table(&mut self, db: &str, table: &str) -> DbResult<()> {
+    fn truncate_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!(
             "TRUNCATE TABLE `{}`.`{}`",
             escape_ident(db),
@@ -296,7 +297,7 @@ impl DbBackend for MysqlBackend {
         self.execute_write(&sql).map(|_| ())
     }
 
-    fn execute_transaction(&mut self, stmts: &[Statement]) -> DbResult<()> {
+    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
             .map_err(|e| format!("Error iniciando transacción: {e}"))?;
@@ -319,7 +320,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn metadatos_con_parametros() {
-        let mut b = test_server::backend();
+        let b = test_server::backend();
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
         let qdb = format!("`{}`", escape_ident(db));
@@ -354,7 +355,7 @@ mod tests {
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
-        let mut b = test_server::backend();
+        let b = test_server::backend();
         b.execute_write("DROP DATABASE IF EXISTS rustql_test_session").unwrap();
         b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
         b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
