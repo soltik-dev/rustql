@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-use mysql::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable};
+use mysql::{
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable,
+};
 
 use super::{
     ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
@@ -55,7 +57,10 @@ fn row_values(mut row: mysql::Row) -> Vec<Option<String>> {
 }
 
 fn col(row: &[Option<String>], i: usize) -> String {
-    row.get(i).and_then(|v| v.as_deref()).unwrap_or("").to_string()
+    row.get(i)
+        .and_then(|v| v.as_deref())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Almacena el Pool en lugar de una PooledConn individual.
@@ -353,7 +358,8 @@ mod tests {
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
         let qdb = format!("`{}`", escape_ident(db));
-        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}")).unwrap();
+        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}"))
+            .unwrap();
         b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();
         b.execute_write(&format!(
             "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
@@ -386,9 +392,12 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session").unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_session").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)").unwrap();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_session")
+            .unwrap();
+        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)")
+            .unwrap();
         let db = Some("rustql_test_session");
         let run = |sql: &str| b.execute_in_session(db, sql, 100).unwrap().rows;
         let count = || {
@@ -402,7 +411,10 @@ mod tests {
         run("SET @x = 42");
         run("START TRANSACTION");
         run("INSERT INTO t VALUES (1)");
-        assert_eq!(run("SELECT @x, COUNT(*) FROM t")[0], [Some("42".into()), Some("1".into())]);
+        assert_eq!(
+            run("SELECT @x, COUNT(*) FROM t")[0],
+            [Some("42".into()), Some("1".into())]
+        );
         assert_eq!(count(), Some("0".into()), "sin COMMIT, el resto no la ve");
         run("ROLLBACK");
         assert_eq!(run("SELECT COUNT(*) FROM t")[0], [Some("0".into())]);
@@ -412,16 +424,19 @@ mod tests {
         run("COMMIT");
         assert_eq!(count(), Some("1".into()));
 
-        b.execute_write("DROP DATABASE rustql_test_session").unwrap();
+        b.execute_write("DROP DATABASE rustql_test_session")
+            .unwrap();
     }
 
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn el_editor_lee_como_mucho_max_rows() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap").unwrap();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap")
+            .unwrap();
         b.execute_write("CREATE DATABASE rustql_test_cap").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)")
+            .unwrap();
         b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
             .unwrap();
         let db = Some("rustql_test_cap");

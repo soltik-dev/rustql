@@ -3,7 +3,7 @@ pub struct LogEntry {
     pub time: String,
     pub query: String,
     pub duration_ms: u64,
-    pub rows: Option<usize>,  // None si hubo error
+    pub rows: Option<usize>, // None si hubo error
     pub error: Option<String>,
 }
 

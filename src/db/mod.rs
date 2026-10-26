@@ -1,5 +1,5 @@
-pub mod mysql;
 pub mod export;
+pub mod mysql;
 
 use std::sync::Arc;
 
@@ -124,7 +124,9 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty() {
         Ok(())
     } else {
-        Err(format!("Charset inválido: '{s}'. Solo se permiten caracteres alfanuméricos y '_'."))
+        Err(format!(
+            "Charset inválido: '{s}'. Solo se permiten caracteres alfanuméricos y '_'."
+        ))
     }
 }
 
