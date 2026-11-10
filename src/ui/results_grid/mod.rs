@@ -170,13 +170,14 @@ impl<'a> Grid<'a> {
 
 /// Muestra los datos de la tabla abierta. Devuelve lo que el usuario pide
 /// hacer con ellos en este frame. Con `busy` (cargando o guardando) no se
-/// puede editar.
+/// puede editar. `row_limit` es el LIMIT con el que se pidieron los datos.
 pub fn show(
     ui: &mut egui::Ui,
     selected_table: Option<(&str, &str)>,
     view: &mut TableViewState,
     column_info: &[ColumnInfo],
     busy: bool,
+    row_limit: usize,
 ) -> GridAction {
     let Some((db, table)) = selected_table else {
         ui.centered_and_justified(|ui| {
@@ -202,7 +203,7 @@ pub fn show(
         return GridAction::None;
     };
 
-    let bar_action = info_bar(ui, db, table, data, &view.sort_specs, busy);
+    let bar_action = info_bar(ui, db, table, data, &view.sort_specs, busy, row_limit);
     ui.separator();
 
     if data.columns.is_empty() {
@@ -282,13 +283,28 @@ fn info_bar(
     data: &QueryResult,
     sorts: &[SortSpec],
     busy: bool,
+    row_limit: usize,
 ) -> GridAction {
     let mut action = GridAction::None;
     let p = theme::get(ui);
 
     ui.horizontal_wrapped(|ui| {
         ui.strong(format!("{db}.{table}"));
-        ui.label(egui::RichText::new(format!("— {} filas", data.rows.len())).color(p.text_muted));
+        if data.rows.len() >= row_limit {
+            // La consulta lleva LIMIT: lo que se ve puede no ser todo
+            ui.label(
+                egui::RichText::new(format!("— primeras {} filas", data.rows.len()))
+                    .color(p.warning),
+            )
+            .on_hover_text(format!(
+                "La tabla puede tener más: solo se piden {row_limit} filas.\n\
+                 Filtra para acotar o sube el límite en Ajustes."
+            ));
+        } else {
+            ui.label(
+                egui::RichText::new(format!("— {} filas", data.rows.len())).color(p.text_muted),
+            );
+        }
         if busy {
             ui.separator();
             ui.spinner();

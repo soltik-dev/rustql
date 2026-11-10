@@ -77,6 +77,7 @@ impl Fixture {
                         &mut self.view,
                         &self.column_info,
                         self.busy,
+                        500,
                     );
                 });
             })
