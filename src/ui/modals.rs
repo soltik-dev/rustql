@@ -61,16 +61,11 @@ impl FilterOperator {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum DropKind {
-    Database,
-    Table,
-}
-
-#[derive(Debug, Clone)]
-pub enum TruncateKind {
-    Table,
-    AllInDatabase,
+/// Lo que se elimina o se vacía: una base de datos entera o una tabla.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DbObject {
+    Database(String),
+    Table { db: String, table: String },
 }
 
 /// Recarga de la tabla abierta. Con cambios pendientes espera a que el
@@ -157,16 +152,13 @@ pub enum ModalState {
         error: Option<String>,
     },
     ConfirmDrop {
-        kind: DropKind,
-        target: String,
-        db: Option<String>,
-        table: Option<String>,
+        target: DbObject,
+        /// Nombre que el usuario teclea para confirmar (solo una BBDD).
+        typed: String,
     },
+    /// Vaciar una tabla o, con una BBDD, todas las suyas.
     ConfirmTruncate {
-        kind: TruncateKind,
-        target: String,
-        db: Option<String>,
-        table: Option<String>,
+        target: DbObject,
     },
     FilterInput {
         col_name: String,
@@ -390,18 +382,8 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             columns,
             error,
         } => show_create_table(ctx, db, name, columns, error, busy),
-        ModalState::ConfirmDrop {
-            kind,
-            target,
-            db,
-            table,
-        } => show_confirm_drop(ctx, kind, target, db, table),
-        ModalState::ConfirmTruncate {
-            kind,
-            target,
-            db,
-            table,
-        } => show_confirm_truncate(ctx, kind, target, db, table),
+        ModalState::ConfirmDrop { target, typed } => show_confirm_drop(ctx, target, typed),
+        ModalState::ConfirmTruncate { target } => show_confirm_truncate(ctx, target),
         ModalState::FilterInput {
             col_name,
             value,
@@ -479,14 +461,11 @@ fn show_create_database(
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 ui.label("Nombre:");
-                let resp = ui.add(
+                ui.add(
                     egui::TextEdit::singleline(name)
                         .desired_width(200.0)
                         .hint_text("mi_base_de_datos"),
                 );
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    // handled below
-                }
                 ui.end_row();
 
                 ui.label("Charset:");
@@ -669,54 +648,50 @@ fn show_create_table(
 
 // ── Confirmación: eliminar ────────────────────────────────────────────────────
 
-fn show_confirm_drop(
-    ctx: &egui::Context,
-    kind: &DropKind,
-    target: &str,
-    db: &mut Option<String>,
-    table: &mut Option<String>,
-) -> ModalAction {
+fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
 
-    let kind_label = match kind {
-        DropKind::Database => "base de datos",
-        DropKind::Table => "tabla",
+    let (title, what, name) = match target {
+        DbObject::Database(db) => ("Eliminar base de datos", "la base de datos", db.clone()),
+        DbObject::Table { db, table } => ("Eliminar tabla", "la tabla", format!("{db}.{table}")),
     };
 
-    dialog(
-        ctx,
-        &format!("Eliminar {kind_label}"),
-        280.0,
-        Some(&mut open),
-        |ui| {
-            ui.label(format!("¿Seguro que quieres eliminar la {kind_label}:"));
-            ui.add_space(4.0);
-            ui.strong(target);
-            ui.add_space(4.0);
-            ui.colored_label(
-                theme::get(ui).warning,
-                "⚠ Esta acción no se puede deshacer.",
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                if red_btn(ui, "Eliminar") {
-                    action = match kind {
-                        DropKind::Database => {
-                            ModalAction::DropDatabase(db.clone().unwrap_or_default())
-                        }
-                        DropKind::Table => ModalAction::DropTable {
-                            db: db.clone().unwrap_or_default(),
-                            table: table.clone().unwrap_or_default(),
-                        },
-                    };
-                }
-                if ui.button("Cancelar").clicked() {
-                    action = ModalAction::Cancel;
-                }
-            });
-        },
-    );
+    dialog(ctx, title, 300.0, Some(&mut open), |ui| {
+        ui.label(format!("¿Seguro que quieres eliminar {what}:"));
+        ui.add_space(4.0);
+        ui.strong(&name);
+        ui.add_space(4.0);
+        ui.colored_label(
+            theme::get(ui).warning,
+            "⚠ Esta acción no se puede deshacer.",
+        );
+        // Una base de datos entera no se elimina con un solo clic
+        let confirmed = match target {
+            DbObject::Database(db) => {
+                ui.add_space(6.0);
+                ui.label("Escribe su nombre para confirmar:");
+                ui.add(egui::TextEdit::singleline(typed).desired_width(f32::INFINITY));
+                typed.trim() == db
+            }
+            DbObject::Table { .. } => true,
+        };
+        ui.separator();
+        ui.horizontal(|ui| {
+            let delete = ui
+                .add_enabled_ui(confirmed, |ui| red_btn(ui, "Eliminar"))
+                .inner;
+            if delete {
+                action = match target.clone() {
+                    DbObject::Database(db) => ModalAction::DropDatabase(db),
+                    DbObject::Table { db, table } => ModalAction::DropTable { db, table },
+                };
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
+        });
+    });
 
     if !open {
         action = ModalAction::Cancel;
@@ -725,27 +700,21 @@ fn show_confirm_drop(
     action
 }
 
-// ── Confirmación: truncar ─────────────────────────────────────────────────────
+// ── Confirmación: vaciar ──────────────────────────────────────────────────────
 
-fn show_confirm_truncate(
-    ctx: &egui::Context,
-    kind: &TruncateKind,
-    target: &str,
-    db: &mut Option<String>,
-    table: &mut Option<String>,
-) -> ModalAction {
+fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
 
-    let kind_label = match kind {
-        TruncateKind::Table => "tabla",
-        TruncateKind::AllInDatabase => "todas las tablas de",
+    let (what, name) = match target {
+        DbObject::Database(db) => ("todas las tablas de", db.clone()),
+        DbObject::Table { db, table } => ("la tabla", format!("{db}.{table}")),
     };
 
     dialog(ctx, "Vaciar datos", 280.0, Some(&mut open), |ui| {
-        ui.label(format!("¿Seguro que quieres vaciar {kind_label}:"));
+        ui.label(format!("¿Seguro que quieres vaciar {what}:"));
         ui.add_space(4.0);
-        ui.strong(target);
+        ui.strong(&name);
         ui.add_space(4.0);
         ui.colored_label(
             theme::get(ui).warning,
@@ -754,14 +723,9 @@ fn show_confirm_truncate(
         ui.separator();
         ui.horizontal(|ui| {
             if red_btn(ui, "Vaciar") {
-                action = match kind {
-                    TruncateKind::Table => ModalAction::TruncateTable {
-                        db: db.clone().unwrap_or_default(),
-                        table: table.clone().unwrap_or_default(),
-                    },
-                    TruncateKind::AllInDatabase => {
-                        ModalAction::TruncateAllTables(db.clone().unwrap_or_default())
-                    }
+                action = match target.clone() {
+                    DbObject::Database(db) => ModalAction::TruncateAllTables(db),
+                    DbObject::Table { db, table } => ModalAction::TruncateTable { db, table },
                 };
             }
             if ui.button("Cancelar").clicked() {

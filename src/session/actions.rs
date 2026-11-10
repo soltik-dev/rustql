@@ -20,8 +20,7 @@ use crate::ui::connection_panel::SaveProfile;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
 use crate::ui::modals::{
-    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
-    TruncateKind,
+    self, DbObject, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
 };
 use crate::ui::results_grid::{self, ApplyBarAction, CellRef, GridAction, InsertValue, RowRef};
 use crate::ui::sidebar::SidebarAction;
@@ -318,39 +317,25 @@ impl Session {
                 };
             }
             SidebarAction::DropDatabase { db } => {
-                let target = db.clone();
                 self.modal = ModalState::ConfirmDrop {
-                    kind: DropKind::Database,
-                    target,
-                    db: Some(db),
-                    table: None,
+                    target: DbObject::Database(db),
+                    typed: String::new(),
                 };
             }
             SidebarAction::TruncateAllTables { db } => {
-                let target = format!("todas las tablas de '{db}'");
                 self.modal = ModalState::ConfirmTruncate {
-                    kind: TruncateKind::AllInDatabase,
-                    target,
-                    db: Some(db),
-                    table: None,
+                    target: DbObject::Database(db),
                 };
             }
             SidebarAction::DropTable { db, table } => {
-                let target = format!("{db}.{table}");
                 self.modal = ModalState::ConfirmDrop {
-                    kind: DropKind::Table,
-                    target,
-                    db: Some(db),
-                    table: Some(table),
+                    target: DbObject::Table { db, table },
+                    typed: String::new(),
                 };
             }
             SidebarAction::TruncateTable { db, table } => {
-                let target = format!("{db}.{table}");
                 self.modal = ModalState::ConfirmTruncate {
-                    kind: TruncateKind::Table,
-                    target,
-                    db: Some(db),
-                    table: Some(table),
+                    target: DbObject::Table { db, table },
                 };
             }
             SidebarAction::CopyTableName(name) => {
