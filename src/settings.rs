@@ -88,18 +88,22 @@ impl Default for AppSettings {
     }
 }
 
-/// Descubre todas las fuentes TTF/OTF del sistema disponibles para la UI.
-/// Cada entrada es (nombre_display, path). Ordenadas alfabéticamente por nombre.
-/// Excluye variantes Bold/Italic/etc. para no saturar el listado.
-pub fn available_system_fonts() -> Vec<(String, String)> {
-    #[cfg(target_os = "windows")]
-    {
-        windows_fonts()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        fc_list_fonts()
-    }
+/// Fuentes TTF/OTF del sistema disponibles para la UI, como (nombre, ruta)
+/// ordenadas por nombre y sin las variantes Bold/Italic/etc. Se buscan una
+/// sola vez: listarlas lanza `fc-list` (o recorre el directorio de fuentes),
+/// y el panel de ajustes las pide en cada frame.
+pub fn available_system_fonts() -> &'static [(String, String)] {
+    static FONTS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            windows_fonts()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            fc_list_fonts()
+        }
+    })
 }
 
 #[cfg(not(target_os = "windows"))]

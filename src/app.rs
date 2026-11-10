@@ -17,6 +17,8 @@ pub struct UiPanelState {
     pub show_log: bool,
     pub show_settings: bool,
     pub settings_dirty: bool,
+    /// Fuente con la que se cargaron las fuentes por última vez.
+    pub applied_font: String,
 }
 
 // ── Estado principal ─────────────────────────────────────────────────────────
@@ -43,6 +45,7 @@ impl RustqlApp {
             show_log: settings.show_log,
             show_settings: false,
             settings_dirty: false,
+            applied_font: settings.font_family.clone(),
         };
         let profiles = profiles::load();
         let keyring_migration = Some(start_keyring(ctx, profiles::legacy_passwords(&profiles)));
@@ -215,7 +218,11 @@ impl eframe::App for RustqlApp {
         let window_rect = ui.max_rect();
         // Aplicar ajustes si cambiaron
         if self.ui.settings_dirty {
-            settings::setup_fonts(ctx, &self.shared.settings);
+            // Recargar las fuentes rehace su atlas: solo si cambió la fuente
+            if self.ui.applied_font != self.shared.settings.font_family {
+                settings::setup_fonts(ctx, &self.shared.settings);
+                self.ui.applied_font = self.shared.settings.font_family.clone();
+            }
             settings::apply(ctx, &self.shared.settings);
             settings::save(&self.shared.settings);
             self.ui.settings_dirty = false;
@@ -356,6 +363,7 @@ mod tests {
                 show_log: true,
                 show_settings: false,
                 settings_dirty: false,
+                applied_font: String::new(),
             },
             keyring_migration: None,
         }

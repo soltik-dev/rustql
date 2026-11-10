@@ -3,6 +3,15 @@ use eframe::egui;
 use crate::settings::{self, AppSettings, CopyFormat, Theme};
 use crate::ui::theme;
 
+/// Un deslizador da su valor por cambiado al soltarlo (o al teclearlo), no
+/// en cada frame del arrastre: aplicar un ajuste rehace los estilos y lo
+/// guarda en disco, y con el tamaño de fuente la interfaz se movería bajo
+/// el puntero.
+fn slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> bool {
+    let resp = ui.add(slider);
+    resp.drag_stopped() || (resp.changed() && !resp.dragged())
+}
+
 /// Devuelve true si algún ajuste cambió este frame.
 pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     let mut changed = false;
@@ -40,7 +49,7 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
                     settings::EMBEDDED_FONT_NAME,
                 )
                 .changed();
-            for (name, _) in &available_fonts {
+            for (name, _) in available_fonts {
                 changed |= ui
                     .selectable_value(&mut settings.font_family, name.clone(), name)
                     .changed();
@@ -52,9 +61,10 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     ui.add_space(8.0);
 
     theme::section_label(ui, "Tamaño de fuente");
-    changed |= ui
-        .add(egui::Slider::new(&mut settings.font_size, 10.0..=22.0).step_by(0.5))
-        .changed();
+    changed |= slider(
+        ui,
+        egui::Slider::new(&mut settings.font_size, 10.0..=22.0).step_by(0.5),
+    );
 
     ui.add_space(4.0);
     ui.label(egui::RichText::new("Texto de muestra / Sample text").size(settings.font_size));
@@ -83,14 +93,16 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     ui.add_space(8.0);
 
     theme::section_label(ui, "Límite de filas por consulta");
-    changed |= ui
-        .add(egui::Slider::new(&mut settings.query_limit, 100..=10000).step_by(100.0))
-        .changed();
+    changed |= slider(
+        ui,
+        egui::Slider::new(&mut settings.query_limit, 100..=10000).step_by(100.0),
+    );
 
     theme::section_label(ui, "Máx. filas en el editor SQL");
-    changed |= ui
-        .add(egui::Slider::new(&mut settings.sql_editor_max_rows, 1_000..=100_000).step_by(1_000.0))
-        .changed();
+    changed |= slider(
+        ui,
+        egui::Slider::new(&mut settings.sql_editor_max_rows, 1_000..=100_000).step_by(1_000.0),
+    );
 
     changed
 }
