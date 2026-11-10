@@ -8,7 +8,7 @@ use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::loadable::Loadable;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
-use crate::ui::results_grid::GridAction;
+use crate::ui::results_grid::{ApplyBarAction, GridAction};
 use crate::ui::sidebar::SidebarOutput;
 use crate::ui::sql_editor::SqlEditorAction;
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
@@ -31,7 +31,7 @@ pub(super) struct FrameSignals {
     pub tab_bar: TabBarResult,
     pub filter: FilterAction,
     pub grid: GridAction,
-    pub apply_bar: GridAction,
+    pub apply_bar: ApplyBarAction,
     pub db_info: DbInfoAction,
     pub sql: SqlEditorAction,
 }

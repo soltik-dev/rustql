@@ -22,7 +22,7 @@ use crate::ui::modals::{
     self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
     TruncateKind,
 };
-use crate::ui::results_grid::{self, EditingCell, GridAction};
+use crate::ui::results_grid::{self, ApplyBarAction, CellRef, GridAction, InsertValue, RowRef};
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
@@ -45,9 +45,9 @@ impl Session {
         self.handle_grid_action(ctx, sh, signals.grid);
         // Barra de guardar (solo visible con cambios pendientes)
         match signals.apply_bar {
-            GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
-            GridAction::DiscardEdits => self.discard_pending(),
-            _ => {}
+            ApplyBarAction::Apply => self.commit_pending_changes(sh, AfterCommit::ReloadData),
+            ApplyBarAction::Discard => self.discard_pending(),
+            ApplyBarAction::None => {}
         }
         let disconnect = self.handle_sidebar_action(ctx, sh, signals.sidebar.action);
         // Datos que el sidebar necesita para dibujar el árbol
@@ -150,49 +150,24 @@ impl Session {
                 // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
                 self.request_reload(sh, Reload::Sort(sorts));
             }
-            GridAction::CellEditStarted {
+            GridAction::CellEdited {
                 row,
                 col_idx,
-                current_value,
-            } => {
-                self.table_view.editing_cell = Some(EditingCell {
-                    row,
-                    col_idx,
-                    buffer: current_value,
-                    needs_focus: true,
-                });
-            }
-            GridAction::CellSetNull { row, col_idx } => {
-                self.table_view.editing_cell = None;
-                self.record_edit(row, col_idx, None);
-            }
-            GridAction::CellEditCommitted {
-                row,
+                value,
+            } => self.record_edit(row, col_idx, value),
+            GridAction::CellSetDefault {
+                insert_idx,
                 col_idx,
-                new_value,
             } => {
-                self.table_view.editing_cell = None;
-                self.record_edit(row, col_idx, Some(new_value));
+                if let Some(slot) = self
+                    .table_view
+                    .pending_inserts
+                    .get_mut(insert_idx)
+                    .and_then(|ins| ins.values.get_mut(col_idx))
+                {
+                    *slot = InsertValue::Default;
+                }
             }
-            GridAction::CellEditCancelled => {
-                self.table_view.editing_cell = None;
-            }
-            GridAction::CellEditTabNext {
-                row,
-                col_idx,
-                new_value,
-            } => {
-                self.record_edit(row, col_idx, Some(new_value));
-                let next_col = self.next_editable_col(row, col_idx);
-                self.table_view.editing_cell = Some(EditingCell {
-                    row,
-                    col_idx: next_col,
-                    buffer: self.cell_text(row, next_col),
-                    needs_focus: true,
-                });
-            }
-            GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
-            GridAction::DiscardEdits => self.discard_pending(),
             GridAction::FilterBy { sql_fragment } => {
                 self.request_reload(sh, Reload::Filter(sql_fragment));
             }
@@ -217,65 +192,42 @@ impl Session {
                     operator: modals::FilterOperator::default(),
                 };
             }
-            GridAction::MarkDeleteRow { row_idx } => {
-                if !self.table_view.pending_deletes.remove(&row_idx) {
-                    self.table_view.pending_deletes.insert(row_idx);
-                }
-            }
-            GridAction::InsertRow => {
-                if let Some(row) = self.new_insert_row(None) {
-                    self.table_view.pending_inserts.push(row);
-                }
-            }
-            GridAction::CloneRow { row_idx } => {
-                if let Some(row) = self.new_insert_row(Some(row_idx)) {
-                    self.table_view.pending_inserts.push(row);
-                }
-            }
-            GridAction::RemoveInsertRow { insert_idx } => {
-                if insert_idx < self.table_view.pending_inserts.len() {
-                    self.table_view.pending_inserts.remove(insert_idx);
-                }
-            }
-            GridAction::RowSelected {
-                row_idx,
-                shift,
-                ctrl,
-            } => {
-                if shift {
-                    let anchor = self.table_view.last_selected_row.unwrap_or(row_idx);
-                    let (lo, hi) = (anchor.min(row_idx), anchor.max(row_idx));
-                    self.table_view.selected_rows = (lo..=hi).collect();
-                } else if ctrl {
-                    if !self.table_view.selected_rows.remove(&row_idx) {
-                        self.table_view.selected_rows.insert(row_idx);
-                        self.table_view.last_selected_row = Some(row_idx);
-                    }
-                } else {
-                    self.table_view.selected_rows.clear();
-                    self.table_view.selected_rows.insert(row_idx);
-                    self.table_view.last_selected_row = Some(row_idx);
-                    self.table_view.drag_select_from = Some(row_idx);
-                }
-                self.table_view.selected_cell = None;
-            }
-            GridAction::CopySelectedRows => {
-                self.copy_selected_rows(ctx, &sh.settings.copy_format);
-            }
-            GridAction::CopyRowsAs { fmt } => self.copy_selected_rows(ctx, &fmt),
-            GridAction::CellSelected { row_idx, col_idx } => {
-                self.table_view.selected_cell = Some((row_idx, col_idx));
-                self.table_view.selected_rows.clear();
-                self.table_view.last_selected_row = None;
-            }
-            GridAction::MarkDeleteRows { row_indices } => {
-                for row_idx in row_indices {
+            GridAction::ToggleDeleteRows(rows) => {
+                for row_idx in rows {
                     if !self.table_view.pending_deletes.remove(&row_idx) {
                         self.table_view.pending_deletes.insert(row_idx);
                     }
                 }
             }
+            GridAction::InsertRow => self.add_insert_row(ctx, None),
+            GridAction::CloneRow { row_idx } => self.add_insert_row(ctx, Some(row_idx)),
+            GridAction::RemoveInsertRow { insert_idx } => {
+                if insert_idx < self.table_view.pending_inserts.len() {
+                    self.table_view.pending_inserts.remove(insert_idx);
+                }
+            }
+            GridAction::CopyRows(fmt) => {
+                self.copy_selected_rows(ctx, fmt.as_ref().unwrap_or(&sh.settings.copy_format));
+            }
             GridAction::None => {}
+        }
+    }
+
+    /// Añade al grid una fila nueva (copia de `source_row` si se indica) y
+    /// lleva a ella el cursor y el foco, lista para escribir.
+    fn add_insert_row(&mut self, ctx: &egui::Context, source_row: Option<usize>) {
+        let Some(row) = self.new_insert_row(source_row) else {
+            return;
+        };
+        let col = row.auto_cols.iter().position(|auto| !auto).unwrap_or(0);
+        let tv = &mut self.table_view;
+        tv.pending_inserts.push(row);
+        tv.selection.move_to(CellRef {
+            row: RowRef::Insert(tv.pending_inserts.len() - 1),
+            col,
+        });
+        if let Some(id) = tv.selection.focus_id {
+            ctx.memory_mut(|m| m.request_focus(id));
         }
     }
 
@@ -290,7 +242,8 @@ impl Session {
         };
         let rows: Vec<&Vec<Option<String>>> = self
             .table_view
-            .selected_rows
+            .selection
+            .rows
             .iter()
             .filter_map(|&i| data.rows.get(i))
             .collect();

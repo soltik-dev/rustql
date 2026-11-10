@@ -555,59 +555,6 @@ impl Session {
         }
     }
 
-    /// Texto que muestra el grid en una celda: el del cambio pendiente si lo
-    /// hay, si no el de los datos. NULL se edita como texto vacío.
-    fn cell_text(&self, row: RowRef, col_idx: usize) -> String {
-        let tv = &self.table_view;
-        let value = match row {
-            RowRef::Insert(insert_idx) => match tv
-                .pending_inserts
-                .get(insert_idx)
-                .and_then(|ins| ins.values.get(col_idx))
-            {
-                Some(InsertValue::Value(v)) => Some(v.clone()),
-                _ => None,
-            },
-            RowRef::Existing(row_idx) => {
-                match tv
-                    .pending_edits
-                    .iter()
-                    .find(|e| e.row_idx == row_idx && e.col_idx == col_idx)
-                {
-                    Some(edit) => (!edit.is_null).then(|| edit.new_value.clone()),
-                    None => tv
-                        .table_data
-                        .as_ref()
-                        .and_then(|d| d.rows.get(row_idx))
-                        .and_then(|r| r.get(col_idx))
-                        .cloned()
-                        .flatten(),
-                }
-            }
-        };
-        value.unwrap_or_default()
-    }
-
-    /// Columna a la que salta Tab: la siguiente editable (en una fila nueva,
-    /// las AUTO_INCREMENT no lo son), volviendo a la primera al final.
-    fn next_editable_col(&self, row: RowRef, col_idx: usize) -> usize {
-        let tv = &self.table_view;
-        let col_count = tv.table_data.as_ref().map_or(1, |d| d.columns.len().max(1));
-        let is_auto = |c: usize| match row {
-            RowRef::Insert(insert_idx) => tv
-                .pending_inserts
-                .get(insert_idx)
-                .and_then(|ins| ins.auto_cols.get(c))
-                .copied()
-                .unwrap_or(false),
-            RowRef::Existing(_) => false,
-        };
-        (1..=col_count)
-            .map(|step| (col_idx + step) % col_count)
-            .find(|&c| !is_auto(c))
-            .unwrap_or(col_idx)
-    }
-
     /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
     fn save_table_state(&mut self, sh: &mut Shared) {
         if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
@@ -694,10 +641,7 @@ impl Session {
     }
 
     fn clear_row_selection(&mut self) {
-        self.table_view.selected_cell = None;
-        self.table_view.selected_rows.clear();
-        self.table_view.last_selected_row = None;
-        self.table_view.drag_select_from = None;
+        self.table_view.selection.clear();
     }
 
     /// Abre una tabla en la pestaña indicada. Si hay cambios pendientes en la
@@ -1584,11 +1528,9 @@ mod tests {
         let mut s = session_with_table();
         let cell = RowRef::Existing(0);
         s.record_edit(cell, 0, Some("9".into()));
-        assert_eq!(s.cell_text(cell, 0), "9");
-        // Tab o Enter con el valor original: antes, Tab dejaba el «9» pendiente
+        assert_eq!(s.table_view.pending_edits.len(), 1);
         s.record_edit(cell, 0, Some("1".into()));
         assert!(s.table_view.pending_edits.is_empty());
-        assert_eq!(s.cell_text(cell, 0), "1");
     }
 
     #[test]
@@ -1599,25 +1541,6 @@ mod tests {
         assert!(s.table_view.pending_edits.is_empty());
         s.record_edit(RowRef::Existing(0), 0, Some(String::new()));
         assert_eq!(s.table_view.pending_edits.len(), 1, "NULL → '' sí cambia");
-    }
-
-    #[test]
-    fn tab_salta_las_columnas_auto_de_una_fila_nueva() {
-        let mut s = session_with_table();
-        s.table_view.table_data.as_mut().unwrap().columns =
-            vec!["id".into(), "a".into(), "b".into()];
-        s.table_view.pending_inserts.push(PendingInsert {
-            values: vec![InsertValue::Default; 3],
-            auto_cols: vec![true, false, false],
-        });
-        let row = RowRef::Insert(0);
-        assert_eq!(s.next_editable_col(row, 1), 2);
-        assert_eq!(
-            s.next_editable_col(row, 2),
-            1,
-            "da la vuelta sin pasar por id"
-        );
-        assert_eq!(s.next_editable_col(RowRef::Existing(0), 2), 0);
     }
 
     #[test]

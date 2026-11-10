@@ -1,12 +1,20 @@
 use eframe::egui;
 
-use super::{GridAction, PendingEdit};
+use super::PendingEdit;
 use crate::ui::icons::{PLUS, TRASH};
 use crate::ui::{CMD, theme};
 
-// ── Barra de apply ────────────────────────────────────────────────────────────
+/// Lo que el usuario pulsa en la barra de cambios pendientes.
+#[derive(Debug, Default, PartialEq)]
+pub enum ApplyBarAction {
+    #[default]
+    None,
+    Apply,
+    Discard,
+}
 
-/// Renderiza la barra inferior de cambios pendientes.
+/// Barra inferior de cambios pendientes: cuántos hay y los botones de
+/// guardarlos o descartarlos.
 pub fn show_apply_bar(
     ui: &mut egui::Ui,
     pending_edits: &[PendingEdit],
@@ -14,8 +22,8 @@ pub fn show_apply_bar(
     pending_inserts: usize,
     ctrl_enter: bool,
     pk_missing: bool,
-) -> GridAction {
-    let mut action = GridAction::None;
+) -> ApplyBarAction {
+    let mut action = ApplyBarAction::None;
     let p = theme::get(ui);
 
     ui.horizontal(|ui| {
@@ -47,12 +55,12 @@ pub fn show_apply_bar(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Descartar").clicked() {
-                action = GridAction::DiscardEdits;
+                action = ApplyBarAction::Discard;
             }
             if !pk_missing {
                 let apply_btn = theme::primary_button(ui, format!("Guardar  {CMD}Enter"));
                 if apply_btn.clicked() || ctrl_enter {
-                    action = GridAction::ApplyEdits;
+                    action = ApplyBarAction::Apply;
                 }
             }
         });
