@@ -116,7 +116,9 @@ impl RustqlApp {
     /// Cierra sin preguntar. Activa la pestaña de la derecha (o la última) y,
     /// si no queda ninguna, abre una nueva con el formulario.
     fn close_session(&mut self, idx: usize) {
-        self.sessions.remove(idx).shutdown();
+        let session = self.sessions.remove(idx);
+        session.save_tabs_state(&mut self.shared);
+        session.shutdown();
         if self.sessions.is_empty() {
             self.new_session();
             return;
@@ -213,6 +215,15 @@ impl RustqlApp {
 // ── Loop principal ────────────────────────────────────────────────────────────
 
 impl eframe::App for RustqlApp {
+    /// Al salir se guarda el texto de las pestañas SQL de cada conexión:
+    /// hasta ahora solo se guardaba al ejecutar, y lo escrito sin ejecutar
+    /// se perdía al cerrar la aplicación.
+    fn on_exit(&mut self) {
+        for session in &self.sessions {
+            session.save_tabs_state(&mut self.shared);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let window_rect = ui.max_rect();

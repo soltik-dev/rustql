@@ -710,7 +710,13 @@ impl Session {
         self.run_query_async(sql);
     }
 
-    fn save_tabs_state(&mut self, sh: &mut Shared) {
+    /// Guarda el texto de las pestañas SQL de esta conexión. Sin conexión no
+    /// hace nada: las pestañas se guardan bajo la clave de la conexión, y en
+    /// el formulario esa clave es la de unos parámetros a medio escribir.
+    pub fn save_tabs_state(&self, sh: &mut Shared) {
+        if !self.is_connected() {
+            return;
+        }
         let tabs = self
             .sql_tabs
             .iter()
@@ -1118,6 +1124,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::schema::SchemaResult;
+    use super::view::FrameSignals;
     use super::writes::AfterCommit;
     use super::*;
     use crate::db::{ColumnInfo, DatabaseInfo, DbResult, TableInfo};
@@ -1872,6 +1879,54 @@ mod tests {
         assert!(s.sql_tabs[0].running.is_none());
         assert!(matches!(s.sql_tabs[0].result, Some(Ok(_))));
         assert_eq!(s.query_log.len(), 1);
+    }
+
+    fn saved_sql(s: &Session, sh: &Shared) -> Vec<String> {
+        sh.settings
+            .sql_tabs_by_conn
+            .get(&s.params.key())
+            .map(|tabs| tabs.iter().map(|t| t.sql_text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn el_texto_sql_sin_ejecutar_se_guarda_al_salir_de_la_pestana() {
+        let mut s = session_with_table();
+        let mut sh = shared();
+        s.active_tab = ActiveTab::Sql(0);
+        s.sql_tabs[0].sql_text = "SELECT a medias".into();
+        let signals = FrameSignals {
+            tab_bar: crate::ui::tab_bar::TabBarResult {
+                tab_clicked: Some(ActiveTab::Datos),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        s.apply_signals(&egui::Context::default(), &mut sh, signals, false, false);
+        assert_eq!(saved_sql(&s, &sh), ["SELECT a medias"]);
+    }
+
+    #[test]
+    fn el_texto_sql_se_guarda_al_desconectar_y_no_en_el_formulario() {
+        let mut s = session_with_table();
+        let mut sh = shared();
+        s.sql_tabs[0].sql_text = "SELECT 1".into();
+        let ctx = egui::Context::default();
+        let signals = FrameSignals {
+            sidebar: crate::ui::sidebar::SidebarOutput {
+                action: crate::ui::sidebar::SidebarAction::Disconnect,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        s.apply_signals(&ctx, &mut sh, signals, false, false);
+        assert!(!s.is_connected());
+        assert_eq!(saved_sql(&s, &sh), ["SELECT 1"]);
+
+        // Ya en el formulario, no se guarda bajo unos parámetros cualesquiera
+        s.sql_tabs[0].sql_text = "otra cosa".into();
+        s.save_tabs_state(&mut sh);
+        assert_eq!(saved_sql(&s, &sh), ["SELECT 1"]);
     }
 
     #[test]

@@ -58,6 +58,8 @@ impl Session {
             self.request_all_tables();
         }
         if disconnect {
+            // Lo escrito y sin ejecutar no debe perderse al reconectar
+            self.save_tabs_state(sh);
             self.disconnect();
         }
         if f5 {
@@ -105,11 +107,13 @@ impl Session {
 
     fn handle_tab_bar(&mut self, sh: &mut Shared, tab_bar: TabBarResult, ctrl_t: bool) {
         if let Some(t) = tab_bar.tab_clicked {
+            // Al salir de una pestaña SQL se guarda su texto
+            if matches!(self.active_tab, ActiveTab::Sql(_)) && t != self.active_tab {
+                self.save_tabs_state(sh);
+            }
             self.active_tab = t;
         }
 
-        // Ctrl+T solo con conexión: en el formulario guardaría pestañas bajo la
-        // clave de unos parámetros a medio escribir.
         if tab_bar.new_sql_tab || (ctrl_t && self.is_connected()) {
             let db_ctx = match &self.schema.selected_node {
                 Some(SelectedNode::Database(d)) => d.clone(),
