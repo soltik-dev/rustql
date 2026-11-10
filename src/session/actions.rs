@@ -131,22 +131,38 @@ impl Session {
             self.save_tabs_state(sh);
         }
 
-        if let Some(close_idx) = tab_bar.close_sql_tab
-            && close_idx < self.sql_tabs.len()
+        if let Some(idx) = tab_bar.close_sql_tab
+            && let Some(tab) = self.sql_tabs.get(idx)
         {
-            self.sql_tabs.remove(close_idx);
-            if self.sql_tabs.is_empty() {
-                self.sql_tabs.push(SqlTab::default());
+            // Cerrar borra su consulta para siempre: con texto, se pregunta
+            if tab.sql_text.trim().is_empty() {
+                self.close_sql_tab(sh, idx);
+            } else {
+                self.modal = ModalState::ConfirmCloseSqlTab {
+                    idx,
+                    preview: crate::ui::ellipsize(tab.sql_text.trim(), 120),
+                };
             }
-            self.active_tab = match self.active_tab {
-                ActiveTab::Sql(i) if i >= close_idx => {
-                    let new_i = if i > 0 { i.saturating_sub(1) } else { 0 };
-                    ActiveTab::Sql(new_i.min(self.sql_tabs.len().saturating_sub(1)))
-                }
-                other => other,
-            };
-            self.save_tabs_state(sh);
         }
+    }
+
+    /// Cierra la pestaña SQL `idx` y descarta su texto. Siempre queda al
+    /// menos una pestaña.
+    pub(super) fn close_sql_tab(&mut self, sh: &mut Shared, idx: usize) {
+        if idx >= self.sql_tabs.len() {
+            return;
+        }
+        self.sql_tabs.remove(idx);
+        if self.sql_tabs.is_empty() {
+            self.sql_tabs.push(SqlTab::default());
+        }
+        self.active_tab = match self.active_tab {
+            ActiveTab::Sql(i) if i >= idx => {
+                ActiveTab::Sql(i.saturating_sub(1).min(self.sql_tabs.len() - 1))
+            }
+            other => other,
+        };
+        self.save_tabs_state(sh);
     }
 
     fn handle_grid_action(&mut self, ctx: &egui::Context, sh: &mut Shared, action: GridAction) {
@@ -184,9 +200,13 @@ impl Session {
                         let filter = format!("{esc_col} = '{esc_val}'");
                         self.request_reload(sh, Reload::Filter(filter));
                     }
+                    // En un diálogo: como error de la tabla tapaba el grid
+                    // hasta la siguiente recarga
                     Err(e) => {
-                        self.table_view.table_error =
-                            Some(format!("No se pudo leer el portapapeles: {e}"));
+                        self.modal = ModalState::Error {
+                            title: "No se pudo leer el portapapeles".into(),
+                            message: e.to_string(),
+                        };
                     }
                 }
             }
@@ -420,6 +440,10 @@ impl Session {
             ModalAction::None => {}
             ModalAction::Cancel | ModalAction::CloseSession | ModalAction::DeleteProfile => {
                 self.modal = ModalState::None;
+            }
+            ModalAction::CloseSqlTab(idx) => {
+                self.modal = ModalState::None;
+                self.close_sql_tab(sh, idx);
             }
             ModalAction::ApplyAndSwitch { new_db, new_table } => {
                 self.modal = ModalState::None;

@@ -1942,6 +1942,38 @@ mod tests {
         assert!(s.error_message.is_none());
     }
 
+    #[test]
+    fn cerrar_una_pestana_sql_con_texto_pide_confirmacion() {
+        let mut s = session_with_table();
+        let mut sh = shared();
+        s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
+        s.sql_tabs[1].sql_text = "SELECT importante".into();
+        s.active_tab = ActiveTab::Sql(1);
+        let close = |idx| FrameSignals {
+            tab_bar: crate::ui::tab_bar::TabBarResult {
+                close_sql_tab: Some(idx),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+
+        s.apply_signals(&ctx, &mut sh, close(1), false, false);
+        assert_eq!(s.sql_tabs.len(), 2, "con texto no se cierra sin más");
+        assert!(matches!(
+            s.modal,
+            ModalState::ConfirmCloseSqlTab { idx: 1, .. }
+        ));
+        s.handle_modal_action(ModalAction::CloseSqlTab(1), &mut sh);
+        assert_eq!(s.sql_tabs.len(), 1);
+        assert_eq!(s.active_tab, ActiveTab::Sql(0));
+
+        // Vacía: se cierra directamente (y queda una nueva en su lugar)
+        s.apply_signals(&ctx, &mut sh, close(0), false, false);
+        assert!(matches!(s.modal, ModalState::None));
+        assert_eq!(s.sql_tabs.len(), 1);
+    }
+
     fn saved_sql(s: &Session, sh: &Shared) -> Vec<String> {
         sh.settings
             .sql_tabs_by_conn

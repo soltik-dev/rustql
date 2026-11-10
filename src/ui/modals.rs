@@ -195,6 +195,12 @@ pub enum ModalState {
     ConfirmDeleteProfile {
         name: String,
     },
+    /// El usuario cierra una pestaña SQL que tiene texto.
+    ConfirmCloseSqlTab {
+        idx: usize,
+        /// Principio de la consulta, para reconocerla.
+        preview: String,
+    },
     CloneTable {
         db: String,
         table: String,
@@ -265,6 +271,8 @@ pub enum ModalAction {
     CloseSession,
     /// Eliminar el favorito seleccionado en el formulario.
     DeleteProfile,
+    /// Cerrar la pestaña SQL y descartar su consulta.
+    CloseSqlTab(usize),
     CloneTable {
         db: String,
         src_table: String,
@@ -415,6 +423,9 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             pending_count,
         } => show_confirm_close_session(ctx, title, *pending_count),
         ModalState::ConfirmDeleteProfile { name } => show_confirm_delete_profile(ctx, name),
+        ModalState::ConfirmCloseSqlTab { idx, preview } => {
+            show_confirm_close_sql_tab(ctx, *idx, preview)
+        }
         ModalState::CloneTable {
             db,
             table,
@@ -1040,6 +1051,33 @@ fn show_confirm_delete_profile(ctx: &egui::Context, name: &str) -> ModalAction {
         ui.horizontal(|ui| {
             if red_btn(ui, "Eliminar") {
                 action = ModalAction::DeleteProfile;
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
+        });
+    });
+
+    if !open {
+        action = ModalAction::Cancel;
+    }
+    action
+}
+
+fn show_confirm_close_sql_tab(ctx: &egui::Context, idx: usize, preview: &str) -> ModalAction {
+    let mut action = ModalAction::None;
+    let mut open = true;
+
+    let title = format!("Cerrar SQL {}", idx + 1);
+    dialog(ctx, &title, 320.0, Some(&mut open), |ui| {
+        ui.set_max_width(420.0);
+        ui.label("La consulta de esta pestaña se perderá:");
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(preview).monospace().weak());
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if theme::warning_button(ui, format!("{TRASH}  Cerrar pestaña")).clicked() {
+                action = ModalAction::CloseSqlTab(idx);
             }
             if ui.button("Cancelar").clicked() {
                 action = ModalAction::Cancel;
