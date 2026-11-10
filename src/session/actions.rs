@@ -16,6 +16,7 @@ use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
 use crate::settings::{self, CopyFormat};
 use crate::table_state;
+use crate::ui::connection_panel::SaveProfile;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
 use crate::ui::modals::{
@@ -417,7 +418,7 @@ impl Session {
     pub(super) fn handle_modal_action(&mut self, modal_action: ModalAction, sh: &mut Shared) {
         match modal_action {
             ModalAction::None => {}
-            ModalAction::Cancel | ModalAction::CloseSession => {
+            ModalAction::Cancel | ModalAction::CloseSession | ModalAction::DeleteProfile => {
                 self.modal = ModalState::None;
             }
             ModalAction::ApplyAndSwitch { new_db, new_table } => {
@@ -521,7 +522,7 @@ impl Session {
         ctx: &egui::Context,
         sh: &mut Shared,
         selected: Option<usize>,
-        save: bool,
+        save: Option<SaveProfile>,
         delete: bool,
     ) -> Option<usize> {
         let mut removed = None;
@@ -538,49 +539,8 @@ impl Session {
             self.error_message = None;
         }
 
-        if save && !self.profile_name.trim().is_empty() {
-            if let Ok(p) = self.port_str.parse::<u16>() {
-                self.params.port = p;
-            }
-            let name = self.profile_name.trim().to_string();
-            let idx = self
-                .selected_profile_idx
-                .or_else(|| sh.profiles.iter().position(|p| p.name == name));
-            let previous = idx.map(|i| &sh.profiles[i]);
-            let had_keyring = previous.is_some_and(|p| p.password_in_keyring);
-            let profile = ConnectionProfile {
-                id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
-                name,
-                host: self.params.host.clone(),
-                port: self.params.port,
-                user: self.params.user.clone(),
-                // Una contraseña nueva se marca cuando el llavero la confirma
-                // (poll_keyring). Con el campo vacío se conserva la que había.
-                password_in_keyring: had_keyring && self.save_password,
-                password: None,
-                color: self.color,
-            };
-            if self.save_password && !self.params.password.is_empty() {
-                let id = profile.id.clone();
-                let label = profile.keyring_label();
-                let password = self.params.password.clone();
-                let tx = self.keyring_tx.clone();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let result = secrets::set(&id, &label, &password);
-                    let _ = tx.send((id, result));
-                    ctx.request_repaint();
-                });
-            } else if had_keyring && !self.save_password {
-                secrets::delete_in_background(profile.id.clone());
-            }
-            self.params.keyring_id = profile.password_in_keyring.then(|| profile.id.clone());
-            match idx {
-                Some(i) => sh.profiles[i] = profile,
-                None => sh.profiles.push(profile),
-            }
-            self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
-            profiles::save(&sh.profiles);
+        if let Some(mode) = save {
+            self.save_profile(ctx, sh, mode);
         }
 
         if delete && let Some(idx) = self.selected_profile_idx {
@@ -597,10 +557,94 @@ impl Session {
         removed
     }
 
+    /// Guarda el formulario como favorito: sobre el seleccionado (o el que
+    /// se llame igual) o, con `SaveProfile::AsNew`, como otro distinto.
+    fn save_profile(&mut self, ctx: &egui::Context, sh: &mut Shared, mode: SaveProfile) {
+        let name = self.profile_name.trim().to_string();
+        if name.is_empty() {
+            self.error_message = Some("Pon un nombre al favorito para guardarlo.".into());
+            return;
+        }
+        if !self.read_port() {
+            return;
+        }
+        let same_name = sh.profiles.iter().position(|p| p.name == name);
+        let idx = match mode {
+            SaveProfile::Update => self.selected_profile_idx.or(same_name),
+            SaveProfile::AsNew if same_name.is_some() => {
+                self.error_message = Some(format!(
+                    "Ya hay un favorito llamado «{name}»: cambia el nombre para guardarlo \
+                     como otro."
+                ));
+                return;
+            }
+            SaveProfile::AsNew => None,
+        };
+        self.error_message = None;
+        let previous = idx.map(|i| &sh.profiles[i]);
+        let had_keyring = previous.is_some_and(|p| p.password_in_keyring);
+        let profile = ConnectionProfile {
+            id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
+            name,
+            host: self.params.host.clone(),
+            port: self.params.port,
+            user: self.params.user.clone(),
+            // Una contraseña nueva se marca cuando el llavero la confirma
+            // (poll_keyring). Con el campo vacío se conserva la que había.
+            password_in_keyring: had_keyring && self.save_password,
+            password: None,
+            color: self.color,
+        };
+        if self.save_password && !self.params.password.is_empty() {
+            let id = profile.id.clone();
+            let label = profile.keyring_label();
+            let password = self.params.password.clone();
+            let tx = self.keyring_tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = secrets::set(&id, &label, &password);
+                let _ = tx.send((id, result));
+                ctx.request_repaint();
+            });
+        } else if had_keyring && !self.save_password {
+            secrets::delete_in_background(profile.id.clone());
+        }
+        self.params.keyring_id = profile.password_in_keyring.then(|| profile.id.clone());
+        match idx {
+            Some(i) => sh.profiles[i] = profile,
+            None => sh.profiles.push(profile),
+        }
+        self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
+        profiles::save(&sh.profiles);
+    }
+
+    /// Pasa el puerto del formulario a los parámetros. Si no es un puerto
+    /// válido lo dice en el formulario y devuelve false: antes se ignoraba y
+    /// se usaba el puerto anterior sin avisar.
+    fn read_port(&mut self) -> bool {
+        match self.port_str.trim().parse::<u16>() {
+            Ok(port) if port > 0 => {
+                self.params.port = port;
+                true
+            }
+            _ => {
+                self.error_message = Some(format!(
+                    "Puerto no válido: «{}». Debe ser un número entre 1 y 65535.",
+                    self.port_str.trim()
+                ));
+                false
+            }
+        }
+    }
+
     /// Lanza la conexión en segundo plano con los parámetros del formulario.
     pub(super) fn start_connect(&mut self, sh: &Shared) {
-        if let Ok(p) = self.port_str.parse::<u16>() {
-            self.params.port = p;
+        if self.params.host.trim().is_empty() {
+            self.error_message = Some("Indica el host del servidor.".into());
+            return;
+        }
+        if !self.read_port() {
+            return;
         }
         self.title = self
             .selected_profile_idx

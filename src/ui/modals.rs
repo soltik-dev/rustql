@@ -191,6 +191,10 @@ pub enum ModalState {
         title: String,
         pending_count: usize,
     },
+    /// El usuario elimina el favorito seleccionado en el formulario.
+    ConfirmDeleteProfile {
+        name: String,
+    },
     CloneTable {
         db: String,
         table: String,
@@ -259,6 +263,8 @@ pub enum ModalAction {
     DiscardAndReload(Reload),
     /// Cerrar la pestaña de conexión descartando los cambios pendientes.
     CloseSession,
+    /// Eliminar el favorito seleccionado en el formulario.
+    DeleteProfile,
     CloneTable {
         db: String,
         src_table: String,
@@ -408,6 +414,7 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             title,
             pending_count,
         } => show_confirm_close_session(ctx, title, *pending_count),
+        ModalState::ConfirmDeleteProfile { name } => show_confirm_delete_profile(ctx, name),
         ModalState::CloneTable {
             db,
             table,
@@ -1006,6 +1013,33 @@ fn show_confirm_close_session(
         ui.horizontal(|ui| {
             if theme::warning_button(ui, format!("{TRASH}  Descartar y cerrar")).clicked() {
                 action = ModalAction::CloseSession;
+            }
+            if ui.button("Cancelar").clicked() {
+                action = ModalAction::Cancel;
+            }
+        });
+    });
+
+    if !open {
+        action = ModalAction::Cancel;
+    }
+    action
+}
+
+fn show_confirm_delete_profile(ctx: &egui::Context, name: &str) -> ModalAction {
+    let mut action = ModalAction::None;
+    let mut open = true;
+
+    dialog(ctx, "Eliminar favorito", 280.0, Some(&mut open), |ui| {
+        ui.label("¿Seguro que quieres eliminar el favorito:");
+        ui.add_space(4.0);
+        ui.strong(name);
+        ui.add_space(4.0);
+        ui.label("Se borrará también su contraseña del llavero.");
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if red_btn(ui, "Eliminar") {
+                action = ModalAction::DeleteProfile;
             }
             if ui.button("Cancelar").clicked() {
                 action = ModalAction::Cancel;

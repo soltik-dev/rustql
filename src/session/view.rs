@@ -6,6 +6,7 @@ use eframe::egui;
 use super::schema::show_loading;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::loadable::Loadable;
+use crate::ui::connection_panel::SaveProfile;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
 use crate::ui::results_grid::{ApplyBarAction, GridAction};
@@ -23,7 +24,7 @@ pub(super) struct FrameSignals {
     // Formulario de conexión
     pub connect: bool,
     pub cancel_connect: bool,
-    pub save_profile: bool,
+    pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
     pub profile_selected: Option<usize>,
     // Conectado

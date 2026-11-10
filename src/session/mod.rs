@@ -1109,8 +1109,16 @@ impl Session {
         );
         self.apply_signals(ctx, sh, signals, keys.f5, keys.ctrl_t);
         let close = matches!(modal_action, ModalAction::CloseSession);
+        let delete_confirmed = matches!(modal_action, ModalAction::DeleteProfile);
         self.handle_modal_action(modal_action, sh);
-        let profile_removed = self.handle_profile_form(ctx, sh, selected, save, delete);
+        // Eliminar un favorito pide confirmación antes
+        if delete && let Some(profile) = self.selected_profile_idx.and_then(|i| sh.profiles.get(i))
+        {
+            self.modal = ModalState::ConfirmDeleteProfile {
+                name: profile.name.clone(),
+            };
+        }
+        let profile_removed = self.handle_profile_form(ctx, sh, selected, save, delete_confirmed);
         if connect {
             self.start_connect(sh);
         }
@@ -1128,6 +1136,7 @@ mod tests {
     use super::writes::AfterCommit;
     use super::*;
     use crate::db::{ColumnInfo, DatabaseInfo, DbResult, TableInfo};
+    use crate::ui::connection_panel::SaveProfile;
     use crate::ui::modals::NewColumnDef;
 
     /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
@@ -1879,6 +1888,58 @@ mod tests {
         assert!(s.sql_tabs[0].running.is_none());
         assert!(matches!(s.sql_tabs[0].result, Some(Ok(_))));
         assert_eq!(s.query_log.len(), 1);
+    }
+
+    #[test]
+    fn un_puerto_invalido_no_conecta_al_anterior() {
+        let mut s = Session::new(0);
+        let sh = shared();
+        s.params.host = "db.example".into();
+        s.port_str = "33o6".into();
+        s.start_connect(&sh);
+        assert!(matches!(s.state, ConnState::Disconnected));
+        let err = s.error_message.as_deref().unwrap_or_default();
+        assert!(err.contains("33o6"), "{err}");
+
+        s.params.host.clear();
+        s.port_str = "3306".into();
+        s.start_connect(&sh);
+        assert!(matches!(s.state, ConnState::Disconnected), "sin host");
+    }
+
+    #[test]
+    fn guardar_un_favorito_sin_nombre_avisa() {
+        let mut s = Session::new(0);
+        let mut sh = shared();
+        let ctx = egui::Context::default();
+        s.handle_profile_form(&ctx, &mut sh, None, Some(SaveProfile::Update), false);
+        assert!(sh.profiles.is_empty());
+        assert!(s.error_message.is_some());
+    }
+
+    #[test]
+    fn guardar_como_nuevo_no_toca_el_favorito_seleccionado() {
+        let mut s = Session::new(0);
+        let mut sh = shared();
+        let ctx = egui::Context::default();
+        s.params.host = "uno.example".into();
+        s.profile_name = "Uno".into();
+        s.handle_profile_form(&ctx, &mut sh, None, Some(SaveProfile::Update), false);
+        assert_eq!(s.selected_profile_idx, Some(0));
+
+        // Mismo nombre: sería un duplicado indistinguible
+        s.params.host = "dos.example".into();
+        s.handle_profile_form(&ctx, &mut sh, None, Some(SaveProfile::AsNew), false);
+        assert_eq!(sh.profiles.len(), 1);
+        assert!(s.error_message.is_some());
+
+        s.profile_name = "Dos".into();
+        s.handle_profile_form(&ctx, &mut sh, None, Some(SaveProfile::AsNew), false);
+        let hosts: Vec<_> = sh.profiles.iter().map(|p| p.host.as_str()).collect();
+        assert_eq!(hosts, ["uno.example", "dos.example"]);
+        assert_ne!(sh.profiles[0].id, sh.profiles[1].id);
+        assert_eq!(s.selected_profile_idx, Some(1));
+        assert!(s.error_message.is_none());
     }
 
     fn saved_sql(s: &Session, sh: &Shared) -> Vec<String> {
