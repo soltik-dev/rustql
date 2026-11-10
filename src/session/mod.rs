@@ -53,6 +53,24 @@ pub enum SelectedNode {
     Table { db: String, table: String },
 }
 
+impl SelectedNode {
+    /// BBDD del nodo: ella misma o la de la tabla.
+    pub fn db(&self) -> Option<&str> {
+        match self {
+            Self::Database(db) | Self::Table { db, .. } => Some(db),
+            Self::Server => None,
+        }
+    }
+
+    /// Si es una tabla, (BBDD, tabla).
+    pub fn table(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Table { db, table } => Some((db, table)),
+            _ => None,
+        }
+    }
+}
+
 // ── Sub-structs de estado ─────────────────────────────────────────────────────
 
 // ── Estado compartido entre sesiones ─────────────────────────────────────────
@@ -193,12 +211,7 @@ impl Session {
             ConnState::Connecting { host, .. } => Some(format!("Conectando a {}…", host)),
             ConnState::Disconnected => None,
         };
-        let db = match &self.schema.selected_node {
-            Some(SelectedNode::Database(d)) => Some(d.clone()),
-            Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-            _ => None,
-        };
-        (host, db)
+        (host, self.selected_db().map(str::to_string))
     }
 
     /// Antes de cerrar la pestaña: cancela la exportación en marcha, si la hay.

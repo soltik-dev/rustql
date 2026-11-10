@@ -115,11 +115,7 @@ impl Session {
         }
 
         if tab_bar.new_sql_tab || (ctrl_t && self.is_connected()) {
-            let db_ctx = match &self.schema.selected_node {
-                Some(SelectedNode::Database(d)) => d.clone(),
-                Some(SelectedNode::Table { db, .. }) => db.clone(),
-                _ => String::new(),
-            };
+            let db_ctx = self.selected_db().unwrap_or_default().to_string();
             let new_idx = self.sql_tabs.len();
             self.sql_tabs.push(SqlTab {
                 db_context: db_ctx,
@@ -397,15 +393,10 @@ impl Session {
 
     /// Doble clic en una tabla de la pestaña BBDD: la abre.
     fn handle_db_info_action(&mut self, sh: &mut Shared, action: DbInfoAction) {
-        if let DbInfoAction::OpenTable(table) = action {
-            let db = match &self.schema.selected_node {
-                Some(SelectedNode::Database(d)) => Some(d.clone()),
-                Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                _ => None,
-            };
-            if let Some(db) = db {
-                self.switch_to_table(sh, db, table, ActiveTab::Datos);
-            }
+        if let DbInfoAction::OpenTable(table) = action
+            && let Some(db) = self.selected_db().map(str::to_string)
+        {
+            self.switch_to_table(sh, db, table, ActiveTab::Datos);
         }
     }
 

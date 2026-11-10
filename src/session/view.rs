@@ -170,13 +170,11 @@ impl Session {
 
         // ── Sidebar ───────────────────────────────────────────────
         if show_sidebar {
-            let (sel_db, sel_table) = match &self.schema.selected_node {
-                Some(SelectedNode::Table { db, table }) => {
-                    (Some(db.as_str()), Some(table.as_str()))
-                }
-                Some(SelectedNode::Database(db)) => (Some(db.as_str()), None),
-                _ => (None, None),
-            };
+            // Sobre el campo, no sobre el esquema entero: el buscador del
+            // sidebar lo toma prestado a la vez
+            let selected = self.schema.selected_node.as_ref();
+            let sel_db = selected.and_then(SelectedNode::db);
+            let sel_table = selected.and_then(SelectedNode::table).map(|(_, t)| t);
 
             let sidebar_panel = egui::Panel::left("sidebar_v2")
                 .default_size(200.0)
@@ -214,22 +212,10 @@ impl Session {
         }
 
         // ── Tab bar ───────────────────────────────────────────────
-        let has_db = matches!(
-            &self.schema.selected_node,
-            Some(SelectedNode::Database(_) | SelectedNode::Table { .. })
-        );
-        let has_table = matches!(&self.schema.selected_node, Some(SelectedNode::Table { .. }));
-
         {
-            let db_name_tab = match &self.schema.selected_node {
-                Some(SelectedNode::Database(d)) => Some(d.clone()),
-                Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                _ => None,
-            };
-            let table_name_tab = match &self.schema.selected_node {
-                Some(SelectedNode::Table { table, .. }) => Some(table.clone()),
-                _ => None,
-            };
+            let db_name_tab = self.schema.selected_db();
+            let table_name_tab = self.schema.selected_table().map(|(_, table)| table);
+            let (has_db, has_table) = (db_name_tab.is_some(), table_name_tab.is_some());
 
             egui::Panel::top("tab_bar")
                 .min_size(30.0)
@@ -243,8 +229,8 @@ impl Session {
                             has_db,
                             has_table,
                             &self.title,
-                            db_name_tab.as_deref(),
-                            table_name_tab.as_deref(),
+                            db_name_tab,
+                            table_name_tab,
                             self.sql_tabs.len(),
                         );
                     });
@@ -283,12 +269,7 @@ impl Session {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.push_id(sid, |ui| match self.active_tab {
                 ActiveTab::Datos => {
-                    let selected_table = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { db, table }) => {
-                            Some((db.as_str(), table.as_str()))
-                        }
-                        _ => None,
-                    };
+                    let selected_table = self.schema.selected_table();
                     if selected_table.is_some() {
                         let action = filter_bar::show(
                             ui,
@@ -325,12 +306,7 @@ impl Session {
                 },
 
                 ActiveTab::Bbdd => {
-                    let db_name = match &self.schema.selected_node {
-                        Some(SelectedNode::Database(d)) => Some(d.clone()),
-                        Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                        _ => None,
-                    };
-                    if let Some(db) = &db_name {
+                    if let Some(db) = self.schema.selected_db() {
                         match self.schema.tables_info.get(db) {
                             Some(Loadable::Ready(tables)) => {
                                 signals.db_info = db_info::show(ui, db, tables);
