@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mysql::{
-    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value, prelude::Queryable,
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value,
+    prelude::{Protocol, Queryable},
 };
 
 use super::{
@@ -27,24 +28,33 @@ fn value_to_string(v: Value) -> Option<String> {
     }
 }
 
-fn rows_to_result(raw_rows: Vec<mysql::Row>) -> QueryResult {
-    let columns = raw_rows
-        .first()
-        .map(|r| {
-            r.columns_ref()
-                .iter()
-                .map(|c| c.name_str().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let rows = raw_rows.into_iter().map(row_values).collect();
-
-    QueryResult {
+/// Lee el primer conjunto de resultados: sus columnas —que vienen aunque no
+/// haya ninguna fila— y, como mucho, `max_rows` filas. Al soltar `set`, el
+/// crate lee y descarta lo que quede.
+fn read_result<P: Protocol>(
+    mut set: mysql::QueryResult<'_, '_, '_, P>,
+    max_rows: usize,
+) -> mysql::Result<QueryResult> {
+    let columns = set
+        .columns()
+        .as_ref()
+        .iter()
+        .map(|c| c.name_str().into_owned())
+        .collect();
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    for row in set.by_ref() {
+        if rows.len() == max_rows {
+            truncated = true;
+            break;
+        }
+        rows.push(row_values(row?));
+    }
+    Ok(QueryResult {
         columns,
         rows,
-        truncated: false,
-    }
+        truncated,
+    })
 }
 
 fn row_values(mut row: mysql::Row) -> Vec<Option<String>> {
@@ -125,11 +135,10 @@ impl MysqlBackend {
 
     /// Lectura con parámetros posicionales (`?`).
     fn query_with(&self, sql: &str, params: Vec<Option<String>>) -> DbResult<QueryResult> {
-        let raw_rows: Vec<mysql::Row> = self
-            .conn()?
-            .exec(sql, params)
-            .map_err(|e| format!("Error en query: {e}"))?;
-        Ok(rows_to_result(raw_rows))
+        let mut conn = self.conn()?;
+        conn.exec_iter(sql, params)
+            .and_then(|set| read_result(set, usize::MAX))
+            .map_err(|e| format!("Error en query: {e}"))
     }
 }
 
@@ -157,12 +166,10 @@ impl DbBackend for MysqlBackend {
     }
 
     fn execute_query(&self, sql: &str) -> DbResult<QueryResult> {
-        let raw_rows: Vec<mysql::Row> = self
-            .conn()?
-            .query(sql)
-            .map_err(|e| format!("Error en query: {e}"))?;
-
-        Ok(rows_to_result(raw_rows))
+        let mut conn = self.conn()?;
+        conn.query_iter(sql)
+            .and_then(|set| read_result(set, usize::MAX))
+            .map_err(|e| format!("Error en query: {e}"))
     }
 
     fn execute_in_session(
@@ -183,29 +190,7 @@ impl DbBackend for MysqlBackend {
             if let Some(db) = db {
                 conn.query_drop(format!("USE {}", quote_ident(db)))?;
             }
-            // Del primer conjunto de resultados, como mucho max_rows filas.
-            // Al soltar `set`, el crate lee y descarta el resto.
-            let mut set = conn.query_iter(sql)?;
-            let columns = set
-                .columns()
-                .as_ref()
-                .iter()
-                .map(|c| c.name_str().into_owned())
-                .collect();
-            let mut rows = Vec::new();
-            let mut truncated = false;
-            for row in set.by_ref() {
-                if rows.len() == max_rows {
-                    truncated = true;
-                    break;
-                }
-                rows.push(row_values(row?));
-            }
-            Ok::<_, mysql::Error>(QueryResult {
-                columns,
-                rows,
-                truncated,
-            })
+            read_result(conn.query_iter(sql)?, max_rows)
         })();
         match result {
             Ok(data) => Ok(data),
@@ -378,6 +363,29 @@ mod tests {
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
         assert_eq!(columns[0].column_key, "PRI");
         assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn una_consulta_sin_filas_conserva_sus_columnas() {
+        let b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_empty")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_empty")
+            .unwrap();
+        b.execute_write("CREATE TABLE rustql_test_empty.t (id INT PRIMARY KEY, v VARCHAR(10))")
+            .unwrap();
+        let empty = b.execute_query("SELECT * FROM rustql_test_empty.t");
+        let filtered = b.execute_query("SELECT v FROM rustql_test_empty.t WHERE id = 1");
+        b.execute_write("DROP DATABASE rustql_test_empty").unwrap();
+
+        // Sin las columnas, el grid no puede mostrar la cabecera ni dejar
+        // insertar la primera fila
+        let empty = empty.unwrap();
+        assert_eq!(empty.columns, ["id", "v"]);
+        assert!(empty.rows.is_empty());
+        assert!(!empty.truncated);
+        assert_eq!(filtered.unwrap().columns, ["v"]);
     }
 
     #[test]

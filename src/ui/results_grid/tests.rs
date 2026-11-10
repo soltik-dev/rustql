@@ -557,3 +557,18 @@ fn teclear_el_mismo_valor_tampoco_es_una_edicion() {
     let action = f.press(egui::Key::Enter);
     assert!(matches!(action, GridAction::None), "{action:?}");
 }
+
+#[test]
+fn una_tabla_sin_filas_muestra_sus_columnas() {
+    let mut f = Fixture::new(0);
+    f.idle();
+    f.idle();
+    // Con cabecera hay tabla: antes solo salía el texto «(tabla vacía)»
+    let layout = f
+        .view
+        .selection
+        .layout
+        .as_ref()
+        .expect("se dibuja la tabla");
+    assert_eq!(layout.col_widths.len(), COLS);
+}

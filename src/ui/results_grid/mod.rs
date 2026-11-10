@@ -25,7 +25,8 @@ pub use self::state::{
     RowRef, SortDir, SortSpec, TableViewState,
 };
 use crate::db::{ColumnInfo, QueryResult};
-use crate::ui::theme;
+use crate::ui::icons::PLUS;
+use crate::ui::{CMD, theme};
 
 // ── Lo que el grid dibuja ────────────────────────────────────────────────────
 
@@ -201,12 +202,12 @@ pub fn show(
         return GridAction::None;
     };
 
-    let mut new_sorts = info_bar(ui, db, table, data, &view.sort_specs, busy);
+    let bar_action = info_bar(ui, db, table, data, &view.sort_specs, busy);
     ui.separator();
 
     if data.columns.is_empty() {
-        ui.label("(tabla vacía)");
-        return new_sorts.map_or(GridAction::None, GridAction::SortChanged);
+        ui.label("(sin columnas)");
+        return bar_action;
     }
 
     let grid = Grid {
@@ -222,12 +223,12 @@ pub fn show(
     };
     let out = show_grid(ui, &grid, &mut view.selection, &mut view.editing_cell);
 
-    if let Some(col) = out.clicked_col {
-        new_sorts = Some(toggle_sort(&view.sort_specs, col, &data.columns[col]));
-    }
     // La edición tiene prioridad sobre la ordenación
-    match (out.action, new_sorts) {
-        (GridAction::None, Some(specs)) => GridAction::SortChanged(specs),
+    match (out.action, out.clicked_col) {
+        (GridAction::None, Some(col)) => {
+            GridAction::SortChanged(toggle_sort(&view.sort_specs, col, &data.columns[col]))
+        }
+        (GridAction::None, None) => bar_action,
         (action, _) => action,
     }
 }
@@ -271,8 +272,9 @@ fn show_grid(
     out
 }
 
-/// Nombre de la tabla, número de filas y la ordenación activa. Devuelve la
-/// ordenación que queda si el usuario quita alguna columna de ella.
+/// Nombre de la tabla, número de filas, botón de fila nueva y la ordenación
+/// activa. Devuelve lo que el usuario pide desde ella: insertar una fila o
+/// quitar columnas de la ordenación.
 fn info_bar(
     ui: &mut egui::Ui,
     db: &str,
@@ -280,8 +282,8 @@ fn info_bar(
     data: &QueryResult,
     sorts: &[SortSpec],
     busy: bool,
-) -> Option<Vec<SortSpec>> {
-    let mut new_sorts = None;
+) -> GridAction {
+    let mut action = GridAction::None;
     let p = theme::get(ui);
 
     ui.horizontal_wrapped(|ui| {
@@ -291,6 +293,14 @@ fn info_bar(
             ui.separator();
             ui.spinner();
             ui.label("Cargando…");
+        } else if !data.columns.is_empty()
+            && ui
+                .small_button(format!("{PLUS} Fila"))
+                .on_hover_text(format!("Insertar una fila  {CMD}Ins"))
+                .clicked()
+        {
+            // A la vista aunque no haya filas sobre las que abrir el menú
+            action = GridAction::InsertRow;
         }
 
         if sorts.is_empty() {
@@ -318,7 +328,7 @@ fn info_bar(
                     {
                         let mut specs = sorts.to_vec();
                         specs.remove(i);
-                        new_sorts = Some(specs);
+                        action = GridAction::SortChanged(specs);
                     }
                 });
         }
@@ -328,11 +338,11 @@ fn info_bar(
                 .on_hover_text("Eliminar toda la ordenación")
                 .clicked()
         {
-            new_sorts = Some(Vec::new());
+            action = GridAction::SortChanged(Vec::new());
         }
     });
 
-    new_sorts
+    action
 }
 
 /// Ordenación tras pulsar la cabecera de `col`: ascendente, descendente y
