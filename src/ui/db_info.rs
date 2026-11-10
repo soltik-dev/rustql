@@ -38,9 +38,11 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
     ui.separator();
 
     if tables.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.spinner();
-        });
+        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        ui.label(
+            egui::RichText::new("Esta base de datos no tiene tablas.")
+                .color(theme::get(ui).text_muted),
+        );
         return action;
     }
 

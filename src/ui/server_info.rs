@@ -28,9 +28,8 @@ pub fn show(ui: &mut egui::Ui, host: &str, databases: &[DatabaseInfo]) {
     ui.separator();
 
     if databases.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.spinner();
-        });
+        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        ui.label(egui::RichText::new("(sin bases de datos)").color(theme::get(ui).text_muted));
         return;
     }
 

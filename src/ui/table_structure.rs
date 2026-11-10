@@ -16,9 +16,8 @@ pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
     ui.separator();
 
     if columns.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.spinner();
-        });
+        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        ui.label(egui::RichText::new("(sin columnas)").color(theme::get(ui).text_muted));
         return;
     }
 
