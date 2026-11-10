@@ -39,7 +39,7 @@ pub fn show(
     // Pestañas de contexto + pestañas SQL, con salto de línea si no caben
     ui.horizontal_wrapped(|ui| {
         // Servidor tab
-        let srv_label = format!("{DATABASE} {}", ellipsize(server_name, 18));
+        let srv_label = format!("{PLUG} {}", ellipsize(server_name, 18));
         if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true).clicked() {
             result.tab_clicked = Some(ActiveTab::Servidor);
         }
@@ -50,12 +50,15 @@ pub fn show(
             result.tab_clicked = Some(ActiveTab::Bbdd);
         }
 
-        // Estructura tab
-        let struct_label = format!(
-            "{EDIT} {}",
-            ellipsize(table_name.unwrap_or("Estructura"), 18)
-        );
-        if tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table).clicked() {
+        // Estructura y Datos son de la misma tabla: su nombre va solo en
+        // Datos (antes las dos pestañas decían lo mismo y solo las
+        // distinguía el icono)
+        let struct_label = format!("{EDIT} Estructura");
+        let mut struct_tab = tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table);
+        if let Some(table) = table_name {
+            struct_tab = struct_tab.on_hover_text(format!("Estructura de {table}"));
+        }
+        if struct_tab.clicked() {
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
