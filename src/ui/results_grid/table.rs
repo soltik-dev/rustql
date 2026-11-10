@@ -398,8 +398,8 @@ fn show_cell(
     }
 }
 
-/// Editor de la celda en edición. Enter, Tab o perder el foco confirman;
-/// Escape cancela. Tab pasa a editar la celda editable siguiente (Mayús+Tab,
+/// Editor de la celda en edición. Enter, Tab o perder el foco confirman
+/// (si el texto ha cambiado); Escape cancela. Tab pasa a editar la celda editable siguiente (Mayús+Tab,
 /// la anterior).
 fn show_editor(
     ui: &mut egui::Ui,
@@ -450,8 +450,9 @@ fn show_editor(
     }
 
     let value = std::mem::take(&mut edit.buffer);
+    let changed = value != edit.original;
     *editing = None;
-    if !escape {
+    if changed && !escape {
         out.action = GridAction::CellEdited {
             row: cell.row,
             col_idx: cell.col,

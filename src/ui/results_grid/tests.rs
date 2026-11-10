@@ -515,3 +515,45 @@ fn un_clic_en_una_celda_pone_el_cursor_y_da_el_foco() {
     f.press(egui::Key::ArrowDown);
     assert_eq!(f.cursor(), before, "sin foco, las flechas no son suyas");
 }
+
+#[test]
+fn pasar_por_una_celda_sin_cambiarla_no_es_una_edicion() {
+    let mut f = Fixture::new(2);
+    f.view.table_data.as_mut().unwrap().rows[0][1] = None;
+    f.add_insert_row();
+    f.focus();
+
+    // Enter y Enter sobre un NULL: antes quedaba un cambio pendiente a ''
+    f.put_cursor(RowRef::Existing(0), 1);
+    f.press(egui::Key::Enter);
+    f.idle();
+    let action = f.press(egui::Key::Enter);
+    assert!(matches!(action, GridAction::None), "{action:?}");
+
+    // Tab por las celdas de una fila nueva las deja en DEFAULT
+    f.put_cursor(RowRef::Insert(0), 1);
+    f.press(egui::Key::F2);
+    f.idle();
+    let action = f.press(egui::Key::Tab);
+    assert!(matches!(action, GridAction::None), "{action:?}");
+    assert_eq!(
+        f.view.editing_cell.as_ref().unwrap().cell,
+        CellRef {
+            row: RowRef::Insert(0),
+            col: 2
+        },
+        "Tab sigue avanzando"
+    );
+}
+
+#[test]
+fn teclear_el_mismo_valor_tampoco_es_una_edicion() {
+    let mut f = Fixture::new(2);
+    f.view.table_data.as_mut().unwrap().rows[0][1] = Some("7".into());
+    f.focus();
+    f.put_cursor(RowRef::Existing(0), 1);
+    f.type_text("7");
+    f.idle();
+    let action = f.press(egui::Key::Enter);
+    assert!(matches!(action, GridAction::None), "{action:?}");
+}

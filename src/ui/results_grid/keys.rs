@@ -227,7 +227,7 @@ pub(super) fn handle(
         })
     });
     if let Some(text) = typed {
-        *editing = Some(EditingCell::new(cell, text));
+        *editing = Some(EditingCell::replacing(cell, g.edit_text(cell), text));
     }
     GridAction::None
 }

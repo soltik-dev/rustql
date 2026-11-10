@@ -103,15 +103,32 @@ pub struct EditingCell {
     pub cell: CellRef,
     /// Texto del editor mientras el usuario escribe.
     pub buffer: String,
+    /// Texto que tenía la celda al empezar. Confirmar sin haberlo cambiado
+    /// no es una edición: NULL y DEFAULT se editan como texto vacío, y pasar
+    /// por ellos con Tab los convertiría en ''.
+    pub original: String,
     /// Pedir el foco para el editor en su primer frame.
     pub needs_focus: bool,
 }
 
 impl EditingCell {
+    /// Editor que arranca con el texto de la celda.
     pub fn new(cell: CellRef, text: String) -> Self {
         Self {
             cell,
-            buffer: text,
+            buffer: text.clone(),
+            original: text,
+            needs_focus: true,
+        }
+    }
+
+    /// Editor que arranca con lo que el usuario acaba de teclear sobre la
+    /// celda, en lugar de su texto (`original`).
+    pub fn replacing(cell: CellRef, original: String, typed: String) -> Self {
+        Self {
+            cell,
+            buffer: typed,
+            original,
             needs_focus: true,
         }
     }
