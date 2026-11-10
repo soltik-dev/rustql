@@ -224,8 +224,12 @@ pub fn show(
                             let db_ch = egui::CollapsingHeader::new(
                                 egui::RichText::new(&db_label).strong(),
                             )
-                            .id_salt(db)
-                            .default_open(false)
+                            // Al buscar, las BBDD con coincidencias salen
+                            // desplegadas: lo que se busca son tablas. Con
+                            // otro id, para que al borrar la búsqueda el
+                            // árbol vuelva a estar como estaba.
+                            .id_salt((db, filtering))
+                            .default_open(filtering)
                             .show(ui, |ui: &mut egui::Ui| {
                                 let tables: Vec<String> = {
                                     let base = if filtering {
@@ -270,7 +274,6 @@ pub fn show(
                                     let is_selected =
                                         is_db_selected && selected_table == Some(table.as_str());
 
-                                    let display = ellipsize(table, 26);
                                     let db_clone = db.clone();
                                     let table_clone = table.clone();
 
@@ -349,11 +352,24 @@ pub fn show(
                                     } else {
                                         ui.visuals().text_color()
                                     };
-                                    ui.painter().text(
-                                        label_rect.left_center() + egui::vec2(2.0, 0.0),
-                                        egui::Align2::LEFT_CENTER,
-                                        &display,
+                                    // Recortado al ancho del panel, no a un
+                                    // número fijo de caracteres
+                                    let mut job = egui::text::LayoutJob::simple_singleline(
+                                        table.clone(),
                                         egui::TextStyle::Body.resolve(ui.style()),
+                                        text_color,
+                                    );
+                                    job.wrap = egui::text::TextWrapping::truncate_at_width(
+                                        label_rect.width() - 4.0,
+                                    );
+                                    let galley = ui.painter().layout_job(job);
+                                    let name_cut = galley.elided;
+                                    ui.painter().galley(
+                                        egui::pos2(
+                                            label_rect.left() + 2.0,
+                                            label_rect.center().y - galley.size().y / 2.0,
+                                        ),
+                                        galley,
                                         text_color,
                                     );
 
@@ -363,24 +379,27 @@ pub fn show(
                                             table: table_clone.clone(),
                                         };
                                     }
-                                    if resp.clicked() || resp.double_clicked() {
+                                    if resp.clicked() {
                                         *action.borrow_mut() = SidebarAction::SelectTable {
                                             db: db_clone.clone(),
                                             table: table_clone.clone(),
                                         };
                                     }
 
-                                    let resp = if table.len() > 22 {
+                                    // Nombre completo si no cabe
+                                    let resp = if name_cut {
                                         resp.on_hover_text(table)
                                     } else {
                                         resp
                                     };
 
                                     resp.context_menu(|ui: &mut egui::Ui| {
-                                        if ui
-                                            .button(format!("{STAR_FILLED} Marcar favorito"))
-                                            .clicked()
-                                        {
+                                        let fav_label = if is_fav {
+                                            format!("{STAR} Quitar de favoritos")
+                                        } else {
+                                            format!("{STAR_FILLED} Marcar favorito")
+                                        };
+                                        if ui.button(fav_label).clicked() {
                                             *action.borrow_mut() = SidebarAction::ToggleFav {
                                                 db: db_clone.clone(),
                                                 table: table_clone.clone(),
@@ -422,7 +441,7 @@ pub fn show(
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.button(format!("{TRASH} Truncar tabla")).clicked() {
+                                        if ui.button(format!("{TRASH} Vaciar tabla")).clicked() {
                                             *action.borrow_mut() = SidebarAction::TruncateTable {
                                                 db: db_clone.clone(),
                                                 table: table_clone.clone(),
