@@ -435,6 +435,7 @@ impl Session {
             stmts.push(Statement {
                 sql: format!("DELETE FROM {target} WHERE {condition}"),
                 params,
+                single_row: true,
             });
         }
 
@@ -461,6 +462,7 @@ impl Session {
             stmts.push(Statement {
                 sql: format!("UPDATE {target} SET {} WHERE {condition}", sets.join(", ")),
                 params,
+                single_row: true,
             });
         }
 
@@ -487,6 +489,7 @@ impl Session {
                     cols.join(", ")
                 ),
                 params,
+                single_row: false,
             });
         }
         Ok(stmts)
@@ -1440,14 +1443,17 @@ mod tests {
                 Statement {
                     sql: "DELETE FROM `db`.`t` WHERE `id` = ?".into(),
                     params: p(&[Some("2")]),
+                    single_row: true,
                 },
                 Statement {
                     sql: "UPDATE `db`.`t` SET `id` = ?, `v` = ? WHERE `id` = ?".into(),
                     params: p(&[Some("10"), None, Some("1")]),
+                    single_row: true,
                 },
                 Statement {
                     sql: "INSERT INTO `db`.`t` (`id`, `v`) VALUES (?, ?)".into(),
                     params: p(&[Some("3"), Some("x'y")]),
+                    single_row: false,
                 },
             ]
         );

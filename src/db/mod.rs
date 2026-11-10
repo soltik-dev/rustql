@@ -59,6 +59,9 @@ pub type DbResult<T> = Result<T, String>;
 pub struct Statement {
     pub sql: String,
     pub params: Vec<Option<String>>,
+    /// La sentencia cambia una fila concreta (UPDATE o DELETE por clave
+    /// primaria): si no encuentra exactamente una, la transacción se deshace.
+    pub single_row: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -181,7 +184,8 @@ pub trait DbBackend: Send + Sync {
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
-    /// Si alguna falla se hace ROLLBACK y se devuelve el error.
+    /// Si alguna falla, o una `single_row` no encuentra su fila, se hace
+    /// ROLLBACK y se devuelve el error.
     fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
 }
 

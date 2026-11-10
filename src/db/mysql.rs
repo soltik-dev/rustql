@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use mysql::{
     Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value,
+    consts::CapabilityFlags,
     prelude::{Protocol, Queryable},
 };
 
@@ -106,6 +107,10 @@ impl MysqlBackend {
             .tcp_port(params.port)
             .user(Some(params.user.as_str()))
             .pass(Some(password.as_str()))
+            // Filas afectadas = filas encontradas por el WHERE, aunque el
+            // UPDATE las deje como estaban: así se distingue «ya tenía ese
+            // valor» de «la fila no existe» (ver execute_transaction).
+            .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS)
             .pool_opts(pool_opts)
             .into();
 
@@ -317,6 +322,17 @@ impl DbBackend for MysqlBackend {
                 let _ = conn.query_drop("ROLLBACK");
                 return Err(format!("Error en transacción (ROLLBACK): {e}"));
             }
+            // Con CLIENT_FOUND_ROWS son las filas encontradas por el WHERE
+            let found = conn.affected_rows();
+            if stmt.single_row && found != 1 {
+                let _ = conn.query_drop("ROLLBACK");
+                return Err(format!(
+                    "No se ha guardado nada: una sentencia debía cambiar una fila y \
+                     encontró {found}. La fila puede haber cambiado o desaparecido en \
+                     el servidor; recarga la tabla (F5) y repite los cambios.\n\n{}",
+                    stmt.sql
+                ));
+            }
         }
         conn.query_drop("COMMIT")
             .map_err(|e| format!("Error en COMMIT: {e}"))
@@ -386,6 +402,39 @@ mod tests {
         assert!(empty.rows.is_empty());
         assert!(!empty.truncated);
         assert_eq!(filtered.unwrap().columns, ["v"]);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn la_transaccion_se_deshace_si_no_encuentra_la_fila() {
+        let b = test_server::backend();
+        b.execute_write("DROP DATABASE IF EXISTS rustql_test_rows")
+            .unwrap();
+        b.execute_write("CREATE DATABASE rustql_test_rows").unwrap();
+        b.execute_write("CREATE TABLE rustql_test_rows.t (id INT PRIMARY KEY, v VARCHAR(10))")
+            .unwrap();
+        b.execute_write("INSERT INTO rustql_test_rows.t VALUES (1,'a'),(2,'b')")
+            .unwrap();
+        let update = |v: &str, id: &str| Statement {
+            sql: "UPDATE rustql_test_rows.t SET v = ? WHERE id = ?".into(),
+            params: vec![Some(v.into()), Some(id.into())],
+            single_row: true,
+        };
+
+        // La fila 9 no existe (otro la borró): tampoco se guarda la 1
+        let missing = b.execute_transaction(&[update("x", "1"), update("y", "9")]);
+        // Dejar una fila con el valor que ya tenía no es «no encontrada»
+        let unchanged = b.execute_transaction(&[update("b", "2")]);
+        let rows = b.execute_query("SELECT v FROM rustql_test_rows.t ORDER BY id");
+        b.execute_write("DROP DATABASE rustql_test_rows").unwrap();
+
+        let err = missing.unwrap_err();
+        assert!(err.contains("encontró 0"), "{err}");
+        unchanged.unwrap();
+        assert_eq!(
+            rows.unwrap().rows,
+            [[Some("a".to_string())], [Some("b".to_string())]]
+        );
     }
 
     #[test]
