@@ -1133,10 +1133,6 @@ impl Session {
         if self.is_connected() {
             self.request_tab_data();
         }
-        // El grid cambia la ordenación al pulsar una cabecera; se restaura si
-        // la recarga no llega a hacerse (query en curso o el usuario cancela).
-        let sorts_before = self.table_view.sort_specs.clone();
-
         // Con un diálogo abierto, el ratón no llega a lo de detrás (lo
         // bloquea el propio diálogo), pero el teclado sí: se ignora.
         let dialog_open = !matches!(self.modal, ModalState::None);
@@ -1145,7 +1141,7 @@ impl Session {
         } else {
             keys
         };
-        let mut signals = self.draw(ui, sh, keys, show_sidebar, &sorts_before);
+        let mut signals = self.draw(ui, sh, keys, show_sidebar);
         if dialog_open {
             signals = signals.data_requests_only();
         }
@@ -1158,7 +1154,7 @@ impl Session {
             signals.save_profile,
             signals.delete_profile,
         );
-        self.apply_signals(ctx, sh, signals, keys.f5, keys.ctrl_t, sorts_before);
+        self.apply_signals(ctx, sh, signals, keys.f5, keys.ctrl_t);
         let close = matches!(modal_action, ModalAction::CloseSession);
         self.handle_modal_action(modal_action, sh);
         let profile_removed = self.handle_profile_form(ctx, sh, selected, save, delete);
@@ -1980,9 +1976,8 @@ mod tests {
 
     /// Un frame en el que solo se pulsa F5.
     fn press_f5(s: &mut Session, sh: &mut Shared) {
-        let sorts = s.table_view.sort_specs.clone();
         let ctx = egui::Context::default();
-        s.apply_signals(&ctx, sh, Default::default(), true, false, sorts);
+        s.apply_signals(&ctx, sh, Default::default(), true, false);
     }
 
     #[test]

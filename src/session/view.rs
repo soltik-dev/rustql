@@ -8,7 +8,7 @@ use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::loadable::Loadable;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
-use crate::ui::results_grid::{GridAction, SortSpec};
+use crate::ui::results_grid::GridAction;
 use crate::ui::sidebar::SidebarOutput;
 use crate::ui::sql_editor::SqlEditorAction;
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
@@ -58,14 +58,13 @@ impl Session {
         sh: &Shared,
         keys: FrameKeys,
         show_sidebar: bool,
-        sorts_before: &[SortSpec],
     ) -> FrameSignals {
         let mut signals = FrameSignals::default();
         match &self.state {
             ConnState::Disconnected => self.draw_form(ui, sh, &mut signals),
             ConnState::Connecting { .. } => self.draw_connecting(ui, sh, &mut signals),
             ConnState::Connected(_) => {
-                self.draw_connected(ui, sh, keys, show_sidebar, sorts_before, &mut signals)
+                self.draw_connected(ui, sh, keys, show_sidebar, &mut signals)
             }
         }
         signals
@@ -159,7 +158,6 @@ impl Session {
         sh: &Shared,
         keys: FrameKeys,
         show_sidebar: bool,
-        sorts_before: &[SortSpec],
         signals: &mut FrameSignals,
     ) {
         let sid = self.id;
@@ -316,8 +314,6 @@ impl Session {
                     );
                     if !running {
                         signals.grid = action;
-                    } else if matches!(action, GridAction::SortChanged) {
-                        self.table_view.sort_specs = sorts_before.to_vec();
                     }
                 }
 

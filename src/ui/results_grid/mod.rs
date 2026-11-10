@@ -212,23 +212,21 @@ pub fn show(
         }
     });
 
-    let mut sort_changed = false;
+    // La ordenación no se toca aquí: la nueva viaja en la acción y la
+    // sesión la aplica si la recarga llega a hacerse.
+    let mut new_sorts: Option<Vec<SortSpec>> = None;
     if clear_all_sorts {
-        sorts.clear();
-        sort_changed = true;
+        new_sorts = Some(Vec::new());
     } else if let Some(idx) = remove_sort_idx {
-        sorts.remove(idx);
-        sort_changed = true;
+        let mut specs = sorts.clone();
+        specs.remove(idx);
+        new_sorts = Some(specs);
     }
     ui.separator();
 
     if data.columns.is_empty() {
         ui.label("(tabla vacía)");
-        return if sort_changed {
-            GridAction::SortChanged
-        } else {
-            GridAction::None
-        };
+        return new_sorts.map_or(GridAction::None, GridAction::SortChanged);
     }
 
     let col_count = data.columns.len();
@@ -1165,18 +1163,19 @@ pub fn show(
 
     // Aplicar cambio de ordenación tras los closures
     if let Some(col_i) = clicked_col {
-        match sorts.iter().position(|s| s.col_idx == col_i) {
-            None => sorts.push(SortSpec {
+        let mut specs = sorts.clone();
+        match specs.iter().position(|s| s.col_idx == col_i) {
+            None => specs.push(SortSpec {
                 col_idx: col_i,
                 col_name: data.columns[col_i].clone(),
                 dir: SortDir::Asc,
             }),
-            Some(i) if sorts[i].dir == SortDir::Asc => sorts[i].dir = SortDir::Desc,
+            Some(i) if specs[i].dir == SortDir::Asc => specs[i].dir = SortDir::Desc,
             Some(i) => {
-                sorts.remove(i);
+                specs.remove(i);
             }
         }
-        sort_changed = true;
+        new_sorts = Some(specs);
     }
 
     let grid_action = grid_action_rc.into_inner();
@@ -1187,8 +1186,8 @@ pub fn show(
     }
 
     // Priorizar la acción de edición sobre el sort
-    match grid_action {
-        GridAction::None if sort_changed => GridAction::SortChanged,
-        other => other,
+    match (grid_action, new_sorts) {
+        (GridAction::None, Some(specs)) => GridAction::SortChanged(specs),
+        (other, _) => other,
     }
 }

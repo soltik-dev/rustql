@@ -82,7 +82,8 @@ pub struct EditingCell {
 pub enum GridAction {
     #[default]
     None,
-    SortChanged,
+    /// La ordenación que pide el usuario (aún sin aplicar).
+    SortChanged(Vec<SortSpec>),
     CellEditStarted {
         row: RowRef,
         col_idx: usize,

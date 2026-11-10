@@ -22,7 +22,7 @@ use crate::ui::modals::{
     self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
     TruncateKind,
 };
-use crate::ui::results_grid::{self, EditingCell, GridAction, SortSpec};
+use crate::ui::results_grid::{self, EditingCell, GridAction};
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
@@ -37,13 +37,12 @@ impl Session {
         signals: FrameSignals,
         f5: bool,
         ctrl_t: bool,
-        sorts_before: Vec<SortSpec>,
     ) {
         if signals.cancel_connect {
             self.state = ConnState::Disconnected;
         }
         self.handle_tab_bar(sh, signals.tab_bar, ctrl_t);
-        self.handle_grid_action(ctx, sh, signals.grid, sorts_before);
+        self.handle_grid_action(ctx, sh, signals.grid);
         // Barra de guardar (solo visible con cambios pendientes)
         match signals.apply_bar {
             GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
@@ -145,17 +144,10 @@ impl Session {
         }
     }
 
-    fn handle_grid_action(
-        &mut self,
-        ctx: &egui::Context,
-        sh: &mut Shared,
-        action: GridAction,
-        sorts_before: Vec<SortSpec>,
-    ) {
+    fn handle_grid_action(&mut self, ctx: &egui::Context, sh: &mut Shared, action: GridAction) {
         match action {
-            GridAction::SortChanged => {
+            GridAction::SortChanged(sorts) => {
                 // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
-                let sorts = std::mem::replace(&mut self.table_view.sort_specs, sorts_before);
                 self.request_reload(sh, Reload::Sort(sorts));
             }
             GridAction::CellEditStarted {
