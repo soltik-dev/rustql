@@ -2,19 +2,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::db::TableInfo;
-use crate::ui::theme;
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
-    } else {
-        format!("{:.1} GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
-    }
-}
+use crate::ui::{format_bytes, theme};
 
 /// Retornado por db_info::show cuando el usuario hace click en una tabla.
 #[derive(Default)]
@@ -38,9 +26,11 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
     ui.separator();
 
     if tables.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.spinner();
-        });
+        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        ui.label(
+            egui::RichText::new("Esta base de datos no tiene tablas.")
+                .color(theme::get(ui).text_muted),
+        );
         return action;
     }
 

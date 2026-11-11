@@ -8,8 +8,11 @@ use crate::session::{FrameKeys, Session, Shared};
 use crate::settings;
 use crate::table_state;
 use crate::ui::conn_tabs::{self, ConnTab, ConnTabsAction};
+use crate::ui::log_panel::LogAction;
 use crate::ui::modals::ModalState;
 use crate::ui::{log_panel, settings_panel, statusbar, theme};
+
+const STATUSBAR_HEIGHT: f32 = 26.0;
 
 /// Visibilidad de los paneles globales (comunes a todas las conexiones).
 pub struct UiPanelState {
@@ -17,6 +20,8 @@ pub struct UiPanelState {
     pub show_log: bool,
     pub show_settings: bool,
     pub settings_dirty: bool,
+    /// Fuente con la que se cargaron las fuentes por última vez.
+    pub applied_font: String,
 }
 
 // ── Estado principal ─────────────────────────────────────────────────────────
@@ -33,16 +38,48 @@ pub struct RustqlApp {
     /// Arranque del llavero: ids de los perfiles cuya contraseña en claro ya
     /// se ha pasado a él.
     keyring_migration: Option<Receiver<Vec<String>>>,
+    window: WindowGeometry,
+}
+
+/// Tamaño de la ventana visto en el último frame, para guardarlo al salir.
+#[derive(Default)]
+struct WindowGeometry {
+    /// Sin maximizar: es al que vuelve la ventana al restaurarla.
+    size: Option<[f32; 2]>,
+    maximized: bool,
+}
+
+impl WindowGeometry {
+    fn track(&mut self, ctx: &egui::Context) {
+        let (rect, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect,
+                v.maximized.unwrap_or(false),
+                v.fullscreen.unwrap_or(false),
+            )
+        });
+        self.maximized = maximized;
+        if !maximized
+            && !fullscreen
+            && let Some(rect) = rect
+        {
+            // El rect va en puntos de la interfaz, que dependen del zoom
+            // (Ctrl + y Ctrl -); el tamaño inicial de la ventana no lo tiene
+            let zoom = ctx.zoom_factor();
+            self.size = Some([rect.width() * zoom, rect.height() * zoom]);
+        }
+    }
 }
 
 impl RustqlApp {
-    pub fn new(ctx: &egui::Context) -> Self {
-        let settings = settings::load();
+    pub fn new(ctx: &egui::Context, settings: settings::AppSettings) -> Self {
         let ui = UiPanelState {
             show_sidebar: settings.show_sidebar,
             show_log: settings.show_log,
             show_settings: false,
             settings_dirty: false,
+            applied_font: settings.font_family.clone(),
         };
         let profiles = profiles::load();
         let keyring_migration = Some(start_keyring(ctx, profiles::legacy_passwords(&profiles)));
@@ -54,9 +91,11 @@ impl RustqlApp {
                 settings,
                 profiles,
                 table_states: table_state::load(),
+                toasts: Default::default(),
             },
             ui,
             keyring_migration,
+            window: WindowGeometry::default(),
         }
     }
 }
@@ -113,7 +152,9 @@ impl RustqlApp {
     /// Cierra sin preguntar. Activa la pestaña de la derecha (o la última) y,
     /// si no queda ninguna, abre una nueva con el formulario.
     fn close_session(&mut self, idx: usize) {
-        self.sessions.remove(idx).shutdown();
+        let session = self.sessions.remove(idx);
+        session.save_tabs_state(&mut self.shared);
+        session.shutdown();
         if self.sessions.is_empty() {
             self.new_session();
             return;
@@ -210,12 +251,32 @@ impl RustqlApp {
 // ── Loop principal ────────────────────────────────────────────────────────────
 
 impl eframe::App for RustqlApp {
+    /// Al salir se guarda el texto de las pestañas SQL de cada conexión:
+    /// hasta ahora solo se guardaba al ejecutar, y lo escrito sin ejecutar
+    /// se perdía al cerrar la aplicación.
+    fn on_exit(&mut self) {
+        for session in &self.sessions {
+            session.save_tabs_state(&mut self.shared);
+        }
+        // Y el tamaño de la ventana, para abrirla igual la próxima vez
+        if self.window.size.is_some() {
+            self.shared.settings.window_size = self.window.size;
+        }
+        self.shared.settings.window_maximized = self.window.maximized;
+        settings::save(&self.shared.settings);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let window_rect = ui.max_rect();
+        self.window.track(ctx);
         // Aplicar ajustes si cambiaron
         if self.ui.settings_dirty {
-            settings::setup_fonts(ctx, &self.shared.settings);
+            // Recargar las fuentes rehace su atlas: solo si cambió la fuente
+            if self.ui.applied_font != self.shared.settings.font_family {
+                settings::setup_fonts(ctx, &self.shared.settings);
+                self.ui.applied_font = self.shared.settings.font_family.clone();
+            }
             settings::apply(ctx, &self.shared.settings);
             settings::save(&self.shared.settings);
             self.ui.settings_dirty = false;
@@ -241,7 +302,7 @@ impl eframe::App for RustqlApp {
             let statusbar_frame =
                 egui::Frame::side_top_panel(ui.style()).fill(theme::get(ui).bg_sunken);
             egui::Panel::bottom("statusbar")
-                .exact_size(26.0)
+                .exact_size(STATUSBAR_HEIGHT)
                 .frame(statusbar_frame)
                 .show(ui, |ui| {
                     statusbar::show(
@@ -261,17 +322,15 @@ impl eframe::App for RustqlApp {
         let (tabs_action, tabs_rect) = self.show_conn_tabs(ui);
 
         let session = &self.sessions[self.active];
+        let mut log_action = LogAction::None;
         if session.is_connected() && self.ui.show_log {
-            frame_bottom = egui::Panel::bottom("log_panel")
+            let panel = egui::Panel::bottom("log_panel")
                 .resizable(true)
                 .min_size(80.0)
                 .max_size(300.0)
-                .show(ui, |ui| {
-                    log_panel::show(ui, &session.query_log);
-                })
-                .response
-                .rect
-                .top();
+                .show(ui, |ui| log_panel::show(ui, &session.query_log));
+            frame_bottom = panel.response.rect.top();
+            log_action = panel.inner;
         }
 
         if self.ui.show_settings {
@@ -321,6 +380,9 @@ impl eframe::App for RustqlApp {
         if let Some(idx) = outcome.profile_removed {
             self.on_profile_removed(idx);
         }
+        if let LogAction::OpenInSql(sql) = log_action {
+            self.sessions[self.active].open_sql_tab(&mut self.shared, None, sql);
+        }
 
         // Cerrar invalida los índices de la barra: ignorar su acción ese frame
         if outcome.close {
@@ -333,6 +395,9 @@ impl eframe::App for RustqlApp {
                 ConnTabsAction::New => self.new_session(),
             }
         }
+
+        // Avisos: sobre todo lo demás, por encima de la barra de estado
+        self.shared.toasts.show(ctx, STATUSBAR_HEIGHT + 12.0);
     }
 }
 
@@ -350,19 +415,45 @@ mod tests {
                 settings: settings::AppSettings::default(),
                 profiles: Vec::new(),
                 table_states: Default::default(),
+                toasts: Default::default(),
             },
             ui: UiPanelState {
                 show_sidebar: true,
                 show_log: true,
                 show_settings: false,
                 settings_dirty: false,
+                applied_font: String::new(),
             },
             keyring_migration: None,
+            window: WindowGeometry::default(),
         }
     }
 
     fn ids(app: &RustqlApp) -> Vec<u64> {
         app.sessions.iter().map(|s| s.id).collect()
+    }
+
+    /// Un frame con la ventana en ese estado.
+    fn track(window: &mut WindowGeometry, size: [f32; 2], maximized: bool) {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size.into()));
+        info.maximized = Some(maximized);
+        ctx.run_ui(input, |ui| window.track(ui.ctx()))
+            .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn se_recuerda_el_tamano_de_antes_de_maximizar() {
+        let mut window = WindowGeometry::default();
+        track(&mut window, [1200.0, 700.0], false);
+        assert_eq!(window.size, Some([1200.0, 700.0]));
+        assert!(!window.maximized);
+        // Maximizada ocupa la pantalla: ese no es el tamaño al restaurarla
+        track(&mut window, [1920.0, 1040.0], true);
+        assert_eq!(window.size, Some([1200.0, 700.0]));
+        assert!(window.maximized);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod statusbar;
 pub mod tab_bar;
 pub mod table_structure;
 pub mod theme;
+pub mod toasts;
 
 /// Prefijo de los atajos con la tecla de comando: Ctrl en Linux y Windows,
 /// ⌘ en macOS (egui la expone como `Modifiers::command`).
@@ -35,9 +36,33 @@ pub fn ellipsize(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Tamaño en bytes con la unidad que mejor lo expresa (B, KB, MB o GB).
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.1} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ellipsize;
+    use super::{ellipsize, format_bytes};
+
+    #[test]
+    fn format_bytes_elige_la_unidad() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
 
     #[test]
     fn ellipsize_cuenta_caracteres_no_bytes() {

@@ -6,8 +6,14 @@ use serde::{Deserialize, Serialize};
 /// Pestaña SQL guardada (sin resultado, solo texto y contexto de BD).
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct SavedSqlTab {
+    /// Nombre que le dio el usuario (ver SqlTab::name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub db_context: String,
     pub sql_text: String,
+    /// Alto que el usuario le dio al editor (ver SqlTab::editor_height).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_height: Option<f32>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -68,6 +74,9 @@ pub struct AppSettings {
     pub query_limit: usize,
     /// Tope de filas que lee el editor SQL; el resto se descarta.
     pub sql_editor_max_rows: usize,
+    /// Tamaño de la ventana (sin maximizar) al salir la última vez.
+    pub window_size: Option<[f32; 2]>,
+    pub window_maximized: bool,
 }
 
 impl Default for AppSettings {
@@ -84,22 +93,28 @@ impl Default for AppSettings {
             copy_format: CopyFormat::Csv,
             query_limit: 500,
             sql_editor_max_rows: 10_000,
+            window_size: None,
+            window_maximized: false,
         }
     }
 }
 
-/// Descubre todas las fuentes TTF/OTF del sistema disponibles para la UI.
-/// Cada entrada es (nombre_display, path). Ordenadas alfabéticamente por nombre.
-/// Excluye variantes Bold/Italic/etc. para no saturar el listado.
-pub fn available_system_fonts() -> Vec<(String, String)> {
-    #[cfg(target_os = "windows")]
-    {
-        windows_fonts()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        fc_list_fonts()
-    }
+/// Fuentes TTF/OTF del sistema disponibles para la UI, como (nombre, ruta)
+/// ordenadas por nombre y sin las variantes Bold/Italic/etc. Se buscan una
+/// sola vez: listarlas lanza `fc-list` (o recorre el directorio de fuentes),
+/// y el panel de ajustes las pide en cada frame.
+pub fn available_system_fonts() -> &'static [(String, String)] {
+    static FONTS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            windows_fonts()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            fc_list_fonts()
+        }
+    })
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -5,11 +5,20 @@ use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::secrets;
 use crate::ui::theme;
 
+/// Cómo guardar el formulario como favorito.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SaveProfile {
+    /// Sobre el favorito seleccionado (o uno nuevo si no hay ninguno).
+    Update,
+    /// Como otro favorito, dejando intacto el seleccionado.
+    AsNew,
+}
+
 /// Resultado de la interacción con el formulario de conexión.
 #[derive(Default)]
 pub struct FormResult {
     pub connect: bool,
-    pub save_profile: bool,
+    pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
 }
 
@@ -138,26 +147,38 @@ fn show_form_fields(
         .spacing([16.0, 8.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
+            // Enter en cualquiera de los campos de la conexión conecta
+            let mut field = |ui: &mut egui::Ui, edit: egui::TextEdit<'_>| {
+                let resp = ui.add(edit.min_size(egui::vec2(220.0, 0.0)));
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    result.connect = true;
+                }
+            };
+
             ui.label("Host:");
-            ui.add(egui::TextEdit::singleline(&mut params.host).min_size(egui::vec2(220.0, 0.0)));
+            field(ui, egui::TextEdit::singleline(&mut params.host));
             ui.end_row();
 
             ui.label("Puerto:");
-            ui.add(egui::TextEdit::singleline(port_str).min_size(egui::vec2(220.0, 0.0)));
+            field(ui, egui::TextEdit::singleline(port_str));
             ui.end_row();
 
             ui.label("Usuario:");
-            ui.add(egui::TextEdit::singleline(&mut params.user).min_size(egui::vec2(220.0, 0.0)));
+            field(ui, egui::TextEdit::singleline(&mut params.user));
             ui.end_row();
 
             ui.label("Contraseña:");
-            let mut password = egui::TextEdit::singleline(&mut params.password)
-                .password(true)
-                .min_size(egui::vec2(220.0, 0.0));
-            if params.keyring_id.is_some() {
-                password = password.hint_text("Guardada en el llavero");
-            }
-            ui.add(password);
+            let hint = if params.keyring_id.is_some() {
+                "Guardada en el llavero"
+            } else {
+                ""
+            };
+            field(
+                ui,
+                egui::TextEdit::singleline(&mut params.password)
+                    .password(true)
+                    .hint_text(hint),
+            );
             ui.end_row();
 
             ui.label("");
@@ -209,10 +230,19 @@ fn show_form_fields(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         if ui.button("Guardar").clicked() {
-            result.save_profile = true;
+            result.save_profile = Some(SaveProfile::Update);
         }
-        if selected_idx.is_some() && ui.button("Eliminar").clicked() {
-            result.delete_profile = true;
+        if selected_idx.is_some() {
+            if ui
+                .button("Guardar como nuevo")
+                .on_hover_text("Crea otro favorito con estos datos, sin tocar el seleccionado")
+                .clicked()
+            {
+                result.save_profile = Some(SaveProfile::AsNew);
+            }
+            if ui.button("Eliminar").clicked() {
+                result.delete_profile = true;
+            }
         }
     });
 

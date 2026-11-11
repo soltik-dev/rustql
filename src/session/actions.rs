@@ -9,23 +9,25 @@ use eframe::egui;
 
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
-use super::{ConnState, SelectedNode, Session, Shared};
+use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
+use crate::db::QueryResult;
 use crate::db::{connect_mysql_progress, escape_sql, qualified, quote_ident};
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
 use crate::settings::{self, CopyFormat};
 use crate::table_state;
+use crate::ui::connection_panel::SaveProfile;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
 use crate::ui::modals::{
-    self, DropKind, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
-    TruncateKind,
+    self, DbObject, ExportPhase, ExportRunning, ModalAction, ModalState, NewColumnDef, Reload,
 };
-use crate::ui::results_grid::{self, EditingCell, GridAction, SortSpec};
+use crate::ui::results_grid::{self, ApplyBarAction, CellRef, GridAction, InsertValue, RowRef};
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
+use std::collections::BTreeSet;
 
 impl Session {
     /// Aplica lo que el usuario hizo en el frame, en orden: lo de un
@@ -35,20 +37,18 @@ impl Session {
         ctx: &egui::Context,
         sh: &mut Shared,
         signals: FrameSignals,
-        f5: bool,
-        ctrl_t: bool,
-        sorts_before: Vec<SortSpec>,
+        keys: FrameKeys,
     ) {
         if signals.cancel_connect {
             self.state = ConnState::Disconnected;
         }
-        self.handle_tab_bar(sh, signals.tab_bar, ctrl_t);
-        self.handle_grid_action(ctx, sh, signals.grid, sorts_before);
+        self.handle_tab_bar(sh, signals.tab_bar, keys);
+        self.handle_grid_action(ctx, sh, signals.grid);
         // Barra de guardar (solo visible con cambios pendientes)
         match signals.apply_bar {
-            GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
-            GridAction::DiscardEdits => self.discard_pending(),
-            _ => {}
+            ApplyBarAction::Apply => self.commit_pending_changes(sh, AfterCommit::ReloadData),
+            ApplyBarAction::Discard => self.discard_pending(),
+            ApplyBarAction::None => {}
         }
         let disconnect = self.handle_sidebar_action(ctx, sh, signals.sidebar.action);
         // Datos que el sidebar necesita para dibujar el árbol
@@ -59,19 +59,21 @@ impl Session {
             self.request_all_tables();
         }
         if disconnect {
+            // Lo escrito y sin ejecutar no debe perderse al reconectar
+            self.save_tabs_state(sh);
             self.disconnect();
         }
-        if f5 {
-            self.refresh_active_tab(sh);
+        if keys.f5 {
+            self.refresh_active_tab(ctx, sh);
         }
         self.handle_filter_action(sh, signals.filter);
         self.handle_db_info_action(sh, signals.db_info);
-        self.handle_sql_action(sh, signals.sql);
+        self.handle_sql_action(ctx, sh, signals.sql);
     }
 
     /// F5: vuelve a leer lo que muestra la pestaña activa (antes recargaba
     /// siempre la tabla abierta, se estuviera viendo o no).
-    fn refresh_active_tab(&mut self, sh: &mut Shared) {
+    fn refresh_active_tab(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         match self.active_tab {
             // Datos y estructura de la tabla abierta
             ActiveTab::Datos => self.request_reload(sh, Reload::Refresh),
@@ -91,116 +93,148 @@ impl Session {
             ActiveTab::Sql(i) => {
                 if let Some(tab) = self.sql_tabs.get(i)
                     && tab.running.is_none()
-                    && !tab.sql_text.trim().is_empty()
+                    && let Some(sql) = tab.sql_to_run()
                 {
                     let action = SqlEditorAction::Execute {
-                        sql: tab.sql_text.trim().to_string(),
+                        sql,
                         db_context: tab.db_context.clone(),
                     };
-                    self.handle_sql_action(sh, action);
+                    self.handle_sql_action(ctx, sh, action);
                 }
             }
         }
         // Lo invalidado se vuelve a pedir en el siguiente frame (request_tab_data)
     }
 
-    fn handle_tab_bar(&mut self, sh: &mut Shared, tab_bar: TabBarResult, ctrl_t: bool) {
+    /// Pestañas de la barra en su orden, sin las que están desactivadas por
+    /// no haber BBDD o tabla seleccionada.
+    fn tab_order(&self) -> Vec<ActiveTab> {
+        let mut tabs = vec![ActiveTab::Servidor];
+        if self.schema.selected_db().is_some() {
+            tabs.push(ActiveTab::Bbdd);
+        }
+        if self.schema.selected_table().is_some() {
+            tabs.extend([ActiveTab::Tabla, ActiveTab::Datos]);
+        }
+        tabs.extend((0..self.sql_tabs.len()).map(ActiveTab::Sql));
+        tabs
+    }
+
+    /// Pestaña siguiente (o anterior) a la activa, dando la vuelta.
+    fn neighbour_tab(&self, forward: bool) -> ActiveTab {
+        let tabs = self.tab_order();
+        let current = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+        let step = if forward { 1 } else { tabs.len() - 1 };
+        tabs[(current + step) % tabs.len()]
+    }
+
+    fn handle_tab_bar(&mut self, sh: &mut Shared, mut tab_bar: TabBarResult, keys: FrameKeys) {
+        // El teclado hace lo mismo que el ratón sobre la barra
+        if self.is_connected() {
+            if let Some(forward) = keys.cycle_tab {
+                tab_bar.tab_clicked = Some(self.neighbour_tab(forward));
+            }
+            if keys.ctrl_w
+                && let ActiveTab::Sql(idx) = self.active_tab
+            {
+                tab_bar.close_sql_tab = Some(idx);
+            }
+        }
+
         if let Some(t) = tab_bar.tab_clicked {
+            // Al salir de una pestaña SQL se guarda su texto
+            if matches!(self.active_tab, ActiveTab::Sql(_)) && t != self.active_tab {
+                self.save_tabs_state(sh);
+            }
             self.active_tab = t;
         }
 
-        // Ctrl+T solo con conexión: en el formulario guardaría pestañas bajo la
-        // clave de unos parámetros a medio escribir.
-        if tab_bar.new_sql_tab || (ctrl_t && self.is_connected()) {
-            let db_ctx = match &self.schema.selected_node {
-                Some(SelectedNode::Database(d)) => d.clone(),
-                Some(SelectedNode::Table { db, .. }) => db.clone(),
-                _ => String::new(),
-            };
-            let new_idx = self.sql_tabs.len();
-            self.sql_tabs.push(SqlTab {
-                db_context: db_ctx,
-                sql_text: String::new(),
-                ..Default::default()
-            });
-            self.active_tab = ActiveTab::Sql(new_idx);
+        if let Some((idx, name)) = tab_bar.renamed
+            && let Some(tab) = self.sql_tabs.get_mut(idx)
+        {
+            tab.name = (!name.is_empty()).then_some(name);
             self.save_tabs_state(sh);
         }
 
-        if let Some(close_idx) = tab_bar.close_sql_tab
-            && close_idx < self.sql_tabs.len()
+        if tab_bar.new_sql_tab || (keys.ctrl_t && self.is_connected()) {
+            self.open_sql_tab(sh, None, String::new());
+        }
+
+        if let Some(idx) = tab_bar.close_sql_tab
+            && let Some(tab) = self.sql_tabs.get(idx)
         {
-            self.sql_tabs.remove(close_idx);
-            if self.sql_tabs.is_empty() {
-                self.sql_tabs.push(SqlTab::default());
+            // Cerrar borra su consulta para siempre: con texto, se pregunta
+            if tab.sql_text.trim().is_empty() {
+                self.close_sql_tab(sh, idx);
+            } else {
+                self.modal = ModalState::ConfirmCloseSqlTab {
+                    idx,
+                    title: tab.title(idx),
+                    preview: crate::ui::ellipsize(tab.sql_text.trim(), 120),
+                };
             }
-            self.active_tab = match self.active_tab {
-                ActiveTab::Sql(i) if i >= close_idx => {
-                    let new_i = if i > 0 { i.saturating_sub(1) } else { 0 };
-                    ActiveTab::Sql(new_i.min(self.sql_tabs.len().saturating_sub(1)))
-                }
-                other => other,
-            };
-            self.save_tabs_state(sh);
         }
     }
 
-    fn handle_grid_action(
-        &mut self,
-        ctx: &egui::Context,
-        sh: &mut Shared,
-        action: GridAction,
-        sorts_before: Vec<SortSpec>,
-    ) {
+    /// Abre una pestaña SQL nueva con `sql_text` y pasa a ella. Su contexto
+    /// es `db` o, sin él, la BBDD seleccionada en el árbol.
+    pub fn open_sql_tab(&mut self, sh: &mut Shared, db: Option<String>, sql_text: String) {
+        if !self.is_connected() {
+            return;
+        }
+        let db_context = db.unwrap_or_else(|| self.selected_db().unwrap_or_default().to_string());
+        self.sql_tabs.push(SqlTab::new(db_context, sql_text));
+        self.active_tab = ActiveTab::Sql(self.sql_tabs.len() - 1);
+        self.save_tabs_state(sh);
+    }
+
+    /// Cierra la pestaña SQL `idx` y descarta su texto. Siempre queda al
+    /// menos una pestaña.
+    pub(super) fn close_sql_tab(&mut self, sh: &mut Shared, idx: usize) {
+        if idx >= self.sql_tabs.len() {
+            return;
+        }
+        // Su consulta, si aún se está ejecutando, ya no le interesa a nadie
+        self.cancel_editor(idx);
+        // Los índices cambian: el nombre a medio escribir no se aplica
+        self.sql_tab_rename = None;
+        self.sql_tabs.remove(idx);
+        if self.sql_tabs.is_empty() {
+            self.sql_tabs.push(SqlTab::default());
+        }
+        self.active_tab = match self.active_tab {
+            ActiveTab::Sql(i) if i >= idx => {
+                ActiveTab::Sql(i.saturating_sub(1).min(self.sql_tabs.len() - 1))
+            }
+            other => other,
+        };
+        self.save_tabs_state(sh);
+    }
+
+    fn handle_grid_action(&mut self, ctx: &egui::Context, sh: &mut Shared, action: GridAction) {
         match action {
-            GridAction::SortChanged => {
+            GridAction::SortChanged(sorts) => {
                 // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
-                let sorts = std::mem::replace(&mut self.table_view.sort_specs, sorts_before);
                 self.request_reload(sh, Reload::Sort(sorts));
             }
-            GridAction::CellEditStarted {
+            GridAction::CellEdited {
                 row,
                 col_idx,
-                current_value,
-            } => {
-                self.table_view.editing_cell = Some(EditingCell {
-                    row,
-                    col_idx,
-                    buffer: current_value,
-                    needs_focus: true,
-                });
-            }
-            GridAction::CellSetNull { row, col_idx } => {
-                self.table_view.editing_cell = None;
-                self.record_edit(row, col_idx, None);
-            }
-            GridAction::CellEditCommitted {
-                row,
+                value,
+            } => self.record_edit(row, col_idx, value),
+            GridAction::CellSetDefault {
+                insert_idx,
                 col_idx,
-                new_value,
             } => {
-                self.table_view.editing_cell = None;
-                self.record_edit(row, col_idx, Some(new_value));
+                if let Some(slot) = self
+                    .table_view
+                    .pending_inserts
+                    .get_mut(insert_idx)
+                    .and_then(|ins| ins.values.get_mut(col_idx))
+                {
+                    *slot = InsertValue::Default;
+                }
             }
-            GridAction::CellEditCancelled => {
-                self.table_view.editing_cell = None;
-            }
-            GridAction::CellEditTabNext {
-                row,
-                col_idx,
-                new_value,
-            } => {
-                self.record_edit(row, col_idx, Some(new_value));
-                let next_col = self.next_editable_col(row, col_idx);
-                self.table_view.editing_cell = Some(EditingCell {
-                    row,
-                    col_idx: next_col,
-                    buffer: self.cell_text(row, next_col),
-                    needs_focus: true,
-                });
-            }
-            GridAction::ApplyEdits => self.commit_pending_changes(sh, AfterCommit::ReloadData),
-            GridAction::DiscardEdits => self.discard_pending(),
             GridAction::FilterBy { sql_fragment } => {
                 self.request_reload(sh, Reload::Filter(sql_fragment));
             }
@@ -212,9 +246,11 @@ impl Session {
                         let filter = format!("{esc_col} = '{esc_val}'");
                         self.request_reload(sh, Reload::Filter(filter));
                     }
+                    // En un aviso: como error de la tabla tapaba el grid
+                    // hasta la siguiente recarga
                     Err(e) => {
-                        self.table_view.table_error =
-                            Some(format!("No se pudo leer el portapapeles: {e}"));
+                        sh.toasts
+                            .error(format!("No se pudo leer el portapapeles: {e}"));
                     }
                 }
             }
@@ -225,90 +261,48 @@ impl Session {
                     operator: modals::FilterOperator::default(),
                 };
             }
-            GridAction::MarkDeleteRow { row_idx } => {
-                if !self.table_view.pending_deletes.remove(&row_idx) {
-                    self.table_view.pending_deletes.insert(row_idx);
-                }
-            }
-            GridAction::InsertRow => {
-                if let Some(row) = self.new_insert_row(None) {
-                    self.table_view.pending_inserts.push(row);
-                }
-            }
-            GridAction::CloneRow { row_idx } => {
-                if let Some(row) = self.new_insert_row(Some(row_idx)) {
-                    self.table_view.pending_inserts.push(row);
-                }
-            }
-            GridAction::RemoveInsertRow { insert_idx } => {
-                if insert_idx < self.table_view.pending_inserts.len() {
-                    self.table_view.pending_inserts.remove(insert_idx);
-                }
-            }
-            GridAction::RowSelected {
-                row_idx,
-                shift,
-                ctrl,
-            } => {
-                if shift {
-                    let anchor = self.table_view.last_selected_row.unwrap_or(row_idx);
-                    let (lo, hi) = (anchor.min(row_idx), anchor.max(row_idx));
-                    self.table_view.selected_rows = (lo..=hi).collect();
-                } else if ctrl {
-                    if !self.table_view.selected_rows.remove(&row_idx) {
-                        self.table_view.selected_rows.insert(row_idx);
-                        self.table_view.last_selected_row = Some(row_idx);
-                    }
-                } else {
-                    self.table_view.selected_rows.clear();
-                    self.table_view.selected_rows.insert(row_idx);
-                    self.table_view.last_selected_row = Some(row_idx);
-                    self.table_view.drag_select_from = Some(row_idx);
-                }
-                self.table_view.selected_cell = None;
-            }
-            GridAction::CopySelectedRows => {
-                self.copy_selected_rows(ctx, &sh.settings.copy_format);
-            }
-            GridAction::CopyRowsAs { fmt } => self.copy_selected_rows(ctx, &fmt),
-            GridAction::CellSelected { row_idx, col_idx } => {
-                self.table_view.selected_cell = Some((row_idx, col_idx));
-                self.table_view.selected_rows.clear();
-                self.table_view.last_selected_row = None;
-            }
-            GridAction::MarkDeleteRows { row_indices } => {
-                for row_idx in row_indices {
+            GridAction::ToggleDeleteRows(rows) => {
+                for row_idx in rows {
                     if !self.table_view.pending_deletes.remove(&row_idx) {
                         self.table_view.pending_deletes.insert(row_idx);
                     }
                 }
             }
+            GridAction::InsertRow => self.add_insert_row(ctx, None),
+            GridAction::CloneRow { row_idx } => self.add_insert_row(ctx, Some(row_idx)),
+            GridAction::RemoveInsertRow { insert_idx } => {
+                if insert_idx < self.table_view.pending_inserts.len() {
+                    self.table_view.pending_inserts.remove(insert_idx);
+                }
+            }
+            GridAction::CopyRows(fmt) => {
+                let fmt = fmt.unwrap_or_else(|| sh.settings.copy_format.clone());
+                if let Some(data) = &self.table_view.table_data {
+                    let table = self.schema.selected_table().map(|(_, table)| table);
+                    let rows = &self.table_view.selection.rows;
+                    copy_rows(ctx, sh, data, rows, &fmt, table);
+                }
+            }
+            GridAction::PageChanged(page) => self.request_reload(sh, Reload::Page(page)),
             GridAction::None => {}
         }
     }
 
-    /// Copia las filas seleccionadas al portapapeles en el formato `fmt`.
-    fn copy_selected_rows(&self, ctx: &egui::Context, fmt: &CopyFormat) {
-        let Some(data) = &self.table_view.table_data else {
+    /// Añade al grid una fila nueva (copia de `source_row` si se indica) y
+    /// lleva a ella el cursor y el foco, lista para escribir.
+    fn add_insert_row(&mut self, ctx: &egui::Context, source_row: Option<usize>) {
+        let Some(row) = self.new_insert_row(source_row) else {
             return;
         };
-        let table = match &self.schema.selected_node {
-            Some(SelectedNode::Table { table, .. }) => Some(table.as_str()),
-            _ => None,
-        };
-        let rows: Vec<&Vec<Option<String>>> = self
-            .table_view
-            .selected_rows
-            .iter()
-            .filter_map(|&i| data.rows.get(i))
-            .collect();
-        if !rows.is_empty() {
-            ctx.copy_text(results_grid::format_rows_for_copy(
-                &data.columns,
-                &rows,
-                fmt,
-                table,
-            ));
+        let col = row.auto_cols.iter().position(|auto| !auto).unwrap_or(0);
+        let tv = &mut self.table_view;
+        tv.pending_inserts.push(row);
+        tv.selection.move_to(CellRef {
+            row: RowRef::Insert(tv.pending_inserts.len() - 1),
+            col,
+        });
+        if let Some(id) = tv.selection.focus_id {
+            ctx.memory_mut(|m| m.request_focus(id));
         }
     }
 
@@ -348,42 +342,29 @@ impl Session {
                 };
             }
             SidebarAction::DropDatabase { db } => {
-                let target = db.clone();
                 self.modal = ModalState::ConfirmDrop {
-                    kind: DropKind::Database,
-                    target,
-                    db: Some(db),
-                    table: None,
+                    target: DbObject::Database(db),
+                    typed: String::new(),
                 };
             }
             SidebarAction::TruncateAllTables { db } => {
-                let target = format!("todas las tablas de '{db}'");
                 self.modal = ModalState::ConfirmTruncate {
-                    kind: TruncateKind::AllInDatabase,
-                    target,
-                    db: Some(db),
-                    table: None,
+                    target: DbObject::Database(db),
                 };
             }
             SidebarAction::DropTable { db, table } => {
-                let target = format!("{db}.{table}");
                 self.modal = ModalState::ConfirmDrop {
-                    kind: DropKind::Table,
-                    target,
-                    db: Some(db),
-                    table: Some(table),
+                    target: DbObject::Table { db, table },
+                    typed: String::new(),
                 };
             }
             SidebarAction::TruncateTable { db, table } => {
-                let target = format!("{db}.{table}");
                 self.modal = ModalState::ConfirmTruncate {
-                    kind: TruncateKind::Table,
-                    target,
-                    db: Some(db),
-                    table: Some(table),
+                    target: DbObject::Table { db, table },
                 };
             }
             SidebarAction::CopyTableName(name) => {
+                sh.toasts.info(format!("«{name}» copiado al portapapeles"));
                 ctx.copy_text(name);
             }
             SidebarAction::Refresh => self.schema.clear(),
@@ -401,15 +382,8 @@ impl Session {
                 self.switch_to_table(sh, db, table, ActiveTab::Tabla);
             }
             SidebarAction::OpenInSql { db, table } => {
-                let new_idx = self.sql_tabs.len();
                 let sql_text = format!("SELECT * FROM {} WHERE ", qualified(&db, &table));
-                self.sql_tabs.push(SqlTab {
-                    db_context: db.clone(),
-                    sql_text,
-                    ..Default::default()
-                });
-                self.active_tab = ActiveTab::Sql(new_idx);
-                self.save_tabs_state(sh);
+                self.open_sql_tab(sh, Some(db), sql_text);
             }
             SidebarAction::CloneTable { db, table } => {
                 self.modal = ModalState::CloneTable {
@@ -442,24 +416,42 @@ impl Session {
 
     /// Doble clic en una tabla de la pestaña BBDD: la abre.
     fn handle_db_info_action(&mut self, sh: &mut Shared, action: DbInfoAction) {
-        if let DbInfoAction::OpenTable(table) = action {
-            let db = match &self.schema.selected_node {
-                Some(SelectedNode::Database(d)) => Some(d.clone()),
-                Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                _ => None,
-            };
-            if let Some(db) = db {
-                self.switch_to_table(sh, db, table, ActiveTab::Datos);
-            }
+        if let DbInfoAction::OpenTable(table) = action
+            && let Some(db) = self.selected_db().map(str::to_string)
+        {
+            self.switch_to_table(sh, db, table, ActiveTab::Datos);
         }
     }
 
-    fn handle_sql_action(&mut self, sh: &mut Shared, action: SqlEditorAction) {
-        // Persistir texto de pestañas SQL al ejecutar
-        if let SqlEditorAction::Execute { sql, db_context } = action {
-            self.save_tabs_state(sh);
-            if let ActiveTab::Sql(tab_idx) = self.active_tab {
+    fn handle_sql_action(&mut self, ctx: &egui::Context, sh: &mut Shared, action: SqlEditorAction) {
+        let ActiveTab::Sql(tab_idx) = self.active_tab else {
+            return;
+        };
+        match action {
+            SqlEditorAction::None => {}
+            SqlEditorAction::Execute { sql, db_context } => {
+                // Persistir texto de pestañas SQL al ejecutar
+                self.save_tabs_state(sh);
                 self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
+            }
+            SqlEditorAction::Cancel => self.cancel_editor(tab_idx),
+            SqlEditorAction::CopyRows(fmt) => {
+                let fmt = fmt.unwrap_or_else(|| sh.settings.copy_format.clone());
+                if let Some(tab) = self.sql_tabs.get(tab_idx)
+                    && let Some(Ok(data)) = &tab.result
+                {
+                    copy_rows(ctx, sh, data, &tab.selection.rows, &fmt, None);
+                }
+            }
+            // Limpiar no se puede deshacer: se pregunta antes
+            SqlEditorAction::Clear => {
+                if let Some(tab) = self.sql_tabs.get(tab_idx) {
+                    self.modal = ModalState::ConfirmClearSql {
+                        idx: tab_idx,
+                        title: tab.title(tab_idx),
+                        preview: crate::ui::ellipsize(tab.sql_text.trim(), 120),
+                    };
+                }
             }
         }
     }
@@ -468,8 +460,19 @@ impl Session {
     pub(super) fn handle_modal_action(&mut self, modal_action: ModalAction, sh: &mut Shared) {
         match modal_action {
             ModalAction::None => {}
-            ModalAction::Cancel | ModalAction::CloseSession => {
+            ModalAction::Cancel | ModalAction::CloseSession | ModalAction::DeleteProfile => {
                 self.modal = ModalState::None;
+            }
+            ModalAction::CloseSqlTab(idx) => {
+                self.modal = ModalState::None;
+                self.close_sql_tab(sh, idx);
+            }
+            ModalAction::ClearSql(idx) => {
+                self.modal = ModalState::None;
+                if let Some(tab) = self.sql_tabs.get_mut(idx) {
+                    tab.sql_text.clear();
+                }
+                self.save_tabs_state(sh);
             }
             ModalAction::ApplyAndSwitch { new_db, new_table } => {
                 self.modal = ModalState::None;
@@ -498,7 +501,7 @@ impl Session {
             ModalAction::CreateDatabase { name, charset } => self.create_database(name, charset),
             ModalAction::CreateTable { db, name, columns } => {
                 let sql = modals::build_create_table_sql(&db, &name, &columns);
-                self.create_table(db, sql);
+                self.create_table(db, name, sql);
             }
             ModalAction::DropDatabase(db) => {
                 self.modal = ModalState::None;
@@ -572,7 +575,7 @@ impl Session {
         ctx: &egui::Context,
         sh: &mut Shared,
         selected: Option<usize>,
-        save: bool,
+        save: Option<SaveProfile>,
         delete: bool,
     ) -> Option<usize> {
         let mut removed = None;
@@ -589,49 +592,8 @@ impl Session {
             self.error_message = None;
         }
 
-        if save && !self.profile_name.trim().is_empty() {
-            if let Ok(p) = self.port_str.parse::<u16>() {
-                self.params.port = p;
-            }
-            let name = self.profile_name.trim().to_string();
-            let idx = self
-                .selected_profile_idx
-                .or_else(|| sh.profiles.iter().position(|p| p.name == name));
-            let previous = idx.map(|i| &sh.profiles[i]);
-            let had_keyring = previous.is_some_and(|p| p.password_in_keyring);
-            let profile = ConnectionProfile {
-                id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
-                name,
-                host: self.params.host.clone(),
-                port: self.params.port,
-                user: self.params.user.clone(),
-                // Una contraseña nueva se marca cuando el llavero la confirma
-                // (poll_keyring). Con el campo vacío se conserva la que había.
-                password_in_keyring: had_keyring && self.save_password,
-                password: None,
-                color: self.color,
-            };
-            if self.save_password && !self.params.password.is_empty() {
-                let id = profile.id.clone();
-                let label = profile.keyring_label();
-                let password = self.params.password.clone();
-                let tx = self.keyring_tx.clone();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let result = secrets::set(&id, &label, &password);
-                    let _ = tx.send((id, result));
-                    ctx.request_repaint();
-                });
-            } else if had_keyring && !self.save_password {
-                secrets::delete_in_background(profile.id.clone());
-            }
-            self.params.keyring_id = profile.password_in_keyring.then(|| profile.id.clone());
-            match idx {
-                Some(i) => sh.profiles[i] = profile,
-                None => sh.profiles.push(profile),
-            }
-            self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
-            profiles::save(&sh.profiles);
+        if let Some(mode) = save {
+            self.save_profile(ctx, sh, mode);
         }
 
         if delete && let Some(idx) = self.selected_profile_idx {
@@ -642,16 +604,104 @@ impl Session {
             self.selected_profile_idx = None;
             self.profile_name.clear();
             profiles::save(&sh.profiles);
+            sh.toasts
+                .info(format!("Favorito «{}» eliminado", profile.name));
             removed = Some(idx);
         }
 
         removed
     }
 
+    /// Guarda el formulario como favorito: sobre el seleccionado (o el que
+    /// se llame igual) o, con `SaveProfile::AsNew`, como otro distinto.
+    fn save_profile(&mut self, ctx: &egui::Context, sh: &mut Shared, mode: SaveProfile) {
+        let name = self.profile_name.trim().to_string();
+        if name.is_empty() {
+            self.error_message = Some("Pon un nombre al favorito para guardarlo.".into());
+            return;
+        }
+        if !self.read_port() {
+            return;
+        }
+        let same_name = sh.profiles.iter().position(|p| p.name == name);
+        let idx = match mode {
+            SaveProfile::Update => self.selected_profile_idx.or(same_name),
+            SaveProfile::AsNew if same_name.is_some() => {
+                self.error_message = Some(format!(
+                    "Ya hay un favorito llamado «{name}»: cambia el nombre para guardarlo \
+                     como otro."
+                ));
+                return;
+            }
+            SaveProfile::AsNew => None,
+        };
+        self.error_message = None;
+        let previous = idx.map(|i| &sh.profiles[i]);
+        let had_keyring = previous.is_some_and(|p| p.password_in_keyring);
+        let profile = ConnectionProfile {
+            id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
+            name,
+            host: self.params.host.clone(),
+            port: self.params.port,
+            user: self.params.user.clone(),
+            // Una contraseña nueva se marca cuando el llavero la confirma
+            // (poll_keyring). Con el campo vacío se conserva la que había.
+            password_in_keyring: had_keyring && self.save_password,
+            password: None,
+            color: self.color,
+        };
+        if self.save_password && !self.params.password.is_empty() {
+            let id = profile.id.clone();
+            let label = profile.keyring_label();
+            let password = self.params.password.clone();
+            let tx = self.keyring_tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = secrets::set(&id, &label, &password);
+                let _ = tx.send((id, result));
+                ctx.request_repaint();
+            });
+        } else if had_keyring && !self.save_password {
+            secrets::delete_in_background(profile.id.clone());
+        }
+        self.params.keyring_id = profile.password_in_keyring.then(|| profile.id.clone());
+        match idx {
+            Some(i) => sh.profiles[i] = profile,
+            None => sh.profiles.push(profile),
+        }
+        self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
+        profiles::save(&sh.profiles);
+        sh.toasts
+            .success(format!("Favorito «{}» guardado", self.profile_name.trim()));
+    }
+
+    /// Pasa el puerto del formulario a los parámetros. Si no es un puerto
+    /// válido lo dice en el formulario y devuelve false: antes se ignoraba y
+    /// se usaba el puerto anterior sin avisar.
+    fn read_port(&mut self) -> bool {
+        match self.port_str.trim().parse::<u16>() {
+            Ok(port) if port > 0 => {
+                self.params.port = port;
+                true
+            }
+            _ => {
+                self.error_message = Some(format!(
+                    "Puerto no válido: «{}». Debe ser un número entre 1 y 65535.",
+                    self.port_str.trim()
+                ));
+                false
+            }
+        }
+    }
+
     /// Lanza la conexión en segundo plano con los parámetros del formulario.
     pub(super) fn start_connect(&mut self, sh: &Shared) {
-        if let Ok(p) = self.port_str.parse::<u16>() {
-            self.params.port = p;
+        if self.params.host.trim().is_empty() {
+            self.error_message = Some("Indica el host del servidor.".into());
+            return;
+        }
+        if !self.read_port() {
+            return;
         }
         self.title = self
             .selected_profile_idx
@@ -671,5 +721,28 @@ impl Session {
             start: Instant::now(),
         };
         self.error_message = None;
+    }
+}
+
+/// Copia al portapapeles las filas `rows` de `data` en el formato `fmt` y lo
+/// confirma con un aviso. `table` es el nombre que llevan los INSERT.
+fn copy_rows(
+    ctx: &egui::Context,
+    sh: &mut Shared,
+    data: &QueryResult,
+    rows: &BTreeSet<usize>,
+    fmt: &CopyFormat,
+    table: Option<&str>,
+) {
+    let copied = results_grid::copy_rows(ctx, data, rows, fmt, table);
+    let format = match fmt {
+        CopyFormat::Csv => "CSV",
+        CopyFormat::Tsv => "TSV",
+        CopyFormat::SqlInserts => "INSERT",
+    };
+    match copied {
+        0 => {}
+        1 => sh.toasts.info(format!("1 fila copiada ({format})")),
+        n => sh.toasts.info(format!("{n} filas copiadas ({format})")),
     }
 }

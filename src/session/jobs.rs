@@ -33,6 +33,9 @@ pub enum JobResult {
         elapsed_ms: u64,
         result: DbResult<QueryResult>,
     },
+    /// Se pidió al servidor cancelar una ejecución del editor. Si lo
+    /// consigue, quien termina (con error) es su `Editor`.
+    EditorCancel(DbResult<()>),
 }
 
 pub struct Jobs {

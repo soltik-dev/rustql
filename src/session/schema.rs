@@ -71,12 +71,20 @@ impl SchemaCache {
             .and_then(Loadable::ready)
     }
 
+    /// BBDD seleccionada (directamente o a través de una de sus tablas).
+    pub fn selected_db(&self) -> Option<&str> {
+        self.selected_node.as_ref()?.db()
+    }
+
+    /// Tabla abierta, como (BBDD, tabla).
+    pub fn selected_table(&self) -> Option<(&str, &str)> {
+        self.selected_node.as_ref()?.table()
+    }
+
     /// Columnas de la tabla abierta, si ya están cargadas.
     pub fn open_table_columns(&self) -> Option<&Vec<ColumnInfo>> {
-        match &self.selected_node {
-            Some(SelectedNode::Table { db, table }) => self.columns(db, table),
-            _ => None,
-        }
+        let (db, table) = self.selected_table()?;
+        self.columns(db, table)
     }
 
     /// Descarta todo lo cargado (Refrescar). La selección se mantiene.
@@ -262,10 +270,7 @@ impl Session {
 
     /// BBDD seleccionada (directamente o a través de una de sus tablas).
     pub(super) fn selected_db(&self) -> Option<&str> {
-        match &self.schema.selected_node {
-            Some(SelectedNode::Database(db)) | Some(SelectedNode::Table { db, .. }) => Some(db),
-            _ => None,
-        }
+        self.schema.selected_db()
     }
 
     /// Claves primarias de la tabla abierta, según su estructura (las

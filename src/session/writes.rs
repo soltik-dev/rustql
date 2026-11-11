@@ -13,9 +13,12 @@ use crate::ui::tab_bar::ActiveTab;
 
 /// Qué se escribió, con lo necesario para aplicar el resultado.
 pub enum Write {
-    CreateDatabase,
+    CreateDatabase {
+        name: String,
+    },
     CreateTable {
         db: String,
+        name: String,
     },
     DropDatabase {
         db: String,
@@ -33,11 +36,14 @@ pub enum Write {
     },
     CloneTable {
         db: String,
+        name: String,
     },
-    /// Guardar los cambios pendientes de `db.table` y después hacer `then`.
+    /// Guardar los `count` cambios pendientes de `db.table` y después hacer
+    /// `then`.
     Commit {
         db: String,
         table: String,
+        count: usize,
         then: AfterCommit,
     },
 }
@@ -93,19 +99,19 @@ impl Session {
                 b.create_database(&name, &charset).map(|()| 0)
             });
             WriteResult {
-                write: Write::CreateDatabase,
+                write: Write::CreateDatabase { name },
                 log,
                 result: result.map(drop),
             }
         });
     }
 
-    pub(super) fn create_table(&mut self, db: String, sql: String) {
+    pub(super) fn create_table(&mut self, db: String, name: String, sql: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
             let result = logged(&mut log, sql.clone(), || b.execute_write(&sql));
             WriteResult {
-                write: Write::CreateTable { db },
+                write: Write::CreateTable { db, name },
                 log,
                 result: result.map(drop),
             }
@@ -190,7 +196,7 @@ impl Session {
                 result = logged(&mut log, copy.clone(), || b.execute_write(&copy));
             }
             WriteResult {
-                write: Write::CloneTable { db },
+                write: Write::CloneTable { db, name },
                 log,
                 result: result.map(drop),
             }
@@ -223,16 +229,22 @@ impl Session {
             self.table_view.pending_edits.len(),
             self.table_view.pending_inserts.len()
         );
+        let count = self.pending_count();
         self.table_view.editing_cell = None;
         self.table_view.saving = true;
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let count = stmts.len() as u64;
+            let statements = stmts.len() as u64;
             let result = logged(&mut log, summary, || {
-                b.execute_transaction(&stmts).map(|()| count)
+                b.execute_transaction(&stmts).map(|()| statements)
             });
             WriteResult {
-                write: Write::Commit { db, table, then },
+                write: Write::Commit {
+                    db,
+                    table,
+                    count,
+                    then,
+                },
                 log,
                 result: result.map(drop),
             }
@@ -243,8 +255,7 @@ impl Session {
         match then {
             AfterCommit::ReloadData => {
                 if let Some(SelectedNode::Table { db, table }) = self.schema.selected_node.clone() {
-                    let sql = self.build_sql(sh, &db, &table);
-                    self.run_query_async(sql);
+                    self.load_table(sh, &db, &table);
                 }
             }
             AfterCommit::Reload(reload) => self.reload_now(sh, reload),
@@ -263,27 +274,36 @@ impl Session {
             self.push_log(entry);
         }
         match (done.write, done.result) {
-            (Write::CreateDatabase, Ok(())) => {
+            (Write::CreateDatabase { name }, Ok(())) => {
                 self.close_form(|m| matches!(m, ModalState::CreateDatabase { .. }));
                 self.schema.databases = Loadable::NotLoaded;
                 self.schema.databases_info = Loadable::NotLoaded;
+                sh.toasts.success(format!("Base de datos «{name}» creada"));
             }
-            (Write::CreateTable { db }, Ok(())) => {
+            (Write::CreateTable { db, name }, Ok(())) => {
                 self.close_form(|m| matches!(m, ModalState::CreateTable { .. }));
                 self.invalidate_schema(&db);
+                sh.toasts.success(format!("Tabla «{db}.{name}» creada"));
             }
-            (Write::CloneTable { db }, Ok(())) => {
+            (Write::CloneTable { db, name }, Ok(())) => {
                 self.close_form(|m| matches!(m, ModalState::CloneTable { .. }));
                 self.invalidate_schema(&db);
+                sh.toasts.success(format!("Tabla «{db}.{name}» creada"));
             }
             (
-                Write::CreateDatabase | Write::CreateTable { .. } | Write::CloneTable { .. },
+                Write::CreateDatabase { .. } | Write::CreateTable { .. } | Write::CloneTable { .. },
                 Err(e),
             ) => {
                 self.show_form_error(e);
             }
-            (Write::DropDatabase { db }, Ok(())) => self.on_dropped(&db, None),
-            (Write::DropTable { db, table }, Ok(())) => self.on_dropped(&db, Some(&table)),
+            (Write::DropDatabase { db }, Ok(())) => {
+                self.on_dropped(&db, None);
+                sh.toasts.success(format!("Base de datos «{db}» eliminada"));
+            }
+            (Write::DropTable { db, table }, Ok(())) => {
+                self.on_dropped(&db, Some(&table));
+                sh.toasts.success(format!("Tabla «{db}.{table}» eliminada"));
+            }
             (Write::DropDatabase { db }, Err(message)) => {
                 self.show_error(format!("No se pudo eliminar «{db}»"), message);
             }
@@ -302,13 +322,30 @@ impl Session {
                         format!("No se pudieron vaciar todas las tablas de «{db}»"),
                         failed.join("\n"),
                     );
+                } else {
+                    sh.toasts.success(match tables.as_slice() {
+                        [table] => format!("Tabla «{db}.{table}» vaciada"),
+                        tables => format!("{} tablas de «{db}» vaciadas", tables.len()),
+                    });
                 }
             }
-            (Write::Commit { db, table, then }, result) => {
+            (
+                Write::Commit {
+                    db,
+                    table,
+                    count,
+                    then,
+                },
+                result,
+            ) => {
                 self.table_view.saving = false;
                 match result {
                     Ok(()) => {
                         self.discard_pending();
+                        sh.toasts.success(match count {
+                            1 => format!("1 cambio guardado en «{table}»"),
+                            n => format!("{n} cambios guardados en «{table}»"),
+                        });
                         // Si entretanto se abrió otra tabla, lo que esperaba ya no aplica
                         let still_open = matches!(
                             &self.schema.selected_node,

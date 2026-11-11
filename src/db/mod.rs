@@ -53,12 +53,22 @@ impl Default for ConnectionParams {
 
 pub type DbResult<T> = Result<T, String>;
 
+/// Señal para cancelar una ejecución del editor SQL: la comparten quien la
+/// lanza y quien la cancela (`DbBackend::cancel_in_session`).
+pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
+
+/// Error con el que termina una ejecución del editor cancelada.
+pub const QUERY_CANCELLED: &str = "Consulta cancelada.";
+
 /// Sentencia con parámetros posicionales (`?`). Los valores viajan aparte
 /// del SQL: no hace falta escaparlos y llegan intactos (`None` = NULL).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
     pub sql: String,
     pub params: Vec<Option<String>>,
+    /// La sentencia cambia una fila concreta (UPDATE o DELETE por clave
+    /// primaria): si no encuentra exactamente una, la transacción se deshace.
+    pub single_row: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -158,12 +168,20 @@ pub trait DbBackend: Send + Sync {
     /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
     /// tablas temporales siguen vivas en la siguiente. Con `db`, antes `USE`.
     /// Lee como mucho `max_rows` filas (el resto se descarta, `truncated`).
+    /// Con `cancel` activada (antes de empezar o mientras se ejecuta, ver
+    /// `cancel_in_session`) termina con el error `QUERY_CANCELLED`.
     fn execute_in_session(
         &self,
         db: Option<&str>,
         sql: &str,
         max_rows: usize,
+        cancel: &CancelFlag,
     ) -> DbResult<QueryResult>;
+
+    /// Cancela la ejecución de `execute_in_session` que recibió `cancel`: si
+    /// ya está en el servidor, la interrumpe allí; si espera su turno, no
+    /// llega a empezar. La conexión del editor y su estado se conservan.
+    fn cancel_in_session(&self, cancel: &CancelFlag) -> DbResult<()>;
 
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
@@ -181,7 +199,8 @@ pub trait DbBackend: Send + Sync {
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
-    /// Si alguna falla se hace ROLLBACK y se devuelve el error.
+    /// Si alguna falla, o una `single_row` no encuentra su fila, se hace
+    /// ROLLBACK y se devuelve el error.
     fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
 }
 

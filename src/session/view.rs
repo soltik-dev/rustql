@@ -6,9 +6,10 @@ use eframe::egui;
 use super::schema::show_loading;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::loadable::Loadable;
+use crate::ui::connection_panel::SaveProfile;
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
-use crate::ui::results_grid::{GridAction, SortSpec};
+use crate::ui::results_grid::{ApplyBarAction, GridAction};
 use crate::ui::sidebar::SidebarOutput;
 use crate::ui::sql_editor::SqlEditorAction;
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
@@ -23,7 +24,7 @@ pub(super) struct FrameSignals {
     // Formulario de conexión
     pub connect: bool,
     pub cancel_connect: bool,
-    pub save_profile: bool,
+    pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
     pub profile_selected: Option<usize>,
     // Conectado
@@ -31,7 +32,7 @@ pub(super) struct FrameSignals {
     pub tab_bar: TabBarResult,
     pub filter: FilterAction,
     pub grid: GridAction,
-    pub apply_bar: GridAction,
+    pub apply_bar: ApplyBarAction,
     pub db_info: DbInfoAction,
     pub sql: SqlEditorAction,
 }
@@ -58,14 +59,13 @@ impl Session {
         sh: &Shared,
         keys: FrameKeys,
         show_sidebar: bool,
-        sorts_before: &[SortSpec],
     ) -> FrameSignals {
         let mut signals = FrameSignals::default();
         match &self.state {
             ConnState::Disconnected => self.draw_form(ui, sh, &mut signals),
             ConnState::Connecting { .. } => self.draw_connecting(ui, sh, &mut signals),
             ConnState::Connected(_) => {
-                self.draw_connected(ui, sh, keys, show_sidebar, sorts_before, &mut signals)
+                self.draw_connected(ui, sh, keys, show_sidebar, &mut signals)
             }
         }
         signals
@@ -159,7 +159,6 @@ impl Session {
         sh: &Shared,
         keys: FrameKeys,
         show_sidebar: bool,
-        sorts_before: &[SortSpec],
         signals: &mut FrameSignals,
     ) {
         let sid = self.id;
@@ -171,30 +170,31 @@ impl Session {
 
         // ── Sidebar ───────────────────────────────────────────────
         if show_sidebar {
-            let (sel_db, sel_table) = match &self.schema.selected_node {
-                Some(SelectedNode::Table { db, table }) => {
-                    (Some(db.as_str()), Some(table.as_str()))
-                }
-                Some(SelectedNode::Database(db)) => (Some(db.as_str()), None),
-                _ => (None, None),
-            };
+            // Sobre el campo, no sobre el esquema entero: el buscador del
+            // sidebar lo toma prestado a la vez
+            let selected = self.schema.selected_node.as_ref();
+            let sel_db = selected.and_then(SelectedNode::db);
+            let sel_table = selected.and_then(SelectedNode::table).map(|(_, t)| t);
 
             let sidebar_panel = egui::Panel::left("sidebar_v2")
                 .default_size(200.0)
                 .min_size(160.0)
                 .show(ui, |ui| {
                     ui.push_id(sid, |ui| {
+                        let view = sidebar::SidebarView {
+                            databases: &self.schema.databases,
+                            tables: &self.schema.tables_cache,
+                            selected_db: sel_db,
+                            selected_table: sel_table,
+                            favorites: &sh.settings.fav_tables,
+                            server_name: &self.title,
+                            conn_color,
+                        };
                         sidebar::show(
                             ui,
-                            &self.schema.databases,
-                            &self.schema.tables_cache,
-                            sel_db,
-                            sel_table,
+                            &view,
                             &mut self.schema.table_search,
-                            &sh.settings.fav_tables,
                             &mut self.show_only_fav,
-                            &self.title,
-                            conn_color,
                         )
                     })
                     .inner
@@ -215,21 +215,19 @@ impl Session {
         }
 
         // ── Tab bar ───────────────────────────────────────────────
-        let has_db = matches!(
-            &self.schema.selected_node,
-            Some(SelectedNode::Database(_) | SelectedNode::Table { .. })
-        );
-        let has_table = matches!(&self.schema.selected_node, Some(SelectedNode::Table { .. }));
-
         {
-            let db_name_tab = match &self.schema.selected_node {
-                Some(SelectedNode::Database(d)) => Some(d.clone()),
-                Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                _ => None,
-            };
-            let table_name_tab = match &self.schema.selected_node {
-                Some(SelectedNode::Table { table, .. }) => Some(table.clone()),
-                _ => None,
+            let sql_titles: Vec<String> = self
+                .sql_tabs
+                .iter()
+                .enumerate()
+                .map(|(i, tab)| tab.title(i))
+                .collect();
+            let view = tab_bar::TabBarView {
+                active: self.active_tab,
+                server_name: &self.title,
+                db_name: self.schema.selected_db(),
+                table_name: self.schema.selected_table().map(|(_, table)| table),
+                sql_titles: &sql_titles,
             };
 
             egui::Panel::top("tab_bar")
@@ -238,16 +236,7 @@ impl Session {
                 .show(ui, |ui| {
                     ui.push_id(sid, |ui| {
                         ui.add_space(2.0);
-                        signals.tab_bar = tab_bar::show(
-                            ui,
-                            self.active_tab,
-                            has_db,
-                            has_table,
-                            &self.title,
-                            db_name_tab.as_deref(),
-                            table_name_tab.as_deref(),
-                            self.sql_tabs.len(),
-                        );
+                        signals.tab_bar = tab_bar::show(ui, &view, &mut self.sql_tab_rename);
                     });
                 });
         }
@@ -284,12 +273,7 @@ impl Session {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.push_id(sid, |ui| match self.active_tab {
                 ActiveTab::Datos => {
-                    let selected_table = match &self.schema.selected_node {
-                        Some(SelectedNode::Table { db, table }) => {
-                            Some((db.as_str(), table.as_str()))
-                        }
-                        _ => None,
-                    };
+                    let selected_table = self.schema.selected_table();
                     if selected_table.is_some() {
                         let action = filter_bar::show(
                             ui,
@@ -316,8 +300,6 @@ impl Session {
                     );
                     if !running {
                         signals.grid = action;
-                    } else if matches!(action, GridAction::SortChanged) {
-                        self.table_view.sort_specs = sorts_before.to_vec();
                     }
                 }
 
@@ -327,12 +309,7 @@ impl Session {
                 },
 
                 ActiveTab::Bbdd => {
-                    let db_name = match &self.schema.selected_node {
-                        Some(SelectedNode::Database(d)) => Some(d.clone()),
-                        Some(SelectedNode::Table { db, .. }) => Some(db.clone()),
-                        _ => None,
-                    };
-                    if let Some(db) = &db_name {
+                    if let Some(db) = self.schema.selected_db() {
                         match self.schema.tables_info.get(db) {
                             Some(Loadable::Ready(tables)) => {
                                 signals.db_info = db_info::show(ui, db, tables);
@@ -366,15 +343,7 @@ impl Session {
                     if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
                         let databases =
                             self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
-                        signals.sql = sql_editor::show(
-                            ui,
-                            &mut tab.sql_text,
-                            &tab.result,
-                            tab.running.is_some(),
-                            ctrl_enter || f9,
-                            &mut tab.db_context,
-                            databases,
-                        );
+                        signals.sql = sql_editor::show(ui, tab, ctrl_enter || f9, databases);
                     }
                 }
             });
