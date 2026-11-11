@@ -18,6 +18,27 @@ pub struct TabBarResult {
     pub tab_clicked: Option<ActiveTab>,
     pub new_sql_tab: bool,
     pub close_sql_tab: Option<usize>,
+    /// Nombre nuevo de una pestaña SQL (vacío: vuelve a «SQL n»).
+    pub renamed: Option<(usize, String)>,
+}
+
+/// Pestaña SQL cuyo nombre se está editando en la propia barra.
+#[derive(Debug)]
+pub struct TabRename {
+    pub idx: usize,
+    pub buffer: String,
+    /// Primer frame: el campo aún tiene que tomar el foco.
+    needs_focus: bool,
+}
+
+impl TabRename {
+    pub fn new(idx: usize, name: String) -> Self {
+        Self {
+            idx,
+            buffer: name,
+            needs_focus: true,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -29,9 +50,14 @@ pub fn show(
     server_name: &str,
     db_name: Option<&str>,
     table_name: Option<&str>,
-    sql_tab_count: usize,
+    sql_titles: &[String],
+    rename: &mut Option<TabRename>,
 ) -> TabBarResult {
     let mut result = TabBarResult::default();
+    // La pestaña que se renombraba ya no existe
+    if rename.as_ref().is_some_and(|r| r.idx >= sql_titles.len()) {
+        *rename = None;
+    }
 
     ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
     ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
@@ -71,13 +97,30 @@ pub fn show(
         tab_separator(ui);
 
         // SQL tabs
-        for i in 0..sql_tab_count {
+        for (i, title) in sql_titles.iter().enumerate() {
+            if rename.as_ref().is_some_and(|r| r.idx == i) {
+                rename_field(ui, rename, &mut result);
+                continue;
+            }
             let is_active = active == ActiveTab::Sql(i);
-            let label = format!("{CODE} SQL {}", i + 1);
+            let label = format!("{CODE} {}", ellipsize(title, 24));
             let tab = tab_btn(ui, &label, is_active, true);
             if tab.clicked() {
                 result.tab_clicked = Some(ActiveTab::Sql(i));
             }
+            if tab.double_clicked() {
+                *rename = Some(TabRename::new(i, title.clone()));
+            }
+            tab.context_menu(|ui| {
+                if ui.button(format!("{EDIT}  Renombrar")).clicked() {
+                    *rename = Some(TabRename::new(i, title.clone()));
+                    ui.close();
+                }
+                if ui.button(format!("×  Cerrar  {CMD}W")).clicked() {
+                    result.close_sql_tab = Some(i);
+                    ui.close();
+                }
+            });
             let close_resp = ui
                 .add(egui::Button::new("×").small().frame(false))
                 .on_hover_text(format!(
@@ -100,6 +143,30 @@ pub fn show(
     });
 
     result
+}
+
+/// Campo en el que se edita el nombre de una pestaña SQL, en su sitio de la
+/// barra. Enter o salir del campo lo confirma; Escape lo deja como estaba.
+fn rename_field(ui: &mut egui::Ui, rename: &mut Option<TabRename>, result: &mut TabBarResult) {
+    let Some(state) = rename else {
+        return;
+    };
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut state.buffer)
+            .desired_width(130.0)
+            .hint_text("Nombre de la pestaña"),
+    );
+    if state.needs_focus {
+        state.needs_focus = false;
+        resp.request_focus();
+        return;
+    }
+    if resp.lost_focus() {
+        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            result.renamed = Some((state.idx, state.buffer.trim().to_string()));
+        }
+        *rename = None;
+    }
 }
 
 fn tab_separator(ui: &mut egui::Ui) {

@@ -144,12 +144,15 @@ pub enum ModalState {
     /// El usuario cierra una pestaña SQL que tiene texto.
     ConfirmCloseSqlTab {
         idx: usize,
+        /// Título de la pestaña.
+        title: String,
         /// Principio de la consulta, para reconocerla.
         preview: String,
     },
     /// El usuario pulsa «Limpiar» en una pestaña SQL que tiene texto.
     ConfirmClearSql {
         idx: usize,
+        title: String,
         preview: String,
     },
     CloneTable {
@@ -366,16 +369,24 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             pending_count,
         } => show_confirm_close_session(ctx, title, *pending_count),
         ModalState::ConfirmDeleteProfile { name } => show_confirm_delete_profile(ctx, name),
-        ModalState::ConfirmCloseSqlTab { idx, preview } => show_confirm_discard_sql(
+        ModalState::ConfirmCloseSqlTab {
+            idx,
+            title,
+            preview,
+        } => show_confirm_discard_sql(
             ctx,
-            &format!("Cerrar SQL {}", *idx + 1),
+            &format!("Cerrar «{title}»"),
             "Cerrar pestaña",
             preview,
             ModalAction::CloseSqlTab(*idx),
         ),
-        ModalState::ConfirmClearSql { idx, preview } => show_confirm_discard_sql(
+        ModalState::ConfirmClearSql {
+            idx,
+            title,
+            preview,
+        } => show_confirm_discard_sql(
             ctx,
-            &format!("Limpiar SQL {}", *idx + 1),
+            &format!("Limpiar «{title}»"),
             "Limpiar",
             preview,
             ModalAction::ClearSql(*idx),

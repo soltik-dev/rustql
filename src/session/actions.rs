@@ -147,6 +147,13 @@ impl Session {
             self.active_tab = t;
         }
 
+        if let Some((idx, name)) = tab_bar.renamed
+            && let Some(tab) = self.sql_tabs.get_mut(idx)
+        {
+            tab.name = (!name.is_empty()).then_some(name);
+            self.save_tabs_state(sh);
+        }
+
         if tab_bar.new_sql_tab || (keys.ctrl_t && self.is_connected()) {
             self.open_sql_tab(sh, None, String::new());
         }
@@ -160,6 +167,7 @@ impl Session {
             } else {
                 self.modal = ModalState::ConfirmCloseSqlTab {
                     idx,
+                    title: tab.title(idx),
                     preview: crate::ui::ellipsize(tab.sql_text.trim(), 120),
                 };
             }
@@ -186,6 +194,8 @@ impl Session {
         }
         // Su consulta, si aún se está ejecutando, ya no le interesa a nadie
         self.cancel_editor(idx);
+        // Los índices cambian: el nombre a medio escribir no se aplica
+        self.sql_tab_rename = None;
         self.sql_tabs.remove(idx);
         if self.sql_tabs.is_empty() {
             self.sql_tabs.push(SqlTab::default());
@@ -431,6 +441,7 @@ impl Session {
                 if let Some(tab) = self.sql_tabs.get(tab_idx) {
                     self.modal = ModalState::ConfirmClearSql {
                         idx: tab_idx,
+                        title: tab.title(tab_idx),
                         preview: crate::ui::ellipsize(tab.sql_text.trim(), 120),
                     };
                 }

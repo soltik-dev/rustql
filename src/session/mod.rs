@@ -30,7 +30,7 @@ use crate::ui::results_grid::{
     InsertValue, PendingEdit, PendingInsert, RowRef, SortDir, TableViewState,
 };
 use crate::ui::sql_editor::SqlTab;
-use crate::ui::tab_bar::ActiveTab;
+use crate::ui::tab_bar::{ActiveTab, TabRename};
 
 // ── Estados de la conexión ───────────────────────────────────────────────────
 
@@ -158,6 +158,8 @@ pub struct Session {
     // Pestañas
     pub active_tab: ActiveTab,
     pub sql_tabs: Vec<SqlTab>,
+    /// Pestaña SQL que se está renombrando en la barra, si hay alguna.
+    pub sql_tab_rename: Option<TabRename>,
 
     // Formulario de conexión / perfiles
     pub selected_profile_idx: Option<usize>,
@@ -194,6 +196,7 @@ impl Session {
             show_only_fav: false,
             active_tab: ActiveTab::default(),
             sql_tabs: vec![SqlTab::default()],
+            sql_tab_rename: None,
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,

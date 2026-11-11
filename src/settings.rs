@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Pestaña SQL guardada (sin resultado, solo texto y contexto de BD).
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct SavedSqlTab {
+    /// Nombre que le dio el usuario (ver SqlTab::name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub db_context: String,
     pub sql_text: String,
     /// Alto que el usuario le dio al editor (ver SqlTab::editor_height).

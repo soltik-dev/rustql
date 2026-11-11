@@ -216,6 +216,12 @@ impl Session {
             let db_name_tab = self.schema.selected_db();
             let table_name_tab = self.schema.selected_table().map(|(_, table)| table);
             let (has_db, has_table) = (db_name_tab.is_some(), table_name_tab.is_some());
+            let sql_titles: Vec<String> = self
+                .sql_tabs
+                .iter()
+                .enumerate()
+                .map(|(i, tab)| tab.title(i))
+                .collect();
 
             egui::Panel::top("tab_bar")
                 .min_size(30.0)
@@ -231,7 +237,8 @@ impl Session {
                             &self.title,
                             db_name_tab,
                             table_name_tab,
-                            self.sql_tabs.len(),
+                            &sql_titles,
+                            &mut self.sql_tab_rename,
                         );
                     });
                 });

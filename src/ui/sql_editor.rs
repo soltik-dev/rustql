@@ -20,6 +20,8 @@ pub struct SqlTab {
     /// Único en la aplicación: separa el estado de sus widgets (cursor del
     /// editor, deshacer, scroll) del de las demás pestañas.
     uid: u64,
+    /// Nombre que le dio el usuario; sin él se llama «SQL n».
+    pub name: Option<String>,
     pub db_context: String,
     pub sql_text: String,
     pub result: Option<Result<QueryResult, String>>,
@@ -45,6 +47,7 @@ impl Default for SqlTab {
         static NEXT_UID: AtomicU64 = AtomicU64::new(1);
         Self {
             uid: NEXT_UID.fetch_add(1, Ordering::Relaxed),
+            name: None,
             db_context: String::new(),
             sql_text: String::new(),
             result: None,
@@ -72,6 +75,7 @@ impl SqlTab {
     /// Pestaña guardada en los ajustes, sin resultado.
     pub fn restore(saved: &SavedSqlTab) -> Self {
         Self {
+            name: saved.name.clone(),
             editor_height: saved.editor_height,
             ..Self::new(saved.db_context.clone(), saved.sql_text.clone())
         }
@@ -80,10 +84,18 @@ impl SqlTab {
     /// Lo que se guarda de la pestaña en los ajustes.
     pub fn saved(&self) -> SavedSqlTab {
         SavedSqlTab {
+            name: self.name.clone(),
             db_context: self.db_context.clone(),
             sql_text: self.sql_text.clone(),
             editor_height: self.editor_height,
         }
+    }
+
+    /// Título de la pestaña que ocupa la posición `idx`.
+    pub fn title(&self, idx: usize) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("SQL {}", idx + 1))
     }
 
     /// Lo que ejecutaría la pestaña ahora: la selección del editor si la hay

@@ -918,6 +918,29 @@ fn limpiar_el_editor_pregunta_y_luego_guarda_la_pestana_vacia() {
 }
 
 #[test]
+fn renombrar_una_pestana_sql_se_guarda_y_vacio_vuelve_al_numero() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    let ctx = egui::Context::default();
+    let rename = |name: &str| FrameSignals {
+        tab_bar: crate::ui::tab_bar::TabBarResult {
+            renamed: Some((0, name.to_string())),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    s.apply_signals(&ctx, &mut sh, rename("Informe"), FrameKeys::default());
+    assert_eq!(s.sql_tabs[0].title(0), "Informe");
+    let saved = &sh.settings.sql_tabs_by_conn[&s.params.key()];
+    assert_eq!(saved[0].name.as_deref(), Some("Informe"));
+    // Al reconectar se restaura con su nombre
+    assert_eq!(SqlTab::restore(&saved[0]).title(3), "Informe");
+
+    s.apply_signals(&ctx, &mut sh, rename(""), FrameKeys::default());
+    assert_eq!(s.sql_tabs[0].title(0), "SQL 1");
+}
+
+#[test]
 fn una_consulta_del_log_se_abre_en_una_pestana_sql_nueva() {
     let mut s = session_with_table();
     let mut sh = shared();
