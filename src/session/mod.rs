@@ -371,7 +371,7 @@ impl Session {
         self.query_log.push_back(entry);
     }
 
-    fn build_sql(&self, sh: &Shared, db: &str, table: &str) -> String {
+    fn build_sql(&self, db: &str, table: &str) -> String {
         let filter = self.table_view.filter_text.trim();
 
         let order_by = if self.table_view.sort_specs.is_empty() {
@@ -393,20 +393,32 @@ impl Session {
             format!(" ORDER BY {}", parts.join(", "))
         };
 
-        let limit = sh.settings.query_limit;
-        if filter.is_empty() {
-            format!(
-                "SELECT * FROM {}{} LIMIT {limit}",
-                qualified(db, table),
-                order_by
-            )
-        } else {
-            format!(
-                "SELECT * FROM {} WHERE {filter}{} LIMIT {limit}",
-                qualified(db, table),
-                order_by
-            )
+        // Una fila de más: si llega, es que hay otra página (apply_table_data
+        // la quita antes de mostrar los datos)
+        let tv = &self.table_view;
+        let mut limit = format!(" LIMIT {}", tv.page_size + 1);
+        if tv.page > 0 {
+            limit.push_str(&format!(" OFFSET {}", tv.page * tv.page_size));
         }
+        let from = qualified(db, table);
+        if filter.is_empty() {
+            format!("SELECT * FROM {from}{order_by}{limit}")
+        } else {
+            format!("SELECT * FROM {from} WHERE {filter}{order_by}{limit}")
+        }
+    }
+
+    /// Pide al servidor la página actual de la tabla, con su filtro y su
+    /// ordenación. El tamaño de página es el límite de los ajustes; si ha
+    /// cambiado, las páginas ya no son las mismas y se vuelve a la primera.
+    fn load_table(&mut self, sh: &Shared, db: &str, table: &str) {
+        let page_size = sh.settings.query_limit.max(1);
+        if self.table_view.page_size != page_size {
+            self.table_view.page_size = page_size;
+            self.table_view.page = 0;
+        }
+        let sql = self.build_sql(db, table);
+        self.run_query_async(sql);
     }
 
     /// Tras escribir en `db` (crear, clonar, vaciar…): descarta sus cachés de
@@ -679,10 +691,17 @@ impl Session {
         // La celda en edición también va por posición.
         self.table_view.editing_cell = None;
         match reload {
+            // Con otra ordenación u otro filtro las páginas son otras: se
+            // vuelve a la primera
             Reload::Sort(specs) => {
                 self.table_view.sort_specs = specs;
+                self.table_view.page = 0;
                 self.clear_row_selection();
                 self.save_table_state(sh);
+            }
+            Reload::Page(page) => {
+                self.table_view.page = page;
+                self.clear_row_selection();
             }
             Reload::Filter(filter) => {
                 if !filter.is_empty() {
@@ -692,6 +711,7 @@ impl Session {
                     history.truncate(20);
                 }
                 self.table_view.filter_text = filter;
+                self.table_view.page = 0;
                 self.clear_row_selection();
                 self.save_table_state(sh);
             }
@@ -704,8 +724,7 @@ impl Session {
                 self.request_structure(&db, &table);
             }
         }
-        let sql = self.build_sql(sh, &db, &table);
-        self.run_query_async(sql);
+        self.load_table(sh, &db, &table);
     }
 
     fn clear_row_selection(&mut self) {
@@ -771,8 +790,7 @@ impl Session {
         self.sync_primary_keys();
 
         // 6. Ejecutar query (server-side sort + filter restaurados)
-        let sql = self.build_sql(sh, &db, &table);
-        self.run_query_async(sql);
+        self.load_table(sh, &db, &table);
     }
 
     /// Guarda el texto de las pestañas SQL de esta conexión. Sin conexión no
@@ -927,7 +945,13 @@ impl Session {
         }
         self.table_view.query_loading = false;
         match result {
-            Ok(data) => {
+            Ok(mut data) => {
+                // La fila de más solo dice que hay otra página
+                let page_size = self.table_view.page_size;
+                self.table_view.has_more = page_size > 0 && data.rows.len() > page_size;
+                if self.table_view.has_more {
+                    data.rows.truncate(page_size);
+                }
                 // Toda recarga pasa por request_reload, que antes resuelve
                 // los cambios pendientes. Si alguna se lo salta, mejor
                 // perderlos que aplicarlos a las filas que ahora ocupan

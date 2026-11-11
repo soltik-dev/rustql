@@ -5,7 +5,7 @@ use super::*;
 use crate::db::{CancelFlag, ColumnInfo, DatabaseInfo, DbResult, QUERY_CANCELLED, TableInfo};
 use crate::ui::connection_panel::SaveProfile;
 use crate::ui::modals::NewColumnDef;
-use crate::ui::results_grid::GridAction;
+use crate::ui::results_grid::{GridAction, SortSpec};
 use crate::ui::sql_editor::SqlEditorAction;
 
 /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
@@ -917,6 +917,147 @@ fn limpiar_el_editor_pregunta_y_luego_guarda_la_pestana_vacia() {
     s.handle_modal_action(ModalAction::ClearSql(0), &mut sh);
     assert!(s.sql_tabs[0].sql_text.is_empty());
     assert_eq!(saved_sql(&s, &sh), [""]);
+}
+
+#[test]
+fn la_tabla_se_pide_por_paginas_con_una_fila_de_mas() {
+    let mut s = session_with_table();
+    s.table_view.page_size = 2;
+    assert_eq!(s.build_sql("db", "t"), "SELECT * FROM `db`.`t` LIMIT 3");
+    s.table_view.page = 2;
+    s.table_view.filter_text = "id > 0".into();
+    s.table_view.sort_specs = vec![SortSpec {
+        col_idx: 0,
+        col_name: "id".into(),
+        dir: SortDir::Desc,
+    }];
+    assert_eq!(
+        s.build_sql("db", "t"),
+        "SELECT * FROM `db`.`t` WHERE id > 0 ORDER BY `id` DESC LIMIT 3 OFFSET 4"
+    );
+}
+
+/// Llegan estos datos para la consulta en curso de la tabla.
+fn receive(s: &mut Session, sh: &mut Shared, ids: &[&str]) {
+    s.apply_job(
+        sh,
+        JobResult::TableData {
+            generation: s.table_view.data_generation,
+            sql: String::new(),
+            elapsed_ms: 0,
+            result: Ok(data(ids)),
+        },
+    );
+}
+
+#[test]
+fn la_fila_de_mas_dice_que_hay_otra_pagina_y_no_se_muestra() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    s.table_view.page_size = 2;
+    receive(&mut s, &mut sh, &["1", "2", "3"]);
+    assert!(s.table_view.has_more);
+    assert_eq!(s.table_view.table_data.as_ref().unwrap().rows.len(), 2);
+    receive(&mut s, &mut sh, &["3", "4"]);
+    assert!(!s.table_view.has_more, "justo una página: no hay más");
+    assert_eq!(s.table_view.table_data.as_ref().unwrap().rows.len(), 2);
+}
+
+#[test]
+fn cambiar_de_pagina_con_cambios_pregunta_y_ordenar_vuelve_a_la_primera() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    // La tabla ya está cargada con páginas de 2 filas
+    sh.settings.query_limit = 2;
+    s.table_view.page_size = 2;
+    let ctx = egui::Context::default();
+    let go = |page| FrameSignals {
+        grid: GridAction::PageChanged(page),
+        ..Default::default()
+    };
+
+    s.apply_signals(&ctx, &mut sh, go(1), FrameKeys::default());
+    assert_eq!((s.table_view.page, s.table_view.page_size), (1, 2));
+    assert!(s.table_view.query_loading);
+    receive(&mut s, &mut sh, &["3", "4", "5"]);
+
+    // Los cambios van por posición de fila: con otra página no valdrían
+    s.table_view.pending_deletes.insert(0);
+    s.apply_signals(&ctx, &mut sh, go(2), FrameKeys::default());
+    assert_eq!(s.table_view.page, 1, "hasta decidir, la misma página");
+    assert!(matches!(
+        s.modal,
+        ModalState::ConfirmReload {
+            reload: Reload::Page(2),
+            ..
+        }
+    ));
+    s.handle_modal_action(ModalAction::DiscardAndReload(Reload::Page(2)), &mut sh);
+    assert_eq!(s.table_view.page, 2);
+    assert_eq!(s.pending_count(), 0);
+
+    // Otra ordenación (u otro filtro): las páginas ya no son las mismas
+    s.reload_now(&mut sh, Reload::Sort(Vec::new()));
+    assert_eq!(s.table_view.page, 0);
+    s.table_view.page = 3;
+    s.reload_now(&mut sh, Reload::Filter("id > 1".into()));
+    assert_eq!(s.table_view.page, 0);
+    // F5 se queda donde está
+    s.table_view.page = 3;
+    s.reload_now(&mut sh, Reload::Refresh);
+    assert_eq!(s.table_view.page, 3);
+
+    // Con otro tamaño de página en los ajustes, a la primera
+    sh.settings.query_limit = 50;
+    s.reload_now(&mut sh, Reload::Refresh);
+    assert_eq!((s.table_view.page, s.table_view.page_size), (0, 50));
+}
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_MYSQL"]
+fn paginas_contra_el_servidor() {
+    let b = crate::db::test_server::backend();
+    b.execute_write("DROP DATABASE IF EXISTS rustql_test_pages")
+        .unwrap();
+    b.execute_write("CREATE DATABASE rustql_test_pages")
+        .unwrap();
+    b.execute_write("CREATE TABLE rustql_test_pages.t (id INT PRIMARY KEY)")
+        .unwrap();
+    b.execute_write("INSERT INTO rustql_test_pages.t VALUES (1),(2),(3),(4),(5)")
+        .unwrap();
+    let mut s = Session::new(0);
+    let mut sh = shared();
+    sh.settings.query_limit = 2;
+    s.state = ConnState::Connected(Arc::new(b));
+    s.on_table_selected(&mut sh, "rustql_test_pages".into(), "t".into());
+    s.table_view.sort_specs = vec![SortSpec {
+        col_idx: 0,
+        col_name: "id".into(),
+        dir: SortDir::Asc,
+    }];
+
+    let mut pages = Vec::new();
+    for page in 0..3 {
+        s.reload_now(&mut sh, Reload::Page(page));
+        finish_jobs(&mut s, &mut sh);
+        let data = s.table_view.table_data.as_ref().expect("datos");
+        let ids: Vec<_> = data.rows.iter().map(|r| r[0].clone().unwrap()).collect();
+        pages.push((ids, s.table_view.has_more));
+    }
+    let ConnState::Connected(b) = &s.state else {
+        unreachable!()
+    };
+    b.execute_write("DROP DATABASE rustql_test_pages").unwrap();
+
+    let page = |ids: &[&str], more| (ids.iter().map(|s| s.to_string()).collect(), more);
+    assert_eq!(
+        pages,
+        [
+            page(&["1", "2"], true),
+            page(&["3", "4"], true),
+            page(&["5"], false)
+        ]
+    );
 }
 
 #[test]

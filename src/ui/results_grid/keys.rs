@@ -101,6 +101,21 @@ pub(super) fn handle(
     if g.editable && ctrl && pressed(egui::Key::Insert) {
         return GridAction::InsertRow;
     }
+    // Alt+Av Pág y Alt+Re Pág: página siguiente y anterior de la tabla
+    if let Some(pager) = g.pager
+        && ui.input(|i| i.modifiers.alt)
+    {
+        let target = if pressed(egui::Key::PageDown) {
+            pager.next()
+        } else if pressed(egui::Key::PageUp) {
+            pager.previous()
+        } else {
+            None
+        };
+        if let Some(page) = target {
+            return GridAction::PageChanged(page);
+        }
+    }
     if rows == 0 || cols == 0 {
         return GridAction::None;
     }

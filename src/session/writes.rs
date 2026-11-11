@@ -255,8 +255,7 @@ impl Session {
         match then {
             AfterCommit::ReloadData => {
                 if let Some(SelectedNode::Table { db, table }) = self.schema.selected_node.clone() {
-                    let sql = self.build_sql(sh, &db, &table);
-                    self.run_query_async(sql);
+                    self.load_table(sh, &db, &table);
                 }
             }
             AfterCommit::Reload(reload) => self.reload_now(sh, reload),

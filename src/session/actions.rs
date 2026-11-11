@@ -283,6 +283,7 @@ impl Session {
                     copy_rows(ctx, sh, data, rows, &fmt, table);
                 }
             }
+            GridAction::PageChanged(page) => self.request_reload(sh, Reload::Page(page)),
             GridAction::None => {}
         }
     }

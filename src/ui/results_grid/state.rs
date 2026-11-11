@@ -174,6 +174,8 @@ pub enum GridAction {
     },
     /// Copia las filas seleccionadas; sin formato, en el de los ajustes.
     CopyRows(Option<CopyFormat>),
+    /// Ir a otra página de la tabla (0 = la primera).
+    PageChanged(usize),
 }
 
 // ── Selección ────────────────────────────────────────────────────────────────
@@ -381,6 +383,12 @@ pub struct TableViewState {
     /// Se incrementa con cada consulta de la tabla: los resultados de una
     /// anterior que lleguen tarde se descartan.
     pub data_generation: u64,
+    /// Página de la tabla que se muestra (0 = la primera).
+    pub page: usize,
+    /// Filas por página con las que se pidieron los datos.
+    pub page_size: usize,
+    /// Hay más filas después de esta página.
+    pub has_more: bool,
 }
 
 impl TableViewState {

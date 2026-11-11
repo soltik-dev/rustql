@@ -49,6 +49,32 @@ struct Grid<'a> {
     /// Los datos son los de una tabla: se puede ordenar y filtrar relanzando
     /// su consulta.
     queryable: bool,
+    /// Página de la tabla que se muestra, si los datos van por páginas.
+    pager: Option<Pager>,
+}
+
+/// Página de la tabla que muestra el grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pager {
+    /// 0 = la primera.
+    page: usize,
+    page_size: usize,
+    has_more: bool,
+}
+
+impl Pager {
+    /// Hay más de una página: tiene sentido enseñar por cuál se va.
+    fn paged(&self) -> bool {
+        self.page > 0 || self.has_more
+    }
+
+    fn previous(&self) -> Option<usize> {
+        self.page.checked_sub(1)
+    }
+
+    fn next(&self) -> Option<usize> {
+        self.has_more.then_some(self.page + 1)
+    }
 }
 
 /// Lo que muestra una celda.
@@ -182,14 +208,13 @@ impl<'a> Grid<'a> {
 
 /// Muestra los datos de la tabla abierta. Devuelve lo que el usuario pide
 /// hacer con ellos en este frame. Con `busy` (cargando o guardando) no se
-/// puede editar. `row_limit` es el LIMIT con el que se pidieron los datos.
+/// puede editar ni cambiar de página.
 pub fn show(
     ui: &mut egui::Ui,
     selected_table: Option<(&str, &str)>,
     view: &mut TableViewState,
     column_info: &[ColumnInfo],
     busy: bool,
-    row_limit: usize,
 ) -> GridAction {
     let Some((db, table)) = selected_table else {
         ui.centered_and_justified(|ui| {
@@ -218,12 +243,17 @@ pub fn show(
     // Sin la estructura (aún cargando) se supone que hay clave: si no la
     // hay, se sabrá antes de que dé tiempo a guardar nada
     let keyed = column_info.is_empty() || column_info.iter().any(|c| c.column_key == "PRI");
+    let pager = Pager {
+        page: view.page,
+        page_size: view.page_size,
+        has_more: view.has_more,
+    };
     let bar = InfoBar {
         name: format!("{db}.{table}"),
         data,
         sorts: &view.sort_specs,
         busy,
-        row_limit,
+        pager,
         keyed,
     };
     let bar_action = info_bar(ui, &bar);
@@ -245,6 +275,8 @@ pub fn show(
         editable: !busy,
         keyed,
         queryable: true,
+        // Mientras carga, la página que se ve ya no es la pedida
+        pager: (!busy).then_some(pager),
     };
     let out = show_grid(ui, &grid, &mut view.selection, &mut view.editing_cell);
 
@@ -280,6 +312,7 @@ pub fn show_read_only(
         editable: false,
         keyed: false,
         queryable: false,
+        pager: None,
     };
     let mut editing = None;
     show_grid(ui, &grid, sel, &mut editing).action
@@ -347,7 +380,7 @@ struct InfoBar<'a> {
     data: &'a QueryResult,
     sorts: &'a [SortSpec],
     busy: bool,
-    row_limit: usize,
+    pager: Pager,
     keyed: bool,
 }
 
@@ -359,7 +392,7 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
         data,
         sorts,
         busy,
-        row_limit,
+        pager,
         ..
     } = *bar;
     let mut action = GridAction::None;
@@ -367,16 +400,41 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
 
     ui.horizontal_wrapped(|ui| {
         ui.strong(&bar.name);
-        if data.rows.len() >= row_limit {
-            // La consulta lleva LIMIT: lo que se ve puede no ser todo
-            ui.label(
-                egui::RichText::new(format!("— primeras {} filas", data.rows.len()))
-                    .color(p.warning),
-            )
-            .on_hover_text(format!(
-                "La tabla puede tener más: solo se piden {row_limit} filas.\n\
-                 Filtra para acotar o sube el límite en Ajustes."
-            ));
+        if pager.paged() {
+            // La tabla no cabe en una página: cuáles se ven y cómo moverse
+            let first = pager.page * pager.page_size + 1;
+            let rows = if data.rows.is_empty() {
+                "— ninguna fila en esta página".to_string()
+            } else {
+                format!("— filas {first}–{}", first + data.rows.len() - 1)
+            };
+            ui.label(egui::RichText::new(rows).color(p.text_muted))
+                .on_hover_text(format!(
+                    "Se piden {} filas por página (se cambia en Ajustes).",
+                    pager.page_size
+                ));
+            let mut go = |ui: &mut egui::Ui, label: &str, hint: &str, page: Option<usize>| {
+                let button = ui
+                    .add_enabled(!busy && page.is_some(), egui::Button::new(label).small())
+                    .on_hover_text(hint);
+                if button.clicked()
+                    && let Some(page) = page
+                {
+                    action = GridAction::PageChanged(page);
+                }
+            };
+            go(
+                ui,
+                "‹ Anterior",
+                "Página anterior  Alt+Re Pág",
+                pager.previous(),
+            );
+            go(
+                ui,
+                "Siguiente ›",
+                "Página siguiente  Alt+Av Pág",
+                pager.next(),
+            );
         } else {
             ui.label(
                 egui::RichText::new(format!("— {} filas", data.rows.len())).color(p.text_muted),

@@ -300,7 +300,6 @@ impl Session {
                         col_info_slice,
                         // Con query en curso: spinner en el grid
                         running,
-                        sh.settings.query_limit,
                     );
                     if !running {
                         signals.grid = action;

@@ -84,7 +84,6 @@ impl Fixture {
                         &mut self.view,
                         &self.column_info,
                         self.busy,
-                        500,
                     );
                 });
             })
@@ -425,6 +424,43 @@ fn las_filas_eliminadas_y_las_columnas_auto_no_se_editan() {
 }
 
 #[test]
+fn alt_av_pag_y_re_pag_cambian_de_pagina() {
+    let mut f = Fixture::new(3);
+    f.focus();
+    let alt = egui::Modifiers::ALT;
+    // Una sola página: no hay adónde ir
+    assert!(matches!(
+        f.press_with(alt, egui::Key::PageDown),
+        GridAction::None
+    ));
+
+    f.view.page_size = 3;
+    f.view.has_more = true;
+    assert!(matches!(
+        f.press_with(alt, egui::Key::PageDown),
+        GridAction::PageChanged(1)
+    ));
+    assert!(matches!(
+        f.press_with(alt, egui::Key::PageUp),
+        GridAction::None
+    ));
+
+    f.view.page = 2;
+    f.view.has_more = false;
+    assert!(matches!(
+        f.press_with(alt, egui::Key::PageUp),
+        GridAction::PageChanged(1)
+    ));
+    assert!(matches!(
+        f.press_with(alt, egui::Key::PageDown),
+        GridAction::None
+    ));
+    // Sin Alt, Av Pág sigue moviendo el cursor dentro de la página
+    f.press(egui::Key::PageDown);
+    assert!(f.cursor().is_some());
+}
+
+#[test]
 fn sin_clave_primaria_solo_se_editan_las_filas_nuevas() {
     let mut f = Fixture::new(3);
     f.column_info[0].column_key.clear();
@@ -501,6 +537,7 @@ fn la_celda_muestra_el_cambio_pendiente() {
         editable: true,
         keyed: true,
         queryable: true,
+        pager: None,
     };
     let cell = |row, col| CellRef {
         row: RowRef::Existing(row),

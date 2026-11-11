@@ -83,6 +83,8 @@ pub enum Reload {
     Filter(String),
     /// F5: volver a leer los datos y la estructura.
     Refresh,
+    /// Otra página de la tabla (0 = la primera).
+    Page(usize),
 }
 
 // ── Estado de modal ──────────────────────────────────────────────────────────
@@ -926,18 +928,31 @@ fn show_confirm_reload(
     let mut action = ModalAction::None;
     let mut open = true;
 
+    // Los cambios van por posición de fila: con otros datos no valen
+    let (lost, save, discard) = match reload {
+        Reload::Page(_) => (
+            "Al cambiar de página se perderían.",
+            "Guardar y cambiar",
+            "Descartar y cambiar",
+        ),
+        _ => (
+            "Al recargar los datos se perderían.",
+            "Guardar y recargar",
+            "Descartar y recargar",
+        ),
+    };
     dialog(ctx, "Cambios sin guardar", 280.0, Some(&mut open), |ui| {
         ui.label(format!(
             "Tienes {pending_count} cambio(s) sin guardar en «{current_table}»."
         ));
         ui.add_space(4.0);
-        ui.label("Al recargar los datos se perderían.");
+        ui.label(lost);
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if theme::primary_button(ui, "Guardar y recargar").clicked() {
+            if theme::primary_button(ui, save).clicked() {
                 action = ModalAction::ApplyAndReload(reload.clone());
             }
-            if theme::warning_button(ui, format!("{TRASH}  Descartar y recargar")).clicked() {
+            if theme::warning_button(ui, format!("{TRASH}  {discard}")).clicked() {
                 action = ModalAction::DiscardAndReload(reload.clone());
             }
             if ui.button("Cancelar").clicked() {
