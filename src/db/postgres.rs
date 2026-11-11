@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, pin_mut, stream};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -43,6 +43,10 @@ const HOME_DATABASES: [&str; 2] = ["postgres", "template1"];
 /// Conexiones que se guardan abiertas por BBDD para la siguiente consulta.
 /// Las que hagan falta de más a la vez se abren y se cierran al terminar.
 const MAX_IDLE: usize = 2;
+
+/// Una conexión que lleva este tiempo sin usarse se cierra: con muchas BBDD
+/// abiertas, las de cada una se acumularían en el servidor.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// BBDD a las que se pregunta a la vez al listar las tablas de todas.
 const ALL_TABLES_CONCURRENCY: usize = 4;
@@ -225,10 +229,27 @@ async fn read_results(
     Ok((result.unwrap_or_default(), affected))
 }
 
-/// Conexiones abiertas a una BBDD, a la espera de la siguiente consulta.
+/// Conexiones abiertas a una BBDD, a la espera de la siguiente consulta, con
+/// el momento en que se dejaron.
 #[derive(Default)]
 struct Pool {
-    idle: Mutex<Vec<Client>>,
+    idle: Mutex<Vec<(Instant, Client)>>,
+}
+
+type Pools = Arc<Mutex<HashMap<String, Arc<Pool>>>>;
+
+/// Cierra cada cierto tiempo las conexiones que llevan `IDLE_TIMEOUT` sin
+/// usarse. Termina cuando el backend desaparece.
+async fn close_idle_connections(pools: std::sync::Weak<Mutex<HashMap<String, Arc<Pool>>>>) {
+    loop {
+        tokio::time::sleep(IDLE_TIMEOUT / 4).await;
+        let Some(pools) = pools.upgrade() else {
+            return;
+        };
+        for pool in lock(&pools).values() {
+            lock(&pool.idle).retain(|(since, _)| since.elapsed() < IDLE_TIMEOUT);
+        }
+    }
 }
 
 /// Conexión a una BBDD, sacada de su `Pool`: vuelve a él al soltarla.
@@ -257,7 +278,7 @@ impl Drop for Pooled {
         if let Some(client) = self.client.take().filter(|c| !c.is_closed()) {
             let mut idle = lock(&self.pool.idle);
             if idle.len() < MAX_IDLE {
-                idle.push(client);
+                idle.push((Instant::now(), client));
             }
         }
     }
@@ -278,7 +299,7 @@ pub struct PostgresBackend {
     /// BBDD desde la que se pregunta por el servidor (la lista de BBDD,
     /// crearlas, borrarlas) y en la que se ejecuta lo que no nombra ninguna.
     home: String,
-    pools: Mutex<HashMap<String, Arc<Pool>>>,
+    pools: Pools,
     sessions: Mutex<HashMap<String, EditorSession>>,
     /// Ejecuciones del editor que están ahora mismo en el servidor, con lo
     /// necesario para cancelarlas.
@@ -315,10 +336,13 @@ impl PostgresBackend {
             tls: tls_connector()?,
             only_database: params.only_database().map(str::to_string),
             home: String::new(),
-            pools: Mutex::default(),
+            pools: Pools::default(),
             sessions: Mutex::default(),
             running: Mutex::default(),
         };
+        backend
+            .rt
+            .spawn(close_idle_connections(Arc::downgrade(&backend.pools)));
 
         on_status("Conectando con el servidor...");
         let candidates: Vec<&str> = match params.only_database() {
@@ -333,7 +357,7 @@ impl PostgresBackend {
             match backend.rt.block_on(backend.open(db)) {
                 Ok(client) => {
                     backend.home = db.to_string();
-                    backend.pool(db).idle.lock().unwrap().push(client);
+                    lock(&backend.pool(db).idle).push((Instant::now(), client));
                     on_status("Conexión establecida.");
                     return Ok(backend);
                 }
@@ -383,23 +407,21 @@ impl PostgresBackend {
     }
 
     /// Una conexión a `db` (o a la BBDD de partida): una de las que esperan
-    /// en su pool o, si no hay, una nueva.
-    async fn client(&self, db: Option<&str>) -> DbResult<Pooled> {
+    /// en su pool o, con `fresh` o si no hay, una nueva.
+    async fn client_from(&self, db: Option<&str>, fresh: bool) -> DbResult<Pooled> {
         let db = db.unwrap_or(&self.home);
         let pool = self.pool(db);
-        loop {
-            let idle = lock(&pool.idle).pop();
-            match idle {
-                // El servidor la cerró mientras esperaba
-                Some(client) if client.is_closed() => continue,
-                Some(client) => {
-                    return Ok(Pooled {
-                        client: Some(client),
-                        pool,
-                    });
-                }
-                None => break,
-            }
+        // Las que esperan en el pool; si el servidor cerró alguna mientras
+        // tanto, se descarta
+        let idle = std::iter::from_fn(|| lock(&pool.idle).pop());
+        let alive = idle
+            .map(|(_, client)| client)
+            .find(|client| !fresh && !client.is_closed());
+        if let Some(client) = alive {
+            return Ok(Pooled {
+                client: Some(client),
+                pool,
+            });
         }
         let client = self
             .open(db)
@@ -411,11 +433,21 @@ impl PostgresBackend {
         })
     }
 
+    async fn client(&self, db: Option<&str>) -> DbResult<Pooled> {
+        self.client_from(db, false).await
+    }
+
     /// Lectura completa en `db`.
     async fn query(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
-        let client = self.client(db).await?;
-        read_results(&client, sql, usize::MAX)
-            .await
+        let mut result = read_results(&*self.client(db).await?, sql, usize::MAX).await;
+        // La conexión que esperaba en el pool resultó estar caída (el
+        // servidor se reinició, un cortafuegos la cortó): una lectura se
+        // puede repetir sin más en una nueva
+        if result.as_ref().is_err_and(tokio_postgres::Error::is_closed) {
+            let client = self.client_from(db, true).await?;
+            result = read_results(&client, sql, usize::MAX).await;
+        }
+        result
             .map(|(result, _)| result)
             .map_err(|e| format!("Error en query: {}", describe(&e)))
     }
@@ -435,6 +467,14 @@ impl PostgresBackend {
             .iter()
             .map(|row| pg_table_name(&col(row, 0), &col(row, 1)))
             .collect())
+    }
+
+    /// Todas las BBDD del servidor en las que el usuario puede entrar, aunque
+    /// la conexión se limite a una (se ven desde cualquiera).
+    pub fn all_databases(&self) -> DbResult<Vec<String>> {
+        let sql = format!("SELECT d.datname FROM pg_database d WHERE {USER_DATABASES} ORDER BY 1");
+        let result = self.rt.block_on(self.query(None, &sql))?;
+        Ok(result.rows.iter().map(|row| col(row, 0)).collect())
     }
 
     /// Cierra las conexiones propias a `db` (las que no estén en uso).
@@ -463,12 +503,10 @@ impl DbBackend for PostgresBackend {
     }
 
     fn list_databases(&self) -> DbResult<Vec<String>> {
-        if let Some(only) = &self.only_database {
-            return Ok(vec![only.clone()]);
+        match &self.only_database {
+            Some(only) => Ok(vec![only.clone()]),
+            None => self.all_databases(),
         }
-        let sql = format!("SELECT d.datname FROM pg_database d WHERE {USER_DATABASES} ORDER BY 1");
-        let result = self.rt.block_on(self.query(None, &sql))?;
-        Ok(result.rows.iter().map(|row| col(row, 0)).collect())
     }
 
     fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
@@ -663,7 +701,7 @@ impl DbBackend for PostgresBackend {
     fn execute_write(&self, db: Option<&str>, sql: &str) -> DbResult<u64> {
         self.rt.block_on(async {
             let client = self.client(db).await?;
-            read_results(&client, sql, 0)
+            read_results(&client, sql, usize::MAX)
                 .await
                 .map(|(_, affected)| affected)
                 .map_err(|e| format!("Error en escritura: {}", describe(&e)))

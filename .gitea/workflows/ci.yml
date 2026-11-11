@@ -48,6 +48,10 @@ jobs:
       # contenedor.
       - name: Tests de integración (MariaDB y PostgreSQL)
         run: |
+          # Sin el cluster que el paquete de PostgreSQL crea y arranca solo
+          apt-get install -y --no-install-recommends postgresql-common openssl
+          sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' \
+            /etc/postgresql-common/createcluster.conf
           apt-get install -y --no-install-recommends \
             mariadb-server mariadb-client postgresql
 
@@ -63,15 +67,24 @@ jobs:
           mariadb --no-defaults -S "$data.sock" -uroot \
             -e "CREATE USER 'ci'@'127.0.0.1' IDENTIFIED BY 'ci'; GRANT ALL ON *.* TO 'ci'@'127.0.0.1';"
 
-          # PostgreSQL no arranca como root: el paquete trae su usuario y un
-          # cluster ya creado (puerto 5432, con TLS y certificado autofirmado)
-          service postgresql start
-          for _ in $(seq 30); do
-            su postgres -c "pg_isready -q" && break
-            sleep 1
-          done
-          su postgres -c "psql -c \"CREATE USER ci SUPERUSER PASSWORD 'ci'\""
+          # PostgreSQL no arranca como root: va con el usuario del paquete,
+          # en un cluster propio y en otro puerto (el runner comparte la red
+          # del anfitrión, donde el 5432 puede estar ocupado). Con TLS y un
+          # certificado autofirmado, para probar también ese camino.
+          pg="$(mktemp -d /tmp/rustql-pg.XXXXXX)"
+          chown postgres "$pg"
+          su postgres -c "
+            set -e
+            export PATH=\"\$(echo /usr/lib/postgresql/*/bin):\$PATH\"
+            echo ci > $pg/password
+            initdb -D $pg/data -U ci --pwfile=$pg/password --auth=scram-sha-256 > /dev/null
+            openssl req -new -x509 -days 2 -nodes -subj /CN=rustql-ci \\
+              -out $pg/data/server.crt -keyout $pg/data/server.key 2> /dev/null
+            chmod 600 $pg/data/server.key
+            pg_ctl -D $pg/data -l $pg/log -w start \\
+              -o '-p 55432 -c listen_addresses=127.0.0.1 -c unix_socket_directories=$pg -c ssl=on'
+          "
 
           RUSTQL_TEST_MYSQL='ci:ci@127.0.0.1:33306' \
-          RUSTQL_TEST_POSTGRES='ci:ci@127.0.0.1:5432' \
+          RUSTQL_TEST_POSTGRES='ci:ci@127.0.0.1:55432' \
             cargo test --locked -- --ignored --skip secrets

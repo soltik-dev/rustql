@@ -95,9 +95,11 @@ impl Session {
     pub(super) fn create_database(&mut self, name: String, charset: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, format!("CREATE DATABASE `{name}`"), || {
-                b.create_database(&name, &charset).map(|()| 0)
-            });
+            let result = logged(
+                &mut log,
+                format!("CREATE DATABASE {}", b.engine().quote_ident(&name)),
+                || b.create_database(&name, &charset).map(|()| 0),
+            );
             WriteResult {
                 write: Write::CreateDatabase { name },
                 log,
@@ -121,9 +123,11 @@ impl Session {
     pub(super) fn drop_database(&mut self, db: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, format!("DROP DATABASE `{db}`"), || {
-                b.drop_database(&db).map(|()| 0)
-            });
+            let result = logged(
+                &mut log,
+                format!("DROP DATABASE {}", b.engine().quote_ident(&db)),
+                || b.drop_database(&db).map(|()| 0),
+            );
             WriteResult {
                 write: Write::DropDatabase { db },
                 log,
@@ -135,9 +139,11 @@ impl Session {
     pub(super) fn drop_table(&mut self, db: String, table: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, format!("DROP TABLE `{db}`.`{table}`"), || {
-                b.drop_table(&db, &table).map(|()| 0)
-            });
+            let result = logged(
+                &mut log,
+                format!("DROP TABLE {}", b.engine().qualified(&db, &table)),
+                || b.drop_table(&db, &table).map(|()| 0),
+            );
             WriteResult {
                 write: Write::DropTable { db, table },
                 log,

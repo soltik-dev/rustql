@@ -241,13 +241,23 @@ pub fn connect_with_progress(
 }
 
 /// Las BBDD del servidor de `params`, para elegir una en el formulario de
-/// conexión: se conecta sin limitarse a ninguna, las lista y desconecta.
+/// conexión: se conecta, las lista todas y desconecta.
 pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>> {
-    let all = ConnectionParams {
-        database: String::new(),
-        ..params.clone()
-    };
-    connect(&all, |_| {})?.list_databases()
+    match params.engine {
+        // Sin limitarse a la BBDD que haya en el formulario
+        Engine::Mysql => {
+            let all = ConnectionParams {
+                database: String::new(),
+                ..params.clone()
+            };
+            mysql::MysqlBackend::connect_with_progress(&all, |_| {})?.list_databases()
+        }
+        // Entrando por la del formulario, si hay: puede ser la única en la
+        // que el servidor deja entrar, y desde ella se ven las demás
+        Engine::Postgres => {
+            postgres::PostgresBackend::connect_with_progress(params, |_| {})?.all_databases()
+        }
+    }
 }
 
 /// Servidores reales para los tests marcados `#[ignore]`:

@@ -598,3 +598,22 @@ fn la_conexion_va_cifrada_si_el_servidor_lo_ofrece() {
     let expected = if server_has_tls { "t" } else { "f" };
     assert_eq!(encrypted, [text(&[expected])]);
 }
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_POSTGRES"]
+fn una_conexion_caida_en_el_pool_no_se_nota() {
+    let b = pg_backend();
+    // La conexión que queda esperando en el pool, cortada desde el servidor
+    let pid = &rows(&b, "postgres", "SELECT pg_backend_pid()")[0][0];
+    let pid = pid.as_deref().expect("pid");
+    let admin = pg_backend();
+    admin
+        .execute_query(None, &format!("SELECT pg_terminate_backend({pid})"))
+        .unwrap();
+
+    // Las lecturas siguientes van por una conexión nueva, sin error
+    for _ in 0..3 {
+        let result = b.execute_query(Some("postgres"), "SELECT 1").unwrap();
+        assert_eq!(result.rows, [text(&["1"])]);
+    }
+}
