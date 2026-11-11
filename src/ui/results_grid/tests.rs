@@ -173,18 +173,14 @@ fn el_scroll_vertical_sigue_al_cursor() {
     }
     f.idle();
     assert_eq!(f.cursor(), Some((RowRef::Existing(60), 0)));
-    let (offset, size) = f.visible();
+    let (offset, _) = f.visible();
     assert!(offset.y > 0.0, "el grid no se ha desplazado");
-    // El paso entre filas incluye el espacio que las separa
-    let pitch = f.view.selection.layout.as_ref().unwrap().row_pitch;
-    let gap = f.ctx.global_style().spacing.item_spacing.y;
-    let (top, bottom) = (60.0 * pitch, 61.0 * pitch - gap);
     assert!(
-        top >= offset.y && bottom <= offset.y + size.y + 0.5,
-        "la fila 60 ({top}..{bottom}) queda fuera de {}..{}",
-        offset.y,
-        offset.y + size.y
+        f.row_visible(60),
+        "la fila 60 queda fuera: {:?}",
+        f.visible()
     );
+    assert!(!f.row_visible(0));
 
     // Y de vuelta arriba
     f.press_with(egui::Modifiers::COMMAND, egui::Key::Home);
@@ -204,9 +200,7 @@ fn el_scroll_horizontal_sigue_al_cursor() {
     let (offset, size) = f.visible();
     assert!(offset.x > 0.0, "el grid no se ha desplazado");
     let layout = f.view.selection.layout.clone().unwrap();
-    let gap = f.ctx.global_style().spacing.item_spacing.x;
-    let left: f32 = layout.col_widths[..COLS - 1].iter().map(|w| w + gap).sum();
-    let right = left + layout.col_widths[COLS - 1];
+    let (left, right) = layout.col_span(COLS - 1).unwrap();
     assert!(
         left >= offset.x && right <= offset.x + size.x + 0.5,
         "la última columna ({left}..{right}) queda fuera de {}..{}",
@@ -665,12 +659,8 @@ impl Fixture {
     /// Si la fila `display` se ve entera en la zona visible del grid.
     fn row_visible(&self, display: usize) -> bool {
         let layout = self.view.selection.layout.as_ref().unwrap();
-        let gap = self.ctx.global_style().spacing.item_spacing.y;
-        let top = display as f32 * layout.row_pitch;
-        let bottom = top + layout.row_pitch - gap;
-        // Margen: el contenido de la tabla acaba un par de puntos antes de
-        // lo que da la cuenta por filas
-        top >= layout.offset.y - 3.0 && bottom <= layout.offset.y + layout.size.y + 3.0
+        let (top, bottom) = layout.row_span(display);
+        top >= layout.offset.y - 0.5 && bottom <= layout.offset.y + layout.size.y + 0.5
     }
 }
 

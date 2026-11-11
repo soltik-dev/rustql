@@ -3,7 +3,7 @@
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
-use super::state::{GridLayout, scroll_into_view};
+use super::state::GridLayout;
 use super::{CellRef, EditingCell, Grid, GridAction, GridSelection, RowRef, Shown, SortDir, menu};
 use crate::db::QueryResult;
 use crate::ui::icons::KEY;
@@ -43,9 +43,11 @@ pub(super) fn show(
     let row_h = row_height(ui);
     let header_h = row_h + 2.0;
     let revealing = sel.reveal;
-    let (scroll_x, scroll_y) = pending_scroll(ui, g, sel, spacing, row_h);
+    let (scroll_x, scroll_y) = pending_scroll(ui, g, sel);
 
     let mut col_widths = Vec::new();
+    // Primera y última fila dibujadas: (posición en el grid, y en pantalla)
+    let mut drawn_rows: Option<((usize, f32), (usize, f32))> = None;
     let mut hscroll = egui::ScrollArea::horizontal()
         .id_salt((g.id, "hscroll"))
         .auto_shrink([false, false]);
@@ -67,6 +69,10 @@ pub(super) fn show(
             .id_salt((g.id, "table"))
             .striped(true)
             .resizable(true)
+            // Por defecto el cuerpo no baja de 200 de alto aunque haya menos
+            // sitio (ventana pequeña, log grande) y las últimas filas quedan
+            // fuera de la vista
+            .min_scrolled_height(0.0)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if let Some(y) = scroll_y {
             builder = builder.vertical_scroll_offset(y);
@@ -74,7 +80,7 @@ pub(super) fn show(
         for &w in &initial_widths {
             builder = builder.column(Column::initial(w).resizable(true).clip(true).at_least(40.0));
         }
-        let body = builder
+        builder
             .header(header_h, |mut header| {
                 for col in 0..g.cols() {
                     header.col(|ui| {
@@ -87,24 +93,55 @@ pub(super) fn show(
             .body(|body| {
                 col_widths = body.widths().to_vec();
                 body.rows(row_h, g.total_rows(), |mut row| {
-                    let row_ref = RowRef::from_display(row.index(), g.existing());
+                    let display = row.index();
+                    let row_ref = RowRef::from_display(display, g.existing());
                     for col in 0..g.cols() {
                         let cell = CellRef { row: row_ref, col };
                         row.col(|ui| {
+                            if col == 0 {
+                                let here = (display, ui.max_rect().top());
+                                drawn_rows =
+                                    Some((drawn_rows.map_or(here, |(first, _)| first), here));
+                            }
                             show_cell(ui, g, sel, editing, &mut out, &mut drag_row, focused, cell);
                         });
                     }
                 });
-            });
-        (body.state.clamped_offset().y, body.inner_rect.height())
+            })
     });
 
-    let (offset_y, body_height) = outer.inner;
+    let body = &outer.inner;
+    // Dónde cae la fila 0 y cuánto hay de una a la siguiente, según lo que
+    // se acaba de dibujar (sin filas dibujadas, lo nominal)
+    let nominal_pitch = row_h + spacing.y;
+    let content_y =
+        |screen_y: f32| screen_y - body.inner_rect.top() + body.state.unclamped_offset().y;
+    let (row_pitch, row_origin) = match drawn_rows {
+        Some(((i0, y0), (i1, y1))) if i1 > i0 => {
+            let pitch = (y1 - y0) / (i1 - i0) as f32;
+            (pitch, content_y(y0) - i0 as f32 * pitch)
+        }
+        Some(((i0, y0), _)) => (nominal_pitch, content_y(y0) - i0 as f32 * nominal_pitch),
+        None => (nominal_pitch, 0.0),
+    };
+    // Lo que de verdad se ve del cuerpo: su zona puede salirse por abajo de
+    // la del scroll horizontal que la contiene
+    let visible_body = body.inner_rect.intersect(outer.inner_rect);
     let layout = GridLayout {
-        offset: egui::vec2(outer.state.clamped_offset().x, offset_y),
-        size: egui::vec2(outer.inner_rect.width(), body_height),
-        row_pitch: row_h + spacing.y,
+        offset: egui::vec2(
+            outer.state.clamped_offset().x,
+            body.state.clamped_offset().y,
+        ),
+        size: egui::vec2(outer.inner_rect.width(), visible_body.height().max(0.0)),
+        max_offset: egui::vec2(
+            (outer.content_size.x - outer.inner_rect.width()).max(0.0),
+            (body.content_size.y - body.inner_rect.height()).max(0.0),
+        ),
+        row_origin,
+        row_pitch,
+        row_h,
         col_widths,
+        col_gap: spacing.x,
     };
     // El desplazamiento hasta el cursor se calculó con la geometría del frame
     // anterior. Si en este ha cambiado (una fila nueva alarga el contenido y
@@ -116,9 +153,8 @@ pub(super) fn show(
         && sel.reveal_tries < 3
         && let Some(cell) = sel.cell
     {
-        let (x, y) = reveal_target(&layout, g, cell, row_h, spacing);
-        let off_by = |target: Option<f32>, now: f32| target.is_some_and(|t| (t - now).abs() > 3.0);
-        if off_by(x, layout.offset.x) || off_by(y, layout.offset.y) {
+        let (x, y) = layout.reveal(cell.row.display(g.existing()), cell.col);
+        if x.is_some() || y.is_some() {
             sel.reveal = true;
             sel.reveal_tries += 1;
             ui.ctx().request_repaint();
@@ -156,13 +192,7 @@ pub(super) fn show(
 
 /// Desplazamiento que hay que aplicar en este frame, si lo hay: al principio
 /// (datos nuevos) o hasta la celda del cursor si se movió con el teclado.
-fn pending_scroll(
-    ui: &egui::Ui,
-    g: &Grid,
-    sel: &mut GridSelection,
-    spacing: egui::Vec2,
-    row_h: f32,
-) -> (Option<f32>, Option<f32>) {
+fn pending_scroll(ui: &egui::Ui, g: &Grid, sel: &mut GridSelection) -> (Option<f32>, Option<f32>) {
     let to_top = std::mem::take(&mut sel.scroll_top).then_some(0.0);
     if !sel.reveal {
         return (None, to_top);
@@ -176,30 +206,9 @@ fn pending_scroll(
         ui.ctx().request_repaint();
         return (None, to_top);
     };
-    let (x, y) = reveal_target(layout, g, cell, row_h, spacing);
+    let (x, y) = layout.reveal(cell.row.display(g.existing()), cell.col);
     sel.reveal = false;
     (x, y.or(to_top))
-}
-
-/// Desplazamiento (x, y) con el que `cell` queda a la vista con la geometría
-/// `layout`; `None` en el eje que no hay que mover.
-fn reveal_target(
-    layout: &GridLayout,
-    g: &Grid,
-    cell: CellRef,
-    row_h: f32,
-    spacing: egui::Vec2,
-) -> (Option<f32>, Option<f32>) {
-    let top = cell.row.display(g.existing()) as f32 * (row_h + spacing.y);
-    let y = scroll_into_view(top, top + row_h, layout.offset.y, layout.size.y);
-    let x = layout.col_widths.get(cell.col).and_then(|&width| {
-        let left: f32 = layout.col_widths[..cell.col]
-            .iter()
-            .map(|w| w + spacing.x)
-            .sum();
-        scroll_into_view(left, left + width, layout.offset.x, layout.size.x)
-    });
-    (x, y)
 }
 
 /// Ancho inicial de cada columna según su cabecera y una muestra del

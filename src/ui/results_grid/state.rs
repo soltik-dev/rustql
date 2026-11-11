@@ -202,16 +202,64 @@ pub struct GridSelection {
     pub focus_id: Option<egui::Id>,
 }
 
-/// Geometría del grid en el último frame dibujado.
+/// Geometría del grid en el último frame dibujado. Las posiciones de las
+/// filas se miden sobre lo dibujado en lugar de suponerlas: pedir un
+/// desplazamiento unos puntos más allá del máximo real hace que egui lo trate
+/// como un rebote y lo devuelva con una animación.
 #[derive(Debug, Clone, Default)]
 pub(super) struct GridLayout {
     /// Desplazamiento horizontal y vertical.
     pub offset: egui::Vec2,
     /// Tamaño de la zona visible de las filas.
     pub size: egui::Vec2,
+    /// Desplazamiento máximo en cada eje.
+    pub max_offset: egui::Vec2,
+    /// Dónde empieza la fila 0, medido desde el principio del contenido.
+    pub row_origin: f32,
     /// Distancia entre el comienzo de una fila y el de la siguiente.
     pub row_pitch: f32,
+    pub row_h: f32,
     pub col_widths: Vec<f32>,
+    /// Separación entre columnas.
+    pub col_gap: f32,
+}
+
+impl GridLayout {
+    /// Tramo vertical que ocupa la fila mostrada en la posición `display`.
+    pub fn row_span(&self, display: usize) -> (f32, f32) {
+        let top = self.row_origin + display as f32 * self.row_pitch;
+        (top, top + self.row_h)
+    }
+
+    /// Tramo horizontal de la columna `col`, si existe.
+    pub fn col_span(&self, col: usize) -> Option<(f32, f32)> {
+        let width = *self.col_widths.get(col)?;
+        let left: f32 = self.col_widths[..col]
+            .iter()
+            .map(|w| w + self.col_gap)
+            .sum();
+        Some((left, left + width))
+    }
+
+    /// Desplazamiento (x, y) con el que la celda queda a la vista, sin
+    /// pasar del máximo; `None` en el eje que no hay que mover.
+    pub fn reveal(&self, display: usize, col: usize) -> (Option<f32>, Option<f32>) {
+        let axis = |span: (f32, f32), offset: f32, viewport: f32, max: f32| {
+            scroll_into_view(span.0, span.1, offset, viewport)
+                .map(|target| target.clamp(0.0, max))
+                .filter(|target| (target - offset).abs() > 0.5)
+        };
+        let y = axis(
+            self.row_span(display),
+            self.offset.y,
+            self.size.y,
+            self.max_offset.y,
+        );
+        let x = self
+            .col_span(col)
+            .and_then(|span| axis(span, self.offset.x, self.size.x, self.max_offset.x));
+        (x, y)
+    }
 }
 
 impl GridSelection {
