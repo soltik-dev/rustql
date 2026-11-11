@@ -35,11 +35,42 @@ pub struct RustqlApp {
     /// Arranque del llavero: ids de los perfiles cuya contraseña en claro ya
     /// se ha pasado a él.
     keyring_migration: Option<Receiver<Vec<String>>>,
+    window: WindowGeometry,
+}
+
+/// Tamaño de la ventana visto en el último frame, para guardarlo al salir.
+#[derive(Default)]
+struct WindowGeometry {
+    /// Sin maximizar: es al que vuelve la ventana al restaurarla.
+    size: Option<[f32; 2]>,
+    maximized: bool,
+}
+
+impl WindowGeometry {
+    fn track(&mut self, ctx: &egui::Context) {
+        let (rect, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect,
+                v.maximized.unwrap_or(false),
+                v.fullscreen.unwrap_or(false),
+            )
+        });
+        self.maximized = maximized;
+        if !maximized
+            && !fullscreen
+            && let Some(rect) = rect
+        {
+            // El rect va en puntos de la interfaz, que dependen del zoom
+            // (Ctrl + y Ctrl -); el tamaño inicial de la ventana no lo tiene
+            let zoom = ctx.zoom_factor();
+            self.size = Some([rect.width() * zoom, rect.height() * zoom]);
+        }
+    }
 }
 
 impl RustqlApp {
-    pub fn new(ctx: &egui::Context) -> Self {
-        let settings = settings::load();
+    pub fn new(ctx: &egui::Context, settings: settings::AppSettings) -> Self {
         let ui = UiPanelState {
             show_sidebar: settings.show_sidebar,
             show_log: settings.show_log,
@@ -60,6 +91,7 @@ impl RustqlApp {
             },
             ui,
             keyring_migration,
+            window: WindowGeometry::default(),
         }
     }
 }
@@ -222,11 +254,18 @@ impl eframe::App for RustqlApp {
         for session in &self.sessions {
             session.save_tabs_state(&mut self.shared);
         }
+        // Y el tamaño de la ventana, para abrirla igual la próxima vez
+        if self.window.size.is_some() {
+            self.shared.settings.window_size = self.window.size;
+        }
+        self.shared.settings.window_maximized = self.window.maximized;
+        settings::save(&self.shared.settings);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let window_rect = ui.max_rect();
+        self.window.track(ctx);
         // Aplicar ajustes si cambiaron
         if self.ui.settings_dirty {
             // Recargar las fuentes rehace su atlas: solo si cambió la fuente
@@ -377,11 +416,35 @@ mod tests {
                 applied_font: String::new(),
             },
             keyring_migration: None,
+            window: WindowGeometry::default(),
         }
     }
 
     fn ids(app: &RustqlApp) -> Vec<u64> {
         app.sessions.iter().map(|s| s.id).collect()
+    }
+
+    /// Un frame con la ventana en ese estado.
+    fn track(window: &mut WindowGeometry, size: [f32; 2], maximized: bool) {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size.into()));
+        info.maximized = Some(maximized);
+        ctx.run_ui(input, |ui| window.track(ui.ctx()))
+            .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn se_recuerda_el_tamano_de_antes_de_maximizar() {
+        let mut window = WindowGeometry::default();
+        track(&mut window, [1200.0, 700.0], false);
+        assert_eq!(window.size, Some([1200.0, 700.0]));
+        assert!(!window.maximized);
+        // Maximizada ocupa la pantalla: ese no es el tamaño al restaurarla
+        track(&mut window, [1920.0, 1040.0], true);
+        assert_eq!(window.size, Some([1200.0, 700.0]));
+        assert!(window.maximized);
     }
 
     #[test]

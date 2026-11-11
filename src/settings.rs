@@ -68,6 +68,9 @@ pub struct AppSettings {
     pub query_limit: usize,
     /// Tope de filas que lee el editor SQL; el resto se descarta.
     pub sql_editor_max_rows: usize,
+    /// Tamaño de la ventana (sin maximizar) al salir la última vez.
+    pub window_size: Option<[f32; 2]>,
+    pub window_maximized: bool,
 }
 
 impl Default for AppSettings {
@@ -84,6 +87,8 @@ impl Default for AppSettings {
             copy_format: CopyFormat::Csv,
             query_limit: 500,
             sql_editor_max_rows: 10_000,
+            window_size: None,
+            window_maximized: false,
         }
     }
 }
