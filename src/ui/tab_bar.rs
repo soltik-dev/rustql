@@ -215,3 +215,132 @@ fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> egui:
     }
     resp
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture {
+        ctx: egui::Context,
+        titles: Vec<String>,
+        rename: Option<TabRename>,
+        time: f64,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                ctx: egui::Context::default(),
+                titles: vec!["SQL 1".into(), "SQL 2".into()],
+                rename: None,
+                time: 0.0,
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> TabBarResult {
+            self.time += 0.02;
+            let input = egui::RawInput {
+                time: Some(self.time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 200.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut result = TabBarResult::default();
+            self.ctx
+                .run_ui(input, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        result = show(
+                            ui,
+                            ActiveTab::Servidor,
+                            false,
+                            false,
+                            "srv",
+                            None,
+                            None,
+                            &self.titles,
+                            &mut self.rename,
+                        );
+                    });
+                })
+                .drop_without_applying_deltas();
+            result
+        }
+
+        fn click(&mut self, pos: egui::Pos2) {
+            for pressed in [true, false] {
+                let button = egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                self.frame(vec![egui::Event::PointerMoved(pos), button]);
+            }
+        }
+
+        fn press(&mut self, key: egui::Key) -> TabBarResult {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }])
+        }
+
+        /// Doble clic en la primera pestaña SQL: la barra se recorre de
+        /// izquierda a derecha hasta dar con ella.
+        fn start_rename(&mut self) {
+            self.frame(Vec::new());
+            for x in (0..900).step_by(6) {
+                let pos = egui::pos2(x as f32, 25.0);
+                self.click(pos);
+                self.click(pos);
+                if self.rename.is_some() {
+                    // El campo toma el foco en su primer frame
+                    self.frame(Vec::new());
+                    self.frame(Vec::new());
+                    return;
+                }
+                // Que el siguiente intento no sea un triple clic
+                self.time += 1.0;
+            }
+            panic!("ningún doble clic empezó a renombrar");
+        }
+    }
+
+    #[test]
+    fn doble_clic_renombra_y_enter_confirma() {
+        let mut f = Fixture::new();
+        f.start_rename();
+        assert_eq!(f.rename.as_ref().map(|r| r.idx), Some(0));
+        assert_eq!(f.rename.as_ref().unwrap().buffer, "SQL 1");
+
+        f.frame(vec![egui::Event::Text(" bis".into())]);
+        let result = f.press(egui::Key::Enter);
+        assert_eq!(result.renamed, Some((0, "SQL 1 bis".to_string())));
+        assert!(f.rename.is_none());
+    }
+
+    #[test]
+    fn escape_deja_el_nombre_como_estaba() {
+        let mut f = Fixture::new();
+        f.start_rename();
+        f.frame(vec![egui::Event::Text("otro".into())]);
+        let result = f.press(egui::Key::Escape);
+        assert_eq!(result.renamed, None);
+        assert!(f.rename.is_none());
+    }
+
+    #[test]
+    fn si_la_pestana_desaparece_se_deja_de_renombrar() {
+        let mut f = Fixture::new();
+        f.rename = Some(TabRename::new(1, "SQL 2".into()));
+        f.titles.pop();
+        f.frame(Vec::new());
+        assert!(f.rename.is_none());
+    }
+}

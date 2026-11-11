@@ -15,6 +15,11 @@ pub enum LogAction {
     OpenInSql(String),
 }
 
+/// La consulta la canceló el usuario: no es un error que explicar.
+fn cancelled(entry: &LogEntry) -> bool {
+    entry.error.as_deref() == Some(crate::db::QUERY_CANCELLED)
+}
+
 /// Log de consultas de la conexión. Cada entrada tiene un menú contextual
 /// para copiar su consulta (o su error) y para reabrirla en el editor.
 pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
@@ -39,7 +44,9 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
                     ui.separator();
 
                     // Estado
-                    if entry.error.is_some() {
+                    if cancelled(entry) {
+                        theme::badge(ui, "CANCELADA", p.warning);
+                    } else if entry.error.is_some() {
                         theme::badge(ui, "ERROR", p.danger);
                     } else {
                         let rows = entry.rows.unwrap_or(0);
@@ -86,7 +93,9 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
                 });
 
                 // Error expandido
-                if let Some(err) = &entry.error {
+                if let Some(err) = &entry.error
+                    && !cancelled(entry)
+                {
                     ui.indent("log_err", |ui| {
                         ui.colored_label(p.danger, err);
                     });

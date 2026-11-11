@@ -272,6 +272,9 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool) {
         .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
+            // Barra a la vista (la de egui solo aparece al pasar el ratón):
+            // dice que la consulta sigue más abajo
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
             egui::ScrollArea::vertical()
                 .id_salt("sql_editor_scroll")
                 .max_height(height)
