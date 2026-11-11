@@ -182,7 +182,8 @@ pub(super) fn cell(
                 } else {
                     format!("{TRASH}  Eliminar fila  {CMD}Supr")
                 };
-                if theme::danger_button(ui, label).clicked() {
+                // Sin clave primaria no se sabría qué fila eliminar
+                if g.can_change_row(cell.row) && theme::danger_button(ui, label).clicked() {
                     action = Some(GridAction::ToggleDeleteRows(rows));
                     ui.close();
                 }

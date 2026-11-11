@@ -43,6 +43,9 @@ struct Grid<'a> {
     pending_inserts: &'a [PendingInsert],
     /// Se pueden editar celdas e insertar o eliminar filas.
     editable: bool,
+    /// Las filas que ya existen se pueden identificar (la tabla tiene clave
+    /// primaria): sin ello no se editan ni se eliminan, solo se insertan.
+    keyed: bool,
     /// Los datos son los de una tabla: se puede ordenar y filtrar relanzando
     /// su consulta.
     queryable: bool,
@@ -126,13 +129,21 @@ impl<'a> Grid<'a> {
         }
     }
 
-    /// No se editan las filas marcadas para eliminar ni las columnas
-    /// AUTO_INCREMENT de una fila nueva.
+    /// No se editan las filas marcadas para eliminar, las columnas
+    /// AUTO_INCREMENT de una fila nueva ni, sin clave primaria, las filas
+    /// que ya existen.
     fn can_edit(&self, cell: CellRef) -> bool {
         self.editable
             && cell.col < self.cols()
+            && self.can_change_row(cell.row)
             && !self.is_deleted(cell.row)
             && self.shown(cell) != Shown::Auto
+    }
+
+    /// Si la fila se puede editar o eliminar: las nuevas siempre; las que ya
+    /// existen, solo si se pueden identificar al guardar.
+    fn can_change_row(&self, row: RowRef) -> bool {
+        self.editable && (self.keyed || matches!(row, RowRef::Insert(_)))
     }
 
     /// Si la columna admite NULL. Sin su estructura (aún cargando) se supone
@@ -204,7 +215,18 @@ pub fn show(
         return GridAction::None;
     };
 
-    let bar_action = info_bar(ui, db, table, data, &view.sort_specs, busy, row_limit);
+    // Sin la estructura (aún cargando) se supone que hay clave: si no la
+    // hay, se sabrá antes de que dé tiempo a guardar nada
+    let keyed = column_info.is_empty() || column_info.iter().any(|c| c.column_key == "PRI");
+    let bar = InfoBar {
+        name: format!("{db}.{table}"),
+        data,
+        sorts: &view.sort_specs,
+        busy,
+        row_limit,
+        keyed,
+    };
+    let bar_action = info_bar(ui, &bar);
     ui.separator();
 
     if data.columns.is_empty() {
@@ -221,6 +243,7 @@ pub fn show(
         pending_deletes: &view.pending_deletes,
         pending_inserts: &view.pending_inserts,
         editable: !busy,
+        keyed,
         queryable: true,
     };
     let out = show_grid(ui, &grid, &mut view.selection, &mut view.editing_cell);
@@ -255,6 +278,7 @@ pub fn show_read_only(
         pending_deletes: &no_deletes,
         pending_inserts: &[],
         editable: false,
+        keyed: false,
         queryable: false,
     };
     let mut editing = None;
@@ -315,23 +339,33 @@ fn show_grid(
     out
 }
 
+/// Lo que enseña la barra de información del grid.
+struct InfoBar<'a> {
+    /// «bbdd.tabla».
+    name: String,
+    data: &'a QueryResult,
+    sorts: &'a [SortSpec],
+    busy: bool,
+    row_limit: usize,
+    keyed: bool,
+}
+
 /// Nombre de la tabla, número de filas, botón de fila nueva y la ordenación
 /// activa. Devuelve lo que el usuario pide desde ella: insertar una fila o
 /// quitar columnas de la ordenación.
-fn info_bar(
-    ui: &mut egui::Ui,
-    db: &str,
-    table: &str,
-    data: &QueryResult,
-    sorts: &[SortSpec],
-    busy: bool,
-    row_limit: usize,
-) -> GridAction {
+fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
+    let InfoBar {
+        data,
+        sorts,
+        busy,
+        row_limit,
+        ..
+    } = *bar;
     let mut action = GridAction::None;
     let p = theme::get(ui);
 
     ui.horizontal_wrapped(|ui| {
-        ui.strong(format!("{db}.{table}"));
+        ui.strong(&bar.name);
         if data.rows.len() >= row_limit {
             // La consulta lleva LIMIT: lo que se ve puede no ser todo
             ui.label(
@@ -359,6 +393,16 @@ fn info_bar(
         {
             // A la vista aunque no haya filas sobre las que abrir el menú
             action = GridAction::InsertRow;
+        }
+        if !bar.keyed {
+            // Antes de que alguien edite para descubrirlo al guardar
+            ui.separator();
+            ui.label(egui::RichText::new("⚠ Sin clave primaria").color(p.warning))
+                .on_hover_text(
+                    "Sin clave primaria no hay forma segura de identificar una fila:\n\
+                     las que ya existen no se pueden editar ni eliminar desde aquí.\n\
+                     Sí se pueden añadir filas nuevas.",
+                );
         }
 
         if sorts.is_empty() {

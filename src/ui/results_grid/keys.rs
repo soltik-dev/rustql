@@ -157,7 +157,7 @@ pub(super) fn handle(
     if g.editable {
         // Ctrl+Supr: eliminar la fila (o las seleccionadas); una fila nueva
         // simplemente se quita
-        if ctrl && pressed(egui::Key::Delete) {
+        if ctrl && pressed(egui::Key::Delete) && g.can_change_row(cell.row) {
             return match cell.row {
                 RowRef::Existing(row) if sel.rows.is_empty() => {
                     GridAction::ToggleDeleteRows(vec![row])

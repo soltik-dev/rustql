@@ -30,13 +30,17 @@ fn column(name: &str, extra: &str, nullable: bool) -> ColumnInfo {
 
 impl Fixture {
     /// Tabla de `rows` filas × 30 columnas con «r{fila}c{columna}» en cada
-    /// celda. La columna 0 no admite NULL; las demás sí.
+    /// celda. La columna 0 es la clave primaria y no admite NULL; las demás
+    /// sí.
     fn new(rows: usize) -> Self {
         let columns: Vec<String> = (0..COLS).map(|c| format!("col{c}")).collect();
         let column_info = columns
             .iter()
             .enumerate()
-            .map(|(c, name)| column(name, "", c > 0))
+            .map(|(c, name)| ColumnInfo {
+                column_key: if c == 0 { "PRI".into() } else { String::new() },
+                ..column(name, "", c > 0)
+            })
             .collect();
         let data = QueryResult {
             columns,
@@ -421,6 +425,45 @@ fn las_filas_eliminadas_y_las_columnas_auto_no_se_editan() {
 }
 
 #[test]
+fn sin_clave_primaria_solo_se_editan_las_filas_nuevas() {
+    let mut f = Fixture::new(3);
+    f.column_info[0].column_key.clear();
+    f.focus();
+
+    // Fila existente: ni editar, ni vaciar, ni eliminar
+    f.put_cursor(RowRef::Existing(1), 1);
+    f.press(egui::Key::Enter);
+    assert!(f.view.editing_cell.is_none());
+    f.type_text("x");
+    assert!(f.view.editing_cell.is_none());
+    assert!(matches!(f.press(egui::Key::Delete), GridAction::None));
+    assert!(matches!(
+        f.press_with(egui::Modifiers::COMMAND, egui::Key::Delete),
+        GridAction::None
+    ));
+
+    // Insertar y clonar sí: la fila nueva no necesita identificarse
+    assert!(matches!(
+        f.press_with(egui::Modifiers::COMMAND, egui::Key::D),
+        GridAction::CloneRow { row_idx: 1 }
+    ));
+    f.add_insert_row();
+    f.put_cursor(RowRef::Insert(0), 1);
+    f.press(egui::Key::Enter);
+    assert!(f.view.editing_cell.is_some());
+}
+
+#[test]
+fn sin_la_estructura_cargada_se_supone_que_hay_clave() {
+    let mut f = Fixture::new(3);
+    f.column_info.clear();
+    f.focus();
+    f.put_cursor(RowRef::Existing(1), 1);
+    f.press(egui::Key::Enter);
+    assert!(f.view.editing_cell.is_some());
+}
+
+#[test]
 fn mientras_carga_no_se_edita() {
     let mut f = Fixture::new(2);
     f.focus();
@@ -456,6 +499,7 @@ fn la_celda_muestra_el_cambio_pendiente() {
         pending_deletes: &f.view.pending_deletes,
         pending_inserts: &f.view.pending_inserts,
         editable: true,
+        keyed: true,
         queryable: true,
     };
     let cell = |row, col| CellRef {
