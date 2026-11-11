@@ -42,6 +42,9 @@ impl Session {
         if signals.cancel_connect {
             self.state = ConnState::Disconnected;
         }
+        if signals.load_databases {
+            self.load_database_list(ctx);
+        }
         self.handle_tab_bar(sh, signals.tab_bar, keys);
         self.handle_grid_action(ctx, sh, signals.grid);
         // Barra de guardar (solo visible con cambios pendientes)
@@ -590,6 +593,8 @@ impl Session {
             self.color = profile.color;
             self.selected_profile_idx = Some(idx);
             self.error_message = None;
+            // La lista era la del servidor del perfil anterior
+            self.db_picker = Default::default();
         }
 
         if let Some(mode) = save {
@@ -644,6 +649,7 @@ impl Session {
             host: self.params.host.clone(),
             port: self.params.port,
             user: self.params.user.clone(),
+            database: self.params.database.trim().to_string(),
             // Una contraseña nueva se marca cuando el llavero la confirma
             // (poll_keyring). Con el campo vacío se conserva la que había.
             password_in_keyring: had_keyring && self.save_password,
@@ -692,6 +698,28 @@ impl Session {
                 false
             }
         }
+    }
+
+    /// Lee en segundo plano las BBDD del servidor del formulario, con sus
+    /// credenciales, para elegir una. Cada petición sustituye a la anterior.
+    pub(super) fn load_database_list(&mut self, ctx: &egui::Context) {
+        if self.params.host.trim().is_empty() {
+            self.db_picker.list = Loadable::Failed("Indica el host del servidor.".into());
+            return;
+        }
+        if !self.read_port() {
+            self.db_picker.list = Loadable::Failed(self.error_message.take().unwrap_or_default());
+            return;
+        }
+        let params = self.params.clone();
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::db::list_server_databases(&params));
+            ctx.request_repaint();
+        });
+        self.db_picker.list = Loadable::Loading(0);
+        self.db_picker.receiver = Some(rx);
     }
 
     /// Lanza la conexión en segundo plano con los parámetros del formulario.

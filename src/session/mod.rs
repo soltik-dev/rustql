@@ -127,6 +127,14 @@ impl FrameKeys {
     }
 }
 
+/// Lista de BBDD del servidor del formulario de conexión, para elegir una.
+#[derive(Default)]
+pub struct DbPicker {
+    pub list: Loadable<Vec<String>>,
+    /// Hilo que la está leyendo.
+    receiver: Option<Receiver<DbResult<Vec<String>>>>,
+}
+
 /// Peticiones de la sesión que solo puede resolver la app.
 #[derive(Default)]
 pub struct SessionOutcome {
@@ -168,6 +176,7 @@ pub struct Session {
     pub selected_profile_idx: Option<usize>,
     pub profile_name: String,
     pub save_password: bool,
+    pub db_picker: DbPicker,
     /// Trabajos contra la BD en segundo plano.
     jobs: Jobs,
     /// Escrituras lanzadas y aún sin resultado.
@@ -203,6 +212,7 @@ impl Session {
             selected_profile_idx: None,
             profile_name: String::new(),
             save_password: false,
+            db_picker: DbPicker::default(),
             jobs: Jobs::default(),
             writes_in_flight: 0,
             editor_runs: 0,
@@ -1133,6 +1143,26 @@ impl Session {
         self.poll_jobs(ctx, sh);
         self.poll_export_progress(ctx);
         self.poll_keyring(sh);
+        self.poll_db_picker();
+    }
+
+    /// Recoge la lista de BBDD pedida desde el formulario de conexión.
+    fn poll_db_picker(&mut self) {
+        let Some(rx) = &self.db_picker.receiver else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("No se pudo leer la lista de bases de datos.".into())
+            }
+        };
+        self.db_picker.receiver = None;
+        self.db_picker.list = match result {
+            Ok(list) => Loadable::Ready(list),
+            Err(e) => Loadable::Failed(e),
+        };
     }
 
     /// Marca los perfiles cuya contraseña ya está guardada en el llavero.

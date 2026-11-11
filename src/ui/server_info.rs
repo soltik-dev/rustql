@@ -9,8 +9,11 @@ pub fn show(ui: &mut egui::Ui, host: &str, databases: &[DatabaseInfo]) {
     ui.horizontal(|ui| {
         ui.strong(format!("Servidor: {host}"));
         ui.label(
-            egui::RichText::new(format!("— {} bases de datos", databases.len()))
-                .color(theme::get(ui).text_muted),
+            egui::RichText::new(match databases.len() {
+                1 => "— 1 base de datos".to_string(),
+                n => format!("— {n} bases de datos"),
+            })
+            .color(theme::get(ui).text_muted),
         );
     });
     ui.separator();

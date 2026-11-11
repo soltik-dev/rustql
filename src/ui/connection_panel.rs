@@ -1,8 +1,10 @@
 use eframe::egui;
 
 use crate::db::ConnectionParams;
+use crate::loadable::Loadable;
 use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::secrets;
+use crate::ui::icons::DATABASE;
 use crate::ui::theme;
 
 /// Cómo guardar el formulario como favorito.
@@ -20,6 +22,8 @@ pub struct FormResult {
     pub connect: bool,
     pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
+    /// Se abrió la lista de BBDD: hay que leerla del servidor.
+    pub load_databases: bool,
 }
 
 /// Panel izquierdo: lista de favoritos guardados.
@@ -81,18 +85,21 @@ fn color_dot(ui: &mut egui::Ui, color: Option<ConnColor>) {
     }
 }
 
+/// Lo que enseña y edita el formulario de conexión.
+pub struct FormView<'a> {
+    pub params: &'a mut ConnectionParams,
+    pub port_str: &'a mut String,
+    pub error_message: &'a Option<String>,
+    pub profile_name: &'a mut String,
+    pub save_password: &'a mut bool,
+    pub color: &'a mut Option<ConnColor>,
+    pub selected_idx: Option<usize>,
+    /// BBDD del servidor, leídas al pulsar el botón de elegir.
+    pub databases: &'a Loadable<Vec<String>>,
+}
+
 /// Panel derecho: formulario de conexión + botones de gestión.
-#[allow(clippy::too_many_arguments)]
-pub fn show_form(
-    ui: &mut egui::Ui,
-    params: &mut ConnectionParams,
-    port_str: &mut String,
-    error_message: &Option<String>,
-    profile_name: &mut String,
-    save_password: &mut bool,
-    color: &mut Option<ConnColor>,
-    selected_idx: &Option<usize>,
-) -> FormResult {
+pub fn show_form(ui: &mut egui::Ui, view: FormView<'_>) -> FormResult {
     let mut result = FormResult::default();
     let p = theme::get(ui);
 
@@ -110,36 +117,23 @@ pub fn show_form(
             .stroke(egui::Stroke::new(1.0, p.border_subtle))
             .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
             .inner_margin(egui::Margin::same(20))
-            .show(ui, |ui| {
-                show_form_fields(
-                    ui,
-                    params,
-                    port_str,
-                    error_message,
-                    profile_name,
-                    save_password,
-                    color,
-                    selected_idx,
-                    &mut result,
-                );
-            });
+            .show(ui, |ui| show_form_fields(ui, view, &mut result));
     });
 
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn show_form_fields(
-    ui: &mut egui::Ui,
-    params: &mut ConnectionParams,
-    port_str: &mut String,
-    error_message: &Option<String>,
-    profile_name: &mut String,
-    save_password: &mut bool,
-    color: &mut Option<ConnColor>,
-    selected_idx: &Option<usize>,
-    result: &mut FormResult,
-) {
+fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResult) {
+    let FormView {
+        params,
+        port_str,
+        error_message,
+        profile_name,
+        save_password,
+        color,
+        selected_idx,
+        databases,
+    } = view;
     let p = theme::get(ui);
 
     egui::Grid::new("connection_form")
@@ -148,10 +142,13 @@ fn show_form_fields(
         .min_col_width(70.0)
         .show(ui, |ui| {
             // Enter en cualquiera de los campos de la conexión conecta
+            let mut connect = false;
+            let mut field_width = FIELD_WIDTH;
             let mut field = |ui: &mut egui::Ui, edit: egui::TextEdit<'_>| {
-                let resp = ui.add(edit.min_size(egui::vec2(220.0, 0.0)));
+                let resp = ui.add(edit.min_size(egui::vec2(FIELD_WIDTH, 0.0)));
+                field_width = resp.rect.width();
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    result.connect = true;
+                    connect = true;
                 }
             };
 
@@ -180,6 +177,24 @@ fn show_form_fields(
                     .hint_text(hint),
             );
             ui.end_row();
+
+            // El campo y su botón de elegir ocupan lo que los demás campos
+            ui.label("Base de datos:");
+            let row = egui::vec2(field_width, ui.spacing().interact_size.y);
+            let layout = egui::Layout::right_to_left(egui::Align::Center);
+            ui.allocate_ui_with_layout(row, layout, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                result.load_databases = database_picker(ui, &mut params.database, databases);
+                let edit = egui::TextEdit::singleline(&mut params.database)
+                    .hint_text("Todas")
+                    .desired_width(ui.available_width());
+                let resp = ui.add(edit);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    connect = true;
+                }
+            });
+            ui.end_row();
+            result.connect |= connect;
 
             ui.label("");
             ui.vertical(|ui| {
@@ -261,6 +276,74 @@ fn show_form_fields(
             result.connect = true;
         }
     });
+}
+
+/// Ancho mínimo de los campos del formulario.
+const FIELD_WIDTH: f32 = 220.0;
+
+/// Botón que despliega las BBDD del servidor para elegir una. Devuelve true
+/// al abrirse: hay que leer la lista (con las credenciales del formulario).
+fn database_picker(
+    ui: &mut egui::Ui,
+    database: &mut String,
+    databases: &Loadable<Vec<String>>,
+) -> bool {
+    let p = theme::get(ui);
+    let resp = ui
+        .button(DATABASE)
+        .on_hover_text("Elegir entre las bases de datos del servidor");
+    let popup = egui::Popup::menu(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(FIELD_WIDTH);
+    // El clic aún no se ha aplicado: si estaba cerrado, es que se abre
+    let opened = resp.clicked() && !popup.is_open();
+    // El desplegable recuerda su tamaño mientras está abierto: al cambiar lo
+    // que enseña (del «leyendo…» a la lista) hay que volver a medirlo, o la
+    // lista se queda con la altura de una línea
+    let stage = std::mem::discriminant(databases);
+    let stage_id = resp.id.with("stage");
+    let changed = ui.data_mut(|d| {
+        let previous = d.get_temp(stage_id);
+        d.insert_temp(stage_id, stage);
+        previous != Some(stage)
+    });
+    popup.sizing_pass(changed && !opened).show(|ui| {
+        ui.set_min_width(FIELD_WIDTH);
+        match databases {
+            // Recién abierto: la lista se pide en este mismo frame
+            Loadable::NotLoaded | Loadable::Loading(_) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Leyendo las bases de datos…");
+                });
+            }
+            Loadable::Failed(e) => {
+                ui.set_max_width(FIELD_WIDTH + 80.0);
+                ui.add(egui::Label::new(egui::RichText::new(e).color(p.danger)).wrap());
+            }
+            Loadable::Ready(list) => {
+                if ui
+                    .selectable_label(database.trim().is_empty(), "Todas")
+                    .clicked()
+                {
+                    database.clear();
+                    ui.close();
+                }
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for name in list {
+                            if ui.selectable_label(database.trim() == name, name).clicked() {
+                                *database = name.clone();
+                                ui.close();
+                            }
+                        }
+                    });
+            }
+        }
+    });
+    opened
 }
 
 /// Muestras para elegir el color de la conexión: «sin color», los presets de

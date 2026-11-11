@@ -14,6 +14,9 @@ pub struct ConnectionParams {
     /// Perfil con la contraseña en el llavero del sistema: si `password` está
     /// vacía, se lee de ahí al conectar.
     pub keyring_id: Option<String>,
+    /// Base de datos a la que se limita la conexión: el árbol solo enseña
+    /// esa. Vacía = todas las del servidor.
+    pub database: String,
 }
 
 impl ConnectionParams {
@@ -25,6 +28,12 @@ impl ConnectionParams {
 
     /// La contraseña escrita o, si está vacía, la del llavero. Puede bloquear
     /// (el llavero puede pedir desbloqueo): solo desde hilos de trabajo.
+    /// La base de datos a la que se limita la conexión, si se indicó alguna.
+    pub fn only_database(&self) -> Option<&str> {
+        let database = self.database.trim();
+        (!database.is_empty()).then_some(database)
+    }
+
     pub fn resolve_password(&self) -> DbResult<String> {
         match &self.keyring_id {
             Some(id) if self.password.is_empty() => crate::secrets::get(id)
@@ -47,6 +56,7 @@ impl Default for ConnectionParams {
             user: "root".into(),
             password: String::new(),
             keyring_id: None,
+            database: String::new(),
         }
     }
 }
@@ -221,6 +231,16 @@ pub fn connect_mysql_progress(
     let _ = tx.send(ConnectEvent::Done(result));
 }
 
+/// Las BBDD del servidor de `params`, para elegir una en el formulario de
+/// conexión: se conecta sin limitarse a ninguna, las lista y desconecta.
+pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>> {
+    let all = ConnectionParams {
+        database: String::new(),
+        ..params.clone()
+    };
+    mysql::MysqlBackend::connect_with_progress(&all, |_| {})?.list_databases()
+}
+
 /// Servidor real para los tests marcados `#[ignore]`:
 /// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto cargo test -- --ignored`.
 /// Crean y borran sus propias BBDD `rustql_test_*`.
@@ -240,6 +260,7 @@ pub mod test_server {
             user: user.into(),
             password: password.into(),
             keyring_id: None,
+            database: String::new(),
         }
     }
 

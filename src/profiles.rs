@@ -55,6 +55,9 @@ pub struct ConnectionProfile {
     pub host: String,
     pub port: u16,
     pub user: String,
+    /// Base de datos a la que se limita la conexión; vacía = todas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub database: String,
     /// La contraseña está en el llavero del sistema, bajo `id`.
     #[serde(default)]
     pub password_in_keyring: bool,
@@ -75,6 +78,7 @@ impl ConnectionProfile {
             user: self.user.clone(),
             password: self.password.clone().unwrap_or_default(),
             keyring_id: self.password_in_keyring.then(|| self.id.clone()),
+            database: self.database.clone(),
         }
     }
 
@@ -189,6 +193,7 @@ mod tests {
             host: "db".into(),
             port: 3306,
             user: "app".into(),
+            database: String::new(),
             password_in_keyring: true,
             password: None,
             color: None,
@@ -205,6 +210,24 @@ mod tests {
             ..profile
         };
         assert_eq!(sin_llavero.to_params().keyring_id, None);
+    }
+
+    #[test]
+    fn la_base_de_datos_del_perfil_es_opcional() {
+        // Los perfiles anteriores no la tienen: ven todo el servidor
+        let json = r#"[{"name":"Local","host":"127.0.0.1","port":3306,"user":"root"}]"#;
+        let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(json).unwrap();
+        assert_eq!(profiles[0].to_params().only_database(), None);
+        assert!(
+            !serde_json::to_string(&profiles[0])
+                .unwrap()
+                .contains("database")
+        );
+
+        profiles[0].database = "tienda".into();
+        let json = serde_json::to_string(&profiles[0]).unwrap();
+        let back: ConnectionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.to_params().only_database(), Some("tienda"));
     }
 
     #[test]

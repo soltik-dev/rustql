@@ -88,6 +88,8 @@ fn col(row: &[Option<String>], i: usize) -> String {
 pub struct MysqlBackend {
     pool: Pool,
     opts: Opts,
+    /// La conexión se limita a esta BBDD: es la única que se lista.
+    only_database: Option<String>,
     /// Conexión propia del editor SQL, fuera del pool: el pool resetea cada
     /// conexión al devolverla (COM_RESET_CONNECTION), lo que deshace
     /// transacciones, variables y tablas temporales entre ejecuciones.
@@ -122,6 +124,9 @@ impl MysqlBackend {
             .tcp_port(params.port)
             .user(Some(params.user.as_str()))
             .pass(Some(password.as_str()))
+            // BBDD por defecto de la conexión: si no existe o el usuario no
+            // puede entrar, lo dice el servidor al conectar
+            .db_name(params.only_database())
             // Filas afectadas = filas encontradas por el WHERE, aunque el
             // UPDATE las deje como estaban: así se distingue «ya tenía ese
             // valor» de «la fila no existe» (ver execute_transaction).
@@ -139,6 +144,7 @@ impl MysqlBackend {
         Ok(Self {
             pool,
             opts,
+            only_database: params.only_database().map(str::to_string),
             session: Arc::default(),
             session_running: Mutex::default(),
             session_killed: AtomicBool::new(false),
@@ -166,6 +172,9 @@ impl MysqlBackend {
 
 impl DbBackend for MysqlBackend {
     fn list_databases(&self) -> DbResult<Vec<String>> {
+        if let Some(only) = &self.only_database {
+            return Ok(vec![only.clone()]);
+        }
         self.conn()?
             .query("SHOW DATABASES")
             .map_err(|e| format!("Error en query: {e}"))
@@ -179,10 +188,13 @@ impl DbBackend for MysqlBackend {
     }
 
     fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
+        // Sin BBDD a la que limitarse, el filtro no descarta ninguna
         self.conn()?
-            .query(
+            .exec(
                 "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
+                 WHERE ? IS NULL OR TABLE_SCHEMA = ? \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME",
+                (&self.only_database, &self.only_database),
             )
             .map_err(|e| format!("Error en query: {e}"))
     }
@@ -283,9 +295,11 @@ impl DbBackend for MysqlBackend {
                           COALESCE(SUM(t.DATA_LENGTH + COALESCE(t.INDEX_LENGTH,0)), 0) \
                    FROM information_schema.SCHEMATA s \
                    LEFT JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = s.SCHEMA_NAME \
+                   WHERE ? IS NULL OR s.SCHEMA_NAME = ? \
                    GROUP BY s.SCHEMA_NAME, s.DEFAULT_CHARACTER_SET_NAME, s.DEFAULT_COLLATION_NAME \
                    ORDER BY s.SCHEMA_NAME";
-        let r = self.execute_query(sql)?;
+        let only = self.only_database.clone();
+        let r = self.query_with(sql, vec![only.clone(), only])?;
         Ok(r.rows
             .iter()
             .map(|row| DatabaseInfo {
@@ -437,6 +451,57 @@ mod tests {
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
         assert_eq!(columns[0].column_key, "PRI");
         assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn la_conexion_limitada_a_una_bbdd_solo_ensena_esa() {
+        let all = test_server::backend();
+        all.execute_write("DROP DATABASE IF EXISTS rustql_test_only")
+            .unwrap();
+        all.execute_write("CREATE DATABASE rustql_test_only")
+            .unwrap();
+        all.execute_write("CREATE TABLE rustql_test_only.t (id INT)")
+            .unwrap();
+        let params = ConnectionParams {
+            database: " rustql_test_only ".into(),
+            ..test_server::params()
+        };
+        let only = MysqlBackend::connect_with_progress(&params, |_| {}).unwrap();
+
+        let databases = only.list_databases();
+        let tables = only.list_all_tables();
+        let info = only.get_databases_info();
+        // Es la BBDD por defecto: las consultas no necesitan nombrarla
+        let unqualified = only.execute_query("SELECT COUNT(*) FROM t");
+        // El botón de elegir del formulario lista todas, haya o no una puesta
+        let picker = crate::db::list_server_databases(&params);
+        let missing = MysqlBackend::connect_with_progress(
+            &ConnectionParams {
+                database: "rustql_test_no_existe".into(),
+                ..test_server::params()
+            },
+            |_| {},
+        );
+        all.execute_write("DROP DATABASE rustql_test_only").unwrap();
+
+        assert_eq!(databases.unwrap(), ["rustql_test_only"]);
+        assert_eq!(
+            tables.unwrap(),
+            [("rustql_test_only".to_string(), "t".to_string())]
+        );
+        let info = info.unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(
+            (info[0].name.as_str(), info[0].table_count),
+            ("rustql_test_only", 1)
+        );
+        assert_eq!(unqualified.unwrap().rows, [[Some("0".to_string())]]);
+        let picker = picker.unwrap();
+        assert!(picker.contains(&"rustql_test_only".to_string()));
+        assert!(picker.contains(&"information_schema".to_string()));
+        let err = missing.err().expect("no existe");
+        assert!(err.contains("rustql_test_no_existe"), "{err}");
     }
 
     #[test]

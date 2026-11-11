@@ -6,7 +6,7 @@ use eframe::egui;
 use super::schema::show_loading;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::loadable::Loadable;
-use crate::ui::connection_panel::SaveProfile;
+use crate::ui::connection_panel::{FormView, SaveProfile};
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
 use crate::ui::results_grid::{ApplyBarAction, GridAction};
@@ -27,6 +27,7 @@ pub(super) struct FrameSignals {
     pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
     pub profile_selected: Option<usize>,
+    pub load_databases: bool,
     // Conectado
     pub sidebar: SidebarOutput,
     pub tab_bar: TabBarResult,
@@ -96,14 +97,18 @@ impl Session {
             ui.push_id(sid, |ui| {
                 let result = connection_panel::show_form(
                     ui,
-                    &mut self.params,
-                    &mut self.port_str,
-                    &self.error_message,
-                    &mut self.profile_name,
-                    &mut self.save_password,
-                    &mut self.color,
-                    &self.selected_profile_idx,
+                    FormView {
+                        params: &mut self.params,
+                        port_str: &mut self.port_str,
+                        error_message: &self.error_message,
+                        profile_name: &mut self.profile_name,
+                        save_password: &mut self.save_password,
+                        color: &mut self.color,
+                        selected_idx: self.selected_profile_idx,
+                        databases: &self.db_picker.list,
+                    },
                 );
+                signals.load_databases = result.load_databases;
                 signals.connect |= result.connect;
                 signals.save_profile = result.save_profile;
                 signals.delete_profile = result.delete_profile;
@@ -189,6 +194,7 @@ impl Session {
                             favorites: &sh.settings.fav_tables,
                             server_name: &self.title,
                             conn_color,
+                            single_database: self.params.only_database().is_some(),
                         };
                         sidebar::show(
                             ui,

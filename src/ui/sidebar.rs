@@ -101,6 +101,9 @@ pub struct SidebarView<'a> {
     pub server_name: &'a str,
     /// Color de la conexión: tiñe la raíz del árbol y la selección.
     pub conn_color: Option<egui::Color32>,
+    /// La conexión se limita a una BBDD: sale desplegada, y ni se crean
+    /// otras ni se elimina esa (el árbol no podría enseñar el resultado).
+    pub single_database: bool,
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
@@ -272,10 +275,12 @@ impl Tree<'_> {
             out.action = SidebarAction::SelectServer;
         }
         header.context_menu(|ui| {
-            if menu_item(ui, format!("{PLUS} Crear base de datos")) {
-                out.action = SidebarAction::CreateDatabase;
+            if !self.view.single_database {
+                if menu_item(ui, format!("{PLUS} Crear base de datos")) {
+                    out.action = SidebarAction::CreateDatabase;
+                }
+                ui.separator();
             }
-            ui.separator();
             if menu_item(ui, format!("{REFRESH} Refrescar")) {
                 out.action = SidebarAction::Refresh;
             }
@@ -337,7 +342,7 @@ impl Tree<'_> {
             // que se busca son tablas. Con otro id, para que al borrar la
             // búsqueda el árbol vuelva a estar como estaba.
             .id_salt((db, self.filtering()))
-            .default_open(self.filtering())
+            .default_open(self.filtering() || self.view.single_database)
             .show(ui, |ui| match listing {
                 Listing::Hidden => {}
                 Listing::Failed(e) => {
@@ -379,7 +384,9 @@ impl Tree<'_> {
             if menu_item(ui, format!("{TRASH} Vaciar todas las tablas")) {
                 out.action = SidebarAction::TruncateAllTables { db: db() };
             }
-            if danger_item(ui, format!("{TRASH} Eliminar base de datos")) {
+            if !self.view.single_database
+                && danger_item(ui, format!("{TRASH} Eliminar base de datos"))
+            {
                 out.action = SidebarAction::DropDatabase { db: db() };
             }
         });
@@ -585,6 +592,7 @@ mod tests {
                             favorites: &self.favorites,
                             server_name: "srv",
                             conn_color: None,
+                            single_database: false,
                         };
                         out = show(ui, &view, &mut self.search, &mut self.only_fav);
                     });
@@ -654,6 +662,7 @@ mod tests {
                 favorites: &f.favorites,
                 server_name: "srv",
                 conn_color: None,
+                single_database: false,
             };
             let tree = Tree {
                 view: &view,
