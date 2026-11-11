@@ -48,6 +48,9 @@ pub(super) fn show(
     let mut col_widths = Vec::new();
     // Primera y última fila dibujadas: (posición en el grid, y en pantalla)
     let mut drawn_rows: Option<((usize, f32), (usize, f32))> = None;
+    // Barras siempre a la vista: las flotantes de egui solo aparecen al pasar
+    // el ratón y en un grid de datos hace falta ver por dónde se va
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
     let mut hscroll = egui::ScrollArea::horizontal()
         .id_salt((g.id, "hscroll"))
         .auto_shrink([false, false]);
@@ -73,6 +76,10 @@ pub(super) fn show(
             // sitio (ventana pequeña, log grande) y las últimas filas quedan
             // fuera de la vista
             .min_scrolled_height(0.0)
+            // La barra vertical de la tabla queda en el borde derecho del
+            // contenido, fuera de la vista hasta desplazarse del todo a la
+            // derecha: se oculta y se dibuja una propia (vertical_bar)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if let Some(y) = scroll_y {
             builder = builder.vertical_scroll_offset(y);
@@ -160,6 +167,7 @@ pub(super) fn show(
             ui.ctx().request_repaint();
         }
     }
+    vertical_bar(ui, g, visible_body, &layout, sel);
     sel.layout = Some(layout);
 
     // El grid entero es un widget enfocable: con el foco recibe las teclas.
@@ -193,7 +201,9 @@ pub(super) fn show(
 /// Desplazamiento que hay que aplicar en este frame, si lo hay: al principio
 /// (datos nuevos) o hasta la celda del cursor si se movió con el teclado.
 fn pending_scroll(ui: &egui::Ui, g: &Grid, sel: &mut GridSelection) -> (Option<f32>, Option<f32>) {
-    let to_top = std::mem::take(&mut sel.scroll_top).then_some(0.0);
+    // Volver arriba manda sobre lo que se pidiera con la barra
+    let bar = sel.scroll_to_y.take();
+    let to_top = std::mem::take(&mut sel.scroll_top).then_some(0.0).or(bar);
     if !sel.reveal {
         return (None, to_top);
     }
@@ -209,6 +219,59 @@ fn pending_scroll(ui: &egui::Ui, g: &Grid, sel: &mut GridSelection) -> (Option<f
     let (x, y) = layout.reveal(cell.row.display(g.existing()), cell.col);
     sel.reveal = false;
     (x, y.or(to_top))
+}
+
+/// Barra de desplazamiento vertical en el borde derecho de la zona visible
+/// de las filas. Arrastrarla (o pulsar en su carril) pide el desplazamiento
+/// para el frame siguiente.
+fn vertical_bar(
+    ui: &mut egui::Ui,
+    g: &Grid,
+    body: egui::Rect,
+    layout: &GridLayout,
+    sel: &mut GridSelection,
+) {
+    const WIDTH: f32 = 10.0;
+    const MIN_HANDLE: f32 = 24.0;
+    let max = layout.max_offset.y;
+    if max <= 0.0 || body.height() <= MIN_HANDLE {
+        return;
+    }
+    let track = egui::Rect::from_min_max(egui::pos2(body.right() - WIDTH, body.top()), body.max);
+    let handle_h = (track.height() * body.height() / (max + body.height())).max(MIN_HANDLE);
+    let travel = track.height() - handle_h;
+    let handle_top = track.top() + travel * (layout.offset.y / max).clamp(0.0, 1.0);
+    let handle = egui::Rect::from_min_size(
+        egui::pos2(track.left() + 2.0, handle_top),
+        egui::vec2(WIDTH - 4.0, handle_h),
+    );
+
+    let resp = ui.interact(
+        track,
+        g.id.with("vbar"),
+        egui::Sense::CLICK | egui::Sense::DRAG,
+    );
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+        && travel > 0.0
+    {
+        // El centro del tirador sigue al puntero
+        let t = ((pos.y - handle_h / 2.0 - track.top()) / travel).clamp(0.0, 1.0);
+        sel.scroll_to_y = Some(t * max);
+        ui.ctx().request_repaint();
+    }
+
+    let p = theme::get(ui);
+    let active = resp.hovered() || resp.dragged();
+    if active {
+        ui.painter().rect_filled(track, 0.0, p.bg_sunken);
+    }
+    let color = if active {
+        p.text_muted
+    } else {
+        p.border_strong
+    };
+    ui.painter().rect_filled(handle, 3.0, color);
 }
 
 /// Ancho inicial de cada columna según su cabecera y una muestra del

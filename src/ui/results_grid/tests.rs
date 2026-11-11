@@ -692,3 +692,25 @@ fn una_fila_recien_anadida_queda_a_la_vista() {
     }
     assert!(f.row_visible(300), "{:?}", f.visible());
 }
+
+#[test]
+fn la_barra_vertical_esta_en_el_borde_visible_y_desplaza() {
+    // 30 columnas en 400 de ancho: el contenido es mucho más ancho que la
+    // vista, y la barra de la propia tabla quedaría fuera de ella
+    let mut f = Fixture::new(200);
+    f.idle();
+    f.idle();
+    assert_eq!(f.visible().0.y, 0.0);
+
+    // Pulsar al final del carril, pegado al borde derecho de lo que se ve
+    f.click(egui::pos2(388.0, 280.0));
+    f.idle();
+    let layout = f.view.selection.layout.as_ref().unwrap();
+    assert!(
+        layout.offset.y > layout.max_offset.y * 0.8,
+        "no ha bajado: {} de {}",
+        layout.offset.y,
+        layout.max_offset.y
+    );
+    assert_eq!(f.cursor(), None, "pulsar la barra no es pulsar una celda");
+}

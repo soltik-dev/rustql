@@ -196,6 +196,8 @@ pub struct GridSelection {
     pub(super) reveal_tries: u8,
     /// Volver arriba (datos nuevos con otro orden o filtro).
     pub(super) scroll_top: bool,
+    /// Desplazamiento vertical pedido con la barra del grid.
+    pub(super) scroll_to_y: Option<f32>,
     /// Dónde quedó cada cosa en el frame anterior.
     pub(super) layout: Option<GridLayout>,
     /// Id con el que el grid recibe el foco del teclado.
