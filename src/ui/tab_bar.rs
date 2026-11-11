@@ -80,7 +80,9 @@ pub fn show(
             }
             let close_resp = ui
                 .add(egui::Button::new("×").small().frame(false))
-                .on_hover_text("Cerrar pestaña SQL (o clic central en la pestaña)");
+                .on_hover_text(format!(
+                    "Cerrar pestaña SQL  {CMD}W (o clic central en la pestaña)"
+                ));
             // Clic central, como en las pestañas de conexión
             if close_resp.clicked() || tab.middle_clicked() {
                 result.close_sql_tab = Some(i);

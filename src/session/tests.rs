@@ -818,7 +818,7 @@ fn cerrar_una_pestana_sql_con_texto_pide_confirmacion() {
     };
     let ctx = egui::Context::default();
 
-    s.apply_signals(&ctx, &mut sh, close(1), false, false);
+    s.apply_signals(&ctx, &mut sh, close(1), FrameKeys::default());
     assert_eq!(s.sql_tabs.len(), 2, "con texto no se cierra sin más");
     assert!(matches!(
         s.modal,
@@ -829,9 +829,113 @@ fn cerrar_una_pestana_sql_con_texto_pide_confirmacion() {
     assert_eq!(s.active_tab, ActiveTab::Sql(0));
 
     // Vacía: se cierra directamente (y queda una nueva en su lugar)
-    s.apply_signals(&ctx, &mut sh, close(0), false, false);
+    s.apply_signals(&ctx, &mut sh, close(0), FrameKeys::default());
     assert!(matches!(s.modal, ModalState::None));
     assert_eq!(s.sql_tabs.len(), 1);
+}
+
+#[test]
+fn ctrl_w_cierra_la_pestana_sql_activa_y_solo_esa() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    let ctx = egui::Context::default();
+    let ctrl_w = FrameKeys {
+        ctrl_w: true,
+        ..Default::default()
+    };
+    s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
+    s.sql_tabs[1].sql_text = "SELECT importante".into();
+
+    // En una pestaña que no es SQL no cierra nada
+    s.active_tab = ActiveTab::Datos;
+    s.apply_signals(&ctx, &mut sh, Default::default(), ctrl_w);
+    assert_eq!(s.sql_tabs.len(), 2);
+    assert!(matches!(s.modal, ModalState::None));
+
+    // Con texto pregunta, igual que la × de la pestaña
+    s.active_tab = ActiveTab::Sql(1);
+    s.apply_signals(&ctx, &mut sh, Default::default(), ctrl_w);
+    assert!(matches!(
+        s.modal,
+        ModalState::ConfirmCloseSqlTab { idx: 1, .. }
+    ));
+    s.modal = ModalState::None;
+
+    s.active_tab = ActiveTab::Sql(0);
+    s.apply_signals(&ctx, &mut sh, Default::default(), ctrl_w);
+    assert_eq!(s.sql_tabs.len(), 1);
+    assert_eq!(s.sql_tabs[0].sql_text, "SELECT importante");
+}
+
+#[test]
+fn los_atajos_de_pestana_no_llegan_a_los_campos_de_texto() {
+    let ctx = egui::Context::default();
+    let key = |key, modifiers| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    // Como llega Ctrl en Linux y Windows: es también la tecla de comando
+    let ctrl = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
+    let ctrl_shift = ctrl | egui::Modifiers::SHIFT;
+    let frame = |events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut seen = None;
+        ctx.run_ui(input, |ui| {
+            let keys = FrameKeys::read(ui.ctx());
+            // Lo que le queda por leer a un TextEdit dibujado después
+            let left = ui.input(|i| i.events.len());
+            seen = Some((keys.cycle_tab, keys.ctrl_w, left));
+        })
+        .drop_without_applying_deltas();
+        seen.unwrap()
+    };
+
+    let tab = egui::Key::Tab;
+    assert_eq!(frame(vec![key(tab, ctrl)]), (Some(true), false, 0));
+    assert_eq!(frame(vec![key(tab, ctrl_shift)]), (Some(false), false, 0));
+    assert_eq!(frame(vec![key(egui::Key::W, ctrl)]), (None, true, 0));
+    // Tab a secas sigue siendo del widget con el foco
+    assert_eq!(
+        frame(vec![key(tab, egui::Modifiers::NONE)]),
+        (None, false, 1)
+    );
+}
+
+#[test]
+fn ctrl_tab_recorre_las_pestanas_activas_y_da_la_vuelta() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    let ctx = egui::Context::default();
+    let cycle = |forward| FrameKeys {
+        cycle_tab: Some(forward),
+        ..Default::default()
+    };
+    s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
+    s.active_tab = ActiveTab::Datos;
+
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        s.apply_signals(&ctx, &mut sh, Default::default(), cycle(true));
+        seen.push(s.active_tab);
+    }
+    assert_eq!(
+        seen,
+        [ActiveTab::Sql(0), ActiveTab::Sql(1), ActiveTab::Servidor]
+    );
+    s.apply_signals(&ctx, &mut sh, Default::default(), cycle(false));
+    assert_eq!(s.active_tab, ActiveTab::Sql(1));
+
+    // Sin tabla abierta, Estructura y Datos están desactivadas: se saltan
+    s.schema.selected_node = Some(SelectedNode::Database("db".into()));
+    s.active_tab = ActiveTab::Bbdd;
+    s.apply_signals(&ctx, &mut sh, Default::default(), cycle(true));
+    assert_eq!(s.active_tab, ActiveTab::Sql(0));
 }
 
 fn saved_sql(s: &Session, sh: &Shared) -> Vec<String> {
@@ -855,7 +959,12 @@ fn el_texto_sql_sin_ejecutar_se_guarda_al_salir_de_la_pestana() {
         },
         ..Default::default()
     };
-    s.apply_signals(&egui::Context::default(), &mut sh, signals, false, false);
+    s.apply_signals(
+        &egui::Context::default(),
+        &mut sh,
+        signals,
+        FrameKeys::default(),
+    );
     assert_eq!(saved_sql(&s, &sh), ["SELECT a medias"]);
 }
 
@@ -872,7 +981,7 @@ fn el_texto_sql_se_guarda_al_desconectar_y_no_en_el_formulario() {
         },
         ..Default::default()
     };
-    s.apply_signals(&ctx, &mut sh, signals, false, false);
+    s.apply_signals(&ctx, &mut sh, signals, FrameKeys::default());
     assert!(!s.is_connected());
     assert_eq!(saved_sql(&s, &sh), ["SELECT 1"]);
 
@@ -914,7 +1023,11 @@ fn al_cambiar_de_tabla_no_se_ven_los_datos_de_la_anterior() {
 /// Un frame en el que solo se pulsa F5.
 fn press_f5(s: &mut Session, sh: &mut Shared) {
     let ctx = egui::Context::default();
-    s.apply_signals(&ctx, sh, Default::default(), true, false);
+    let f5 = FrameKeys {
+        f5: true,
+        ..Default::default()
+    };
+    s.apply_signals(&ctx, sh, Default::default(), f5);
 }
 
 #[test]

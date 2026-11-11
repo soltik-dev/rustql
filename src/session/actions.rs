@@ -9,7 +9,7 @@ use eframe::egui;
 
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
-use super::{ConnState, SelectedNode, Session, Shared};
+use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::db::{connect_mysql_progress, escape_sql, qualified, quote_ident};
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
@@ -35,13 +35,12 @@ impl Session {
         ctx: &egui::Context,
         sh: &mut Shared,
         signals: FrameSignals,
-        f5: bool,
-        ctrl_t: bool,
+        keys: FrameKeys,
     ) {
         if signals.cancel_connect {
             self.state = ConnState::Disconnected;
         }
-        self.handle_tab_bar(sh, signals.tab_bar, ctrl_t);
+        self.handle_tab_bar(sh, signals.tab_bar, keys);
         self.handle_grid_action(ctx, sh, signals.grid);
         // Barra de guardar (solo visible con cambios pendientes)
         match signals.apply_bar {
@@ -62,7 +61,7 @@ impl Session {
             self.save_tabs_state(sh);
             self.disconnect();
         }
-        if f5 {
+        if keys.f5 {
             self.refresh_active_tab(sh);
         }
         self.handle_filter_action(sh, signals.filter);
@@ -105,7 +104,41 @@ impl Session {
         // Lo invalidado se vuelve a pedir en el siguiente frame (request_tab_data)
     }
 
-    fn handle_tab_bar(&mut self, sh: &mut Shared, tab_bar: TabBarResult, ctrl_t: bool) {
+    /// Pestañas de la barra en su orden, sin las que están desactivadas por
+    /// no haber BBDD o tabla seleccionada.
+    fn tab_order(&self) -> Vec<ActiveTab> {
+        let mut tabs = vec![ActiveTab::Servidor];
+        if self.schema.selected_db().is_some() {
+            tabs.push(ActiveTab::Bbdd);
+        }
+        if self.schema.selected_table().is_some() {
+            tabs.extend([ActiveTab::Tabla, ActiveTab::Datos]);
+        }
+        tabs.extend((0..self.sql_tabs.len()).map(ActiveTab::Sql));
+        tabs
+    }
+
+    /// Pestaña siguiente (o anterior) a la activa, dando la vuelta.
+    fn neighbour_tab(&self, forward: bool) -> ActiveTab {
+        let tabs = self.tab_order();
+        let current = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+        let step = if forward { 1 } else { tabs.len() - 1 };
+        tabs[(current + step) % tabs.len()]
+    }
+
+    fn handle_tab_bar(&mut self, sh: &mut Shared, mut tab_bar: TabBarResult, keys: FrameKeys) {
+        // El teclado hace lo mismo que el ratón sobre la barra
+        if self.is_connected() {
+            if let Some(forward) = keys.cycle_tab {
+                tab_bar.tab_clicked = Some(self.neighbour_tab(forward));
+            }
+            if keys.ctrl_w
+                && let ActiveTab::Sql(idx) = self.active_tab
+            {
+                tab_bar.close_sql_tab = Some(idx);
+            }
+        }
+
         if let Some(t) = tab_bar.tab_clicked {
             // Al salir de una pestaña SQL se guarda su texto
             if matches!(self.active_tab, ActiveTab::Sql(_)) && t != self.active_tab {
@@ -114,7 +147,7 @@ impl Session {
             self.active_tab = t;
         }
 
-        if tab_bar.new_sql_tab || (ctrl_t && self.is_connected()) {
+        if tab_bar.new_sql_tab || (keys.ctrl_t && self.is_connected()) {
             let db_ctx = self.selected_db().unwrap_or_default().to_string();
             let new_idx = self.sql_tabs.len();
             self.sql_tabs.push(SqlTab {

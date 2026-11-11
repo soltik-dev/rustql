@@ -91,15 +91,35 @@ pub struct FrameKeys {
     pub f9: bool,
     pub ctrl_enter: bool,
     pub ctrl_t: bool,
+    /// Cerrar la pestaña SQL activa.
+    pub ctrl_w: bool,
+    /// Ctrl+Tab y Ctrl+Mayús+Tab: pestaña siguiente (true) o anterior.
+    pub cycle_tab: Option<bool>,
 }
 
 impl FrameKeys {
     pub fn read(ctx: &egui::Context) -> Self {
-        ctx.input(|i| Self {
-            f5: i.key_pressed(egui::Key::F5),
-            f9: i.key_pressed(egui::Key::F9),
-            ctrl_enter: i.modifiers.command && i.key_pressed(egui::Key::Enter),
-            ctrl_t: i.modifiers.command && i.key_pressed(egui::Key::T),
+        use egui::{Key, Modifiers};
+        ctx.input_mut(|i| {
+            // Estas se consumen: en un campo de texto, Ctrl+W borraría la
+            // palabra anterior y Ctrl+Tab escribiría un tabulador
+            let ctrl_w = i.consume_key(Modifiers::COMMAND, Key::W);
+            // Primero la combinación con Mayús: la otra también la acepta
+            let cycle_tab = if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
+                Some(false)
+            } else if i.consume_key(Modifiers::CTRL, Key::Tab) {
+                Some(true)
+            } else {
+                None
+            };
+            Self {
+                f5: i.key_pressed(Key::F5),
+                f9: i.key_pressed(Key::F9),
+                ctrl_enter: i.modifiers.command && i.key_pressed(Key::Enter),
+                ctrl_t: i.modifiers.command && i.key_pressed(Key::T),
+                ctrl_w,
+                cycle_tab,
+            }
         })
     }
 }
@@ -1124,7 +1144,7 @@ impl Session {
             signals.save_profile,
             signals.delete_profile,
         );
-        self.apply_signals(ctx, sh, signals, keys.f5, keys.ctrl_t);
+        self.apply_signals(ctx, sh, signals, keys);
         let close = matches!(modal_action, ModalAction::CloseSession);
         let delete_confirmed = matches!(modal_action, ModalAction::DeleteProfile);
         self.handle_modal_action(modal_action, sh);

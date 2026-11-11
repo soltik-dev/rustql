@@ -32,7 +32,8 @@ fn read_move(i: &egui::InputState) -> Option<Move> {
     if m.alt {
         return None;
     }
-    if i.key_pressed(Key::Tab) {
+    // Ctrl+Tab cambia de pestaña: no es del grid
+    if i.key_pressed(Key::Tab) && !m.command {
         return Some(if m.shift { Move::Prev } else { Move::Next });
     }
     let keys: &[(Key, Move)] = if m.command {
