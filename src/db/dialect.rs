@@ -21,7 +21,6 @@ pub const PG_DEFAULT_SCHEMA: &str = "public";
 /// Nombre con el que se enseña la tabla `table` del esquema `schema` de
 /// PostgreSQL. Una del esquema por defecto que lleve un punto en el nombre
 /// conserva el prefijo: sin él se leería como `esquema.tabla`.
-#[allow(dead_code)] // hasta que llegue el backend de PostgreSQL
 pub fn pg_table_name(schema: &str, table: &str) -> String {
     if schema == PG_DEFAULT_SCHEMA && !table.contains('.') {
         table.to_string()

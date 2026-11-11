@@ -1124,6 +1124,108 @@ fn paginas_contra_el_servidor() {
     );
 }
 
+/// El recorrido de una tabla de PostgreSQL, de otro esquema, por la sesión:
+/// abrirla, paginarla y ordenarla, filtrarla, editarla y clonarla.
+#[test]
+#[ignore = "necesita RUSTQL_TEST_POSTGRES"]
+fn una_tabla_de_postgres_de_principio_a_fin() {
+    let db = "rustql_test_session_pg";
+    let b = crate::db::test_server::pg_backend();
+    b.execute_write(None, &format!("DROP DATABASE IF EXISTS {db}"))
+        .unwrap();
+    b.create_database(db, "").unwrap();
+    b.execute_write(
+        Some(db),
+        "CREATE SCHEMA ventas;
+         CREATE TABLE ventas.t (id serial PRIMARY KEY, n int, v text DEFAULT 'nuevo');
+         INSERT INTO ventas.t (n, v) VALUES (10, 'Uno'), (20, 'dos'), (30, 'tres')",
+    )
+    .unwrap();
+    let table = "ventas.t";
+    let mut s = Session::new(0);
+    s.params = crate::db::test_server::pg_params();
+    let mut sh = shared();
+    sh.settings.query_limit = 2;
+    s.state = ConnState::Connected(Arc::new(b));
+    let ids = |s: &Session| -> Vec<String> {
+        let data = s.table_view.table_data.as_ref().expect("datos");
+        data.rows.iter().map(|r| r[0].clone().unwrap()).collect()
+    };
+
+    // Abrir: datos de la primera página y estructura, con su clave
+    s.on_table_selected(&mut sh, db.into(), table.into());
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(s.table_view.table_error, None);
+    assert_eq!(s.table_view.primary_keys, ["id"]);
+    assert_eq!((ids(&s).len(), s.table_view.has_more), (2, true));
+
+    // Ordenar y pasar de página
+    s.table_view.sort_specs = vec![SortSpec {
+        col_idx: 0,
+        col_name: "id".into(),
+        dir: SortDir::Desc,
+    }];
+    s.reload_now(&mut sh, Reload::Page(1));
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(
+        (ids(&s), s.table_view.has_more),
+        (vec!["1".to_string()], false)
+    );
+
+    // Filtrar con lo que genera el diálogo: sin distinguir mayúsculas
+    sh.settings.query_limit = 100;
+    let filter = Engine::Postgres.like("v", "%UNO%");
+    s.reload_now(&mut sh, Reload::Filter(filter));
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(ids(&s), ["1"]);
+    s.reload_now(&mut sh, Reload::Filter(String::new()));
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(ids(&s), ["3", "2", "1"]);
+
+    // Editar un número, poner un NULL, borrar una fila e insertar dos: una
+    // con valores y otra con todo por defecto (id de la secuencia)
+    let row_of = |s: &Session, id: &str| ids(s).iter().position(|i| i == id).unwrap();
+    s.table_view.pending_edits = vec![
+        edit(row_of(&s, "1"), 1, Some("11")),
+        edit(row_of(&s, "1"), 2, None),
+    ];
+    s.table_view.pending_deletes.insert(row_of(&s, "2"));
+    let empty = s.new_insert_row(None).expect("fila nueva");
+    assert_eq!(empty.auto_cols, [true, false, false], "serial = automática");
+    let mut filled = empty.clone();
+    filled.values[1] = InsertValue::Value("40".into());
+    filled.values[2] = InsertValue::Value("it's \\ ok".into());
+    s.table_view.pending_inserts = vec![filled, empty];
+    s.commit_pending_changes(&mut sh, AfterCommit::ReloadData);
+    finish_jobs(&mut s, &mut sh);
+    assert!(matches!(s.modal, ModalState::None), "{:?}", s.modal);
+    assert_eq!(s.pending_count(), 0);
+
+    // Clonar con datos, a otro nombre del mismo esquema
+    s.clone_table(db.into(), table.into(), "ventas.copia".into(), true);
+    finish_jobs(&mut s, &mut sh);
+    assert!(!sh.toasts.has_error(), "{:?}", sh.toasts.texts());
+
+    let ConnState::Connected(b) = &s.state else {
+        unreachable!()
+    };
+    let rows = b.execute_query(Some(db), "SELECT * FROM ventas.copia ORDER BY id");
+    let tables = b.list_tables(db);
+    b.drop_database(db).unwrap();
+
+    let row = |v: &[Option<&str>]| v.iter().map(|x| x.map(String::from)).collect::<Vec<_>>();
+    assert_eq!(
+        rows.unwrap().rows,
+        [
+            row(&[Some("1"), Some("11"), None]),
+            row(&[Some("3"), Some("30"), Some("tres")]),
+            row(&[Some("4"), Some("40"), Some("it's \\ ok")]),
+            row(&[Some("5"), None, Some("nuevo")]),
+        ]
+    );
+    assert_eq!(tables.unwrap(), ["ventas.copia", "ventas.t"]);
+}
+
 #[test]
 fn guardar_y_las_escrituras_se_confirman_con_un_aviso() {
     let mut s = session_with_table();

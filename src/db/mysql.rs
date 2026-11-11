@@ -323,7 +323,7 @@ impl DbBackend for MysqlBackend {
                 name: col(row, 0),
                 charset: col(row, 1),
                 collation: col(row, 2),
-                table_count: col(row, 3).parse().unwrap_or(0),
+                table_count: col(row, 3).parse().ok(),
                 size_bytes: col(row, 4).parse().unwrap_or(0),
             })
             .collect())
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(info.len(), 1);
         assert_eq!(
             (info[0].name.as_str(), info[0].table_count),
-            ("rustql_test_only", 1)
+            ("rustql_test_only", Some(1))
         );
         assert_eq!(unqualified.unwrap().rows, [[Some("0".to_string())]]);
         let picker = picker.unwrap();

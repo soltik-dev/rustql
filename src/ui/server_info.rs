@@ -53,7 +53,11 @@ pub fn show(ui: &mut egui::Ui, host: &str, databases: &[DatabaseInfo]) {
                     ui.add(egui::Label::new(&db.collation).truncate());
                 });
                 row.col(|ui| {
-                    ui.label(db.table_count.to_string());
+                    // Hay motores que no pueden contarlas sin entrar en la BBDD
+                    match db.table_count {
+                        Some(count) => ui.label(count.to_string()),
+                        None => ui.label("—"),
+                    };
                 });
                 row.col(|ui| {
                     ui.label(format_bytes(db.size_bytes));

@@ -11,7 +11,7 @@ use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::db::QueryResult;
-use crate::db::{Engine, connect_mysql_progress};
+use crate::db::{Engine, connect_with_progress};
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
@@ -755,7 +755,7 @@ impl Session {
         let host = self.params.host.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            connect_mysql_progress(&params, &tx);
+            connect_with_progress(&params, &tx);
         });
         self.state = ConnState::Connecting {
             receiver: rx,

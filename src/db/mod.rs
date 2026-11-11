@@ -1,6 +1,7 @@
 pub mod dialect;
 pub mod export;
 pub mod mysql;
+pub mod postgres;
 
 use std::sync::Arc;
 
@@ -100,7 +101,8 @@ pub struct DatabaseInfo {
     pub name: String,
     pub charset: String,
     pub collation: String,
-    pub table_count: usize,
+    /// `None` si el motor no puede contarlas sin entrar en la BBDD.
+    pub table_count: Option<usize>,
     pub size_bytes: u64,
 }
 
@@ -211,15 +213,30 @@ pub enum ConnectEvent {
     Done(DbResult<Arc<dyn DbBackend>>),
 }
 
-pub fn connect_mysql_progress(
+/// Conecta con el servidor de `params`, con el backend de su motor.
+pub fn connect(
+    params: &ConnectionParams,
+    on_status: impl Fn(&str),
+) -> DbResult<Arc<dyn DbBackend>> {
+    Ok(match params.engine {
+        Engine::Mysql => Arc::new(mysql::MysqlBackend::connect_with_progress(
+            params, on_status,
+        )?),
+        Engine::Postgres => Arc::new(postgres::PostgresBackend::connect_with_progress(
+            params, on_status,
+        )?),
+    })
+}
+
+/// Como `connect`, contando el progreso y el resultado por `tx`.
+pub fn connect_with_progress(
     params: &ConnectionParams,
     tx: &std::sync::mpsc::Sender<ConnectEvent>,
 ) {
     let send_status = |msg: &str| {
         let _ = tx.send(ConnectEvent::Status(msg.to_string()));
     };
-    let result = mysql::MysqlBackend::connect_with_progress(params, send_status)
-        .map(|b| -> Arc<dyn DbBackend> { Arc::new(b) });
+    let result = connect(params, send_status);
     let _ = tx.send(ConnectEvent::Done(result));
 }
 
@@ -230,24 +247,25 @@ pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>>
         database: String::new(),
         ..params.clone()
     };
-    mysql::MysqlBackend::connect_with_progress(&all, |_| {})?.list_databases()
+    connect(&all, |_| {})?.list_databases()
 }
 
-/// Servidor real para los tests marcados `#[ignore]`:
-/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto cargo test -- --ignored`.
+/// Servidores reales para los tests marcados `#[ignore]`:
+/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto` y
+/// `RUSTQL_TEST_POSTGRES=…`, con `cargo test -- --ignored`.
 /// Crean y borran sus propias BBDD `rustql_test_*`.
 #[cfg(test)]
 pub mod test_server {
     use super::{ConnectionParams, Engine};
 
-    pub fn params() -> ConnectionParams {
-        let url = std::env::var("RUSTQL_TEST_MYSQL")
-            .expect("RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto");
+    fn from_env(var: &str, engine: Engine) -> ConnectionParams {
+        let url =
+            std::env::var(var).unwrap_or_else(|_| panic!("{var}=usuario:contraseña@host:puerto"));
         let (auth, addr) = url.rsplit_once('@').expect("falta @");
         let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
         let (host, port) = addr.rsplit_once(':').expect("falta :puerto");
         ConnectionParams {
-            engine: Engine::Mysql,
+            engine,
             host: host.into(),
             port: port.parse().expect("puerto"),
             user: user.into(),
@@ -257,8 +275,20 @@ pub mod test_server {
         }
     }
 
+    pub fn params() -> ConnectionParams {
+        from_env("RUSTQL_TEST_MYSQL", Engine::Mysql)
+    }
+
     pub fn backend() -> super::mysql::MysqlBackend {
         super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
+    }
+
+    pub fn pg_params() -> ConnectionParams {
+        from_env("RUSTQL_TEST_POSTGRES", Engine::Postgres)
+    }
+
+    pub fn pg_backend() -> super::postgres::PostgresBackend {
+        super::postgres::PostgresBackend::connect_with_progress(&pg_params(), |_| {}).unwrap()
     }
 }
 
