@@ -10,7 +10,8 @@ pub enum ActiveTab {
     Bbdd,
     Tabla,
     Datos,
-    Sql(usize), // index into sql_tabs Vec
+    /// Pestaña SQL, por su posición en `Session::sql_tabs`.
+    Sql(usize),
 }
 
 #[derive(Default)]
@@ -75,13 +76,13 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
 
     // Pestañas de contexto + pestañas SQL, con salto de línea si no caben
     ui.horizontal_wrapped(|ui| {
-        // Servidor tab
+        // Servidor
         let srv_label = format!("{PLUG} {}", ellipsize(server_name, 18));
         if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true).clicked() {
             result.tab_clicked = Some(ActiveTab::Servidor);
         }
 
-        // BBDD tab
+        // BBDD
         let db_label = format!("{DATABASE} {}", ellipsize(db_name.unwrap_or("BBDD"), 18));
         if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db).clicked() {
             result.tab_clicked = Some(ActiveTab::Bbdd);
@@ -99,7 +100,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
-        // Datos tab
+        // Datos
         let datos_label = format!("{GRID} {}", ellipsize(table_name.unwrap_or("Datos"), 18));
         if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table).clicked() {
             result.tab_clicked = Some(ActiveTab::Datos);
@@ -107,7 +108,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
 
         tab_separator(ui);
 
-        // SQL tabs
+        // Pestañas SQL
         for (i, title) in sql_titles.iter().enumerate() {
             if rename.as_ref().is_some_and(|r| r.idx == i) {
                 rename_field(ui, rename, &mut result);
@@ -143,7 +144,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
             }
         }
 
-        // New SQL tab button
+        // Pestaña SQL nueva
         if ui
             .add(egui::Button::new("＋").small().frame(false))
             .on_hover_text(format!("Nueva pestaña SQL  {CMD}T"))

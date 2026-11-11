@@ -505,7 +505,7 @@ fn show_create_table(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    // Ensure at least one column row
+    // Siempre hay al menos una fila de columna que rellenar
     if columns.is_empty() {
         columns.push(NewColumnDef::new());
     }

@@ -1,6 +1,6 @@
 use crate::db::quote_ident;
 
-// ── Format rows for copy ──────────────────────────────────────────────────────
+// ── Filas en el formato de copia ─────────────────────────────────────────────
 
 pub fn format_rows_for_copy(
     columns: &[String],

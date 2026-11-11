@@ -92,7 +92,7 @@ pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     ui.separator();
     ui.add_space(8.0);
 
-    theme::section_label(ui, "Límite de filas por consulta");
+    theme::section_label(ui, "Filas por página (tablas)");
     changed |= slider(
         ui,
         egui::Slider::new(&mut settings.query_limit, 100..=10000).step_by(100.0),
