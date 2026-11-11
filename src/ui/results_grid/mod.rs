@@ -19,12 +19,13 @@ use std::collections::BTreeSet;
 use eframe::egui;
 
 pub use self::apply_bar::{ApplyBarAction, show_apply_bar};
-pub use self::copy::format_rows_for_copy;
+use self::copy::format_rows_for_copy;
 pub use self::state::{
     CellRef, EditingCell, GridAction, GridSelection, InsertValue, PendingEdit, PendingInsert,
     RowRef, SortDir, SortSpec, TableViewState,
 };
 use crate::db::{ColumnInfo, QueryResult};
+use crate::settings::CopyFormat;
 use crate::ui::icons::PLUS;
 use crate::ui::{CMD, theme};
 
@@ -231,6 +232,47 @@ pub fn show(
         }
         (GridAction::None, None) => bar_action,
         (action, _) => action,
+    }
+}
+
+/// Grid de solo lectura para el resultado de una consulta libre: el mismo
+/// cursor, teclado y copia que el de una tabla, sin edición, ordenación ni
+/// filtros. `result_id` debe cambiar con cada resultado (sus columnas son
+/// otras). La única acción que puede devolver es `CopyRows`.
+pub fn show_read_only(
+    ui: &mut egui::Ui,
+    result_id: u64,
+    data: &QueryResult,
+    sel: &mut GridSelection,
+) -> GridAction {
+    let no_deletes = BTreeSet::new();
+    let grid = Grid {
+        id: ui.make_persistent_id(("result_grid", result_id)),
+        data,
+        column_info: &[],
+        sorts: &[],
+        pending_edits: &[],
+        pending_deletes: &no_deletes,
+        pending_inserts: &[],
+        editable: false,
+        queryable: false,
+    };
+    let mut editing = None;
+    show_grid(ui, &grid, sel, &mut editing).action
+}
+
+/// Copia al portapapeles las filas `rows` de `data` en el formato `fmt`.
+/// `table` es el nombre que llevan los INSERT.
+pub fn copy_rows(
+    ctx: &egui::Context,
+    data: &QueryResult,
+    rows: &BTreeSet<usize>,
+    fmt: &CopyFormat,
+    table: Option<&str>,
+) {
+    let rows: Vec<&Vec<Option<String>>> = rows.iter().filter_map(|&i| data.rows.get(i)).collect();
+    if !rows.is_empty() {
+        ctx.copy_text(format_rows_for_copy(&data.columns, &rows, fmt, table));
     }
 }
 

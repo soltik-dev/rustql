@@ -573,3 +573,85 @@ fn una_tabla_sin_filas_muestra_sus_columnas() {
         .expect("se dibuja la tabla");
     assert_eq!(layout.col_widths.len(), COLS);
 }
+
+/// Un frame del grid de solo lectura (el del editor SQL) sobre `data`.
+fn read_only_frame(
+    ctx: &egui::Context,
+    data: &QueryResult,
+    sel: &mut GridSelection,
+    modifiers: egui::Modifiers,
+    key: Option<egui::Key>,
+) -> GridAction {
+    let mut events = vec![egui::Event::ModifiersChanged(modifiers)];
+    if let Some(key) = key {
+        events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+    }
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(400.0, 300.0),
+        )),
+        events,
+        ..Default::default()
+    };
+    let mut action = GridAction::None;
+    ctx.run_ui(input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            action = show_read_only(ui, 1, data, sel);
+        });
+    })
+    .drop_without_applying_deltas();
+    action
+}
+
+#[test]
+fn el_grid_de_solo_lectura_navega_y_copia_pero_no_edita() {
+    let f = Fixture::new(5);
+    let data = f.view.table_data.unwrap();
+    let ctx = egui::Context::default();
+    let mut sel = GridSelection::default();
+    let none = egui::Modifiers::NONE;
+
+    read_only_frame(&ctx, &data, &mut sel, none, None);
+    ctx.memory_mut(|m| m.request_focus(sel.focus_id.unwrap()));
+    read_only_frame(&ctx, &data, &mut sel, none, None);
+
+    read_only_frame(&ctx, &data, &mut sel, none, Some(egui::Key::ArrowDown));
+    read_only_frame(&ctx, &data, &mut sel, none, Some(egui::Key::ArrowDown));
+    assert_eq!(
+        sel.cell,
+        Some(CellRef {
+            row: RowRef::Existing(1),
+            col: 0
+        })
+    );
+
+    // Nada que cambie los datos
+    for (modifiers, key) in [
+        (none, egui::Key::Delete),
+        (none, egui::Key::Enter),
+        (egui::Modifiers::COMMAND, egui::Key::Delete),
+        (egui::Modifiers::COMMAND, egui::Key::Insert),
+        (egui::Modifiers::COMMAND, egui::Key::D),
+        (egui::Modifiers::COMMAND, egui::Key::N),
+    ] {
+        let action = read_only_frame(&ctx, &data, &mut sel, modifiers, Some(key));
+        assert!(matches!(action, GridAction::None), "{key:?}: {action:?}");
+    }
+
+    sel.select_row(1, 0, false, false);
+    let action = read_only_frame(
+        &ctx,
+        &data,
+        &mut sel,
+        egui::Modifiers::COMMAND,
+        Some(egui::Key::C),
+    );
+    assert!(matches!(action, GridAction::CopyRows(None)), "{action:?}");
+}

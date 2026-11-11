@@ -342,12 +342,10 @@ impl Session {
                             self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
                         signals.sql = sql_editor::show(
                             ui,
-                            &mut tab.sql_text,
-                            &tab.result,
-                            tab.running.is_some(),
+                            tab,
                             ctrl_enter || f9,
-                            &mut tab.db_context,
                             databases,
+                            &sh.settings.copy_format,
                         );
                     }
                 }

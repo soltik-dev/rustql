@@ -288,6 +288,10 @@ impl Session {
         if let Some(tab) = self.sql_tabs.iter_mut().find(|t| t.running == Some(token)) {
             tab.running = None;
             tab.result = Some(result);
+            tab.result_run = token;
+            tab.elapsed_ms = Some(elapsed_ms);
+            // El cursor y la selección eran del resultado anterior
+            tab.selection = Default::default();
         }
     }
 

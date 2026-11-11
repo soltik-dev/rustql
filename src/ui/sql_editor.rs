@@ -3,15 +3,25 @@ use std::sync::Arc;
 use eframe::egui;
 
 use crate::db::QueryResult;
+use crate::settings::CopyFormat;
+use crate::ui::results_grid::{self, GridAction, GridSelection};
 use crate::ui::{CMD, sql_highlight, theme};
 
-#[derive(Default, Clone)]
+/// Una pestaña del editor SQL: la consulta, su contexto y el último
+/// resultado.
+#[derive(Default)]
 pub struct SqlTab {
     pub db_context: String,
     pub sql_text: String,
     pub result: Option<Result<QueryResult, String>>,
     /// Ejecución en curso (su número), si la hay.
     pub running: Option<u64>,
+    /// Ejecución que dio `result`: distingue un resultado del siguiente.
+    pub result_run: u64,
+    /// Lo que tardó la consulta de `result`.
+    pub elapsed_ms: Option<u64>,
+    /// Cursor y filas seleccionadas en el grid del resultado.
+    pub selection: GridSelection,
 }
 
 #[derive(Default)]
@@ -24,19 +34,28 @@ pub enum SqlEditorAction {
     },
 }
 
-/// Panel "SQL": editor de consultas libre. Con `running`, la consulta
-/// anterior aún no ha terminado y no se puede lanzar otra. `run_pressed`: el
-/// atajo de ejecutar (Ctrl+Enter, o F9 como en HeidiSQL).
+/// Panel "SQL": editor de consultas libre. Mientras la consulta anterior no
+/// termina no se puede lanzar otra. `run_pressed`: el atajo de ejecutar
+/// (Ctrl+Enter, o F9 como en HeidiSQL). `copy_format`: formato en el que
+/// Ctrl+C copia las filas seleccionadas del resultado.
 pub fn show(
     ui: &mut egui::Ui,
-    sql_text: &mut String,
-    last_result: &Option<Result<QueryResult, String>>,
-    running: bool,
+    tab: &mut SqlTab,
     run_pressed: bool,
-    db_context: &mut String,
     databases: &[String],
+    copy_format: &CopyFormat,
 ) -> SqlEditorAction {
     let mut action = SqlEditorAction::None;
+    let running = tab.running.is_some();
+    let SqlTab {
+        db_context,
+        sql_text,
+        result,
+        result_run,
+        elapsed_ms,
+        selection,
+        ..
+    } = tab;
 
     // Barra de controles
     ui.horizontal(|ui| {
@@ -122,7 +141,7 @@ pub fn show(
     ui.separator();
 
     // Resultado
-    match last_result {
+    match result {
         None => {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -137,10 +156,19 @@ pub fn show(
             theme::error_card(ui, &format!("Error: {e}"));
         }
         Some(Ok(data)) => {
+            let took = elapsed_ms.map_or_else(String::new, |ms| format!(" · {ms} ms"));
+            if data.columns.is_empty() {
+                // INSERT, UPDATE, DDL…: no hay nada que mostrar
+                ui.label(
+                    egui::RichText::new(format!("Ejecutada, sin resultado que mostrar{took}"))
+                        .color(p.text_muted),
+                );
+                return action;
+            }
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} filas, {} columnas",
+                        "{} filas, {} columnas{took}",
                         data.rows.len(),
                         data.columns.len()
                     ))
@@ -158,34 +186,11 @@ pub fn show(
             });
             ui.separator();
 
-            if !data.columns.is_empty() {
-                use egui_extras::{Column, TableBuilder};
-
-                let col_count = data.columns.len();
-                TableBuilder::new(ui)
-                    .striped(true)
-                    .resizable(true)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .columns(Column::auto().clip(true).at_least(60.0), col_count)
-                    .header(24.0, |mut header| {
-                        for col_name in &data.columns {
-                            header.col(|ui| {
-                                ui.strong(col_name);
-                            });
-                        }
-                    })
-                    .body(|body| {
-                        body.rows(18.0, data.rows.len(), |mut row| {
-                            let row_data = &data.rows[row.index()];
-                            for cell in row_data {
-                                row.col(|ui| {
-                                    ui.add(
-                                        egui::Label::new(cell.as_deref().unwrap_or("")).truncate(),
-                                    );
-                                });
-                            }
-                        });
-                    });
+            // El mismo grid que el de las tablas, en solo lectura
+            let grid_action = results_grid::show_read_only(ui, *result_run, data, selection);
+            if let GridAction::CopyRows(fmt) = grid_action {
+                let fmt = fmt.as_ref().unwrap_or(copy_format);
+                results_grid::copy_rows(ui.ctx(), data, &selection.rows, fmt, None);
             }
         }
     }

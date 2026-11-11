@@ -253,27 +253,9 @@ impl Session {
 
     /// Copia las filas seleccionadas al portapapeles en el formato `fmt`.
     fn copy_selected_rows(&self, ctx: &egui::Context, fmt: &CopyFormat) {
-        let Some(data) = &self.table_view.table_data else {
-            return;
-        };
-        let table = match &self.schema.selected_node {
-            Some(SelectedNode::Table { table, .. }) => Some(table.as_str()),
-            _ => None,
-        };
-        let rows: Vec<&Vec<Option<String>>> = self
-            .table_view
-            .selection
-            .rows
-            .iter()
-            .filter_map(|&i| data.rows.get(i))
-            .collect();
-        if !rows.is_empty() {
-            ctx.copy_text(results_grid::format_rows_for_copy(
-                &data.columns,
-                &rows,
-                fmt,
-                table,
-            ));
+        if let Some(data) = &self.table_view.table_data {
+            let table = self.schema.selected_table().map(|(_, table)| table);
+            results_grid::copy_rows(ctx, data, &self.table_view.selection.rows, fmt, table);
         }
     }
 
