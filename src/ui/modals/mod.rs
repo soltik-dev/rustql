@@ -147,6 +147,11 @@ pub enum ModalState {
         /// Principio de la consulta, para reconocerla.
         preview: String,
     },
+    /// El usuario pulsa «Limpiar» en una pestaña SQL que tiene texto.
+    ConfirmClearSql {
+        idx: usize,
+        preview: String,
+    },
     CloneTable {
         db: String,
         table: String,
@@ -219,6 +224,8 @@ pub enum ModalAction {
     DeleteProfile,
     /// Cerrar la pestaña SQL y descartar su consulta.
     CloseSqlTab(usize),
+    /// Borrar la consulta de la pestaña SQL.
+    ClearSql(usize),
     CloneTable {
         db: String,
         src_table: String,
@@ -359,9 +366,20 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             pending_count,
         } => show_confirm_close_session(ctx, title, *pending_count),
         ModalState::ConfirmDeleteProfile { name } => show_confirm_delete_profile(ctx, name),
-        ModalState::ConfirmCloseSqlTab { idx, preview } => {
-            show_confirm_close_sql_tab(ctx, *idx, preview)
-        }
+        ModalState::ConfirmCloseSqlTab { idx, preview } => show_confirm_discard_sql(
+            ctx,
+            &format!("Cerrar SQL {}", *idx + 1),
+            "Cerrar pestaña",
+            preview,
+            ModalAction::CloseSqlTab(*idx),
+        ),
+        ModalState::ConfirmClearSql { idx, preview } => show_confirm_discard_sql(
+            ctx,
+            &format!("Limpiar SQL {}", *idx + 1),
+            "Limpiar",
+            preview,
+            ModalAction::ClearSql(*idx),
+        ),
         ModalState::CloneTable {
             db,
             table,
@@ -577,10 +595,9 @@ fn show_create_table(
 
         ui.separator();
         form_buttons(ui, busy, |ui| {
-            if theme::primary_button(ui, "Crear tabla").clicked()
-                && !name.trim().is_empty()
-                && !columns.is_empty()
-            {
+            let create_clicked = theme::primary_button(ui, "Crear tabla").clicked();
+            let enter_pressed = ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (create_clicked || enter_pressed) && !name.trim().is_empty() && !columns.is_empty() {
                 action = ModalAction::CreateTable {
                     db: db.to_string(),
                     name: name.trim().to_string(),
@@ -982,20 +999,27 @@ fn show_confirm_delete_profile(ctx: &egui::Context, name: &str) -> ModalAction {
     action
 }
 
-fn show_confirm_close_sql_tab(ctx: &egui::Context, idx: usize, preview: &str) -> ModalAction {
+/// Cerrar o limpiar una pestaña SQL con texto: en los dos casos la consulta
+/// se pierde. `confirm` es el texto del botón y `confirmed` lo que devuelve.
+fn show_confirm_discard_sql(
+    ctx: &egui::Context,
+    title: &str,
+    confirm: &str,
+    preview: &str,
+    confirmed: ModalAction,
+) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
 
-    let title = format!("Cerrar SQL {}", idx + 1);
-    dialog(ctx, &title, 320.0, Some(&mut open), |ui| {
+    dialog(ctx, title, 320.0, Some(&mut open), |ui| {
         ui.set_max_width(420.0);
         ui.label("La consulta de esta pestaña se perderá:");
         ui.add_space(4.0);
         ui.label(egui::RichText::new(preview).monospace().weak());
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if theme::warning_button(ui, format!("{TRASH}  Cerrar pestaña")).clicked() {
-                action = ModalAction::CloseSqlTab(idx);
+            if theme::warning_button(ui, format!("{TRASH}  {confirm}")).clicked() {
+                action = confirmed;
             }
             if ui.button("Cancelar").clicked() {
                 action = ModalAction::Cancel;
@@ -1057,7 +1081,9 @@ fn show_clone_table(
                     format!("{CLONE}  Clonar"),
                 )
                 .clicked();
-                if ok {
+                let enter_pressed =
+                    ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ok || (enter_pressed && !new_name.is_empty()) {
                     action = ModalAction::CloneTable {
                         db: db.to_string(),
                         src_table: table.to_string(),

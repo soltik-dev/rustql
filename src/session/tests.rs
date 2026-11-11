@@ -5,6 +5,7 @@ use super::*;
 use crate::db::{ColumnInfo, DatabaseInfo, DbResult, TableInfo};
 use crate::ui::connection_panel::SaveProfile;
 use crate::ui::modals::NewColumnDef;
+use crate::ui::sql_editor::SqlEditorAction;
 
 /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
 struct FakeBackend;
@@ -832,6 +833,32 @@ fn cerrar_una_pestana_sql_con_texto_pide_confirmacion() {
     s.apply_signals(&ctx, &mut sh, close(0), FrameKeys::default());
     assert!(matches!(s.modal, ModalState::None));
     assert_eq!(s.sql_tabs.len(), 1);
+}
+
+#[test]
+fn limpiar_el_editor_pregunta_y_luego_guarda_la_pestana_vacia() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    s.active_tab = ActiveTab::Sql(0);
+    s.sql_tabs[0].sql_text = "SELECT importante".into();
+    let signals = FrameSignals {
+        sql: SqlEditorAction::Clear,
+        ..Default::default()
+    };
+    s.apply_signals(
+        &egui::Context::default(),
+        &mut sh,
+        signals,
+        FrameKeys::default(),
+    );
+    assert_eq!(s.sql_tabs[0].sql_text, "SELECT importante");
+    assert!(matches!(
+        s.modal,
+        ModalState::ConfirmClearSql { idx: 0, .. }
+    ));
+    s.handle_modal_action(ModalAction::ClearSql(0), &mut sh);
+    assert!(s.sql_tabs[0].sql_text.is_empty());
+    assert_eq!(saved_sql(&s, &sh), [""]);
 }
 
 #[test]

@@ -416,11 +416,24 @@ impl Session {
     }
 
     fn handle_sql_action(&mut self, sh: &mut Shared, action: SqlEditorAction) {
-        // Persistir texto de pestañas SQL al ejecutar
-        if let SqlEditorAction::Execute { sql, db_context } = action {
-            self.save_tabs_state(sh);
-            if let ActiveTab::Sql(tab_idx) = self.active_tab {
+        let ActiveTab::Sql(tab_idx) = self.active_tab else {
+            return;
+        };
+        match action {
+            SqlEditorAction::None => {}
+            SqlEditorAction::Execute { sql, db_context } => {
+                // Persistir texto de pestañas SQL al ejecutar
+                self.save_tabs_state(sh);
                 self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
+            }
+            // Limpiar no se puede deshacer: se pregunta antes
+            SqlEditorAction::Clear => {
+                if let Some(tab) = self.sql_tabs.get(tab_idx) {
+                    self.modal = ModalState::ConfirmClearSql {
+                        idx: tab_idx,
+                        preview: crate::ui::ellipsize(tab.sql_text.trim(), 120),
+                    };
+                }
             }
         }
     }
@@ -435,6 +448,13 @@ impl Session {
             ModalAction::CloseSqlTab(idx) => {
                 self.modal = ModalState::None;
                 self.close_sql_tab(sh, idx);
+            }
+            ModalAction::ClearSql(idx) => {
+                self.modal = ModalState::None;
+                if let Some(tab) = self.sql_tabs.get_mut(idx) {
+                    tab.sql_text.clear();
+                }
+                self.save_tabs_state(sh);
             }
             ModalAction::ApplyAndSwitch { new_db, new_table } => {
                 self.modal = ModalState::None;

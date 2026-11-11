@@ -32,6 +32,8 @@ pub enum SqlEditorAction {
         sql: String,
         db_context: String,
     },
+    /// Borrar la consulta (la sesión pregunta antes).
+    Clear,
 }
 
 /// Panel "SQL": editor de consultas libre. Mientras la consulta anterior no
@@ -97,8 +99,12 @@ pub fn show(
                 };
             }
         }
-        if ui.button("Limpiar").clicked() {
-            sql_text.clear();
+        let has_text = !sql_text.trim().is_empty();
+        if ui
+            .add_enabled(has_text, egui::Button::new("Limpiar"))
+            .clicked()
+        {
+            action = SqlEditorAction::Clear;
         }
         if running {
             ui.spinner();
