@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::db::ConnectionParams;
+use crate::db::{ConnectionParams, Engine};
 use crate::loadable::Loadable;
 use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::secrets;
@@ -55,7 +55,8 @@ pub fn show_favorites(
                         color_dot(ui, profile.color);
                         ui.selectable_label(is_selected, &profile.name)
                     })
-                    .inner;
+                    .inner
+                    .on_hover_text(profile.summary());
                 if resp.clicked() {
                     clicked = Some(i);
                 }
@@ -141,6 +142,17 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
         .spacing([16.0, 8.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
+            ui.label("Motor:");
+            ui.horizontal(|ui| {
+                for engine in Engine::ALL {
+                    let selected = params.engine == engine;
+                    if ui.selectable_label(selected, engine.label()).clicked() && !selected {
+                        switch_engine(params, port_str, engine);
+                    }
+                }
+            });
+            ui.end_row();
+
             // Enter en cualquiera de los campos de la conexión conecta
             let mut connect = false;
             let mut field_width = FIELD_WIDTH;
@@ -278,6 +290,19 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
     });
 }
 
+/// Cambia el motor del formulario. El puerto y el usuario, si eran los
+/// habituales del motor anterior, pasan a ser los del nuevo.
+fn switch_engine(params: &mut ConnectionParams, port_str: &mut String, engine: Engine) {
+    let previous = params.engine;
+    if port_str.trim() == previous.default_port().to_string() {
+        *port_str = engine.default_port().to_string();
+    }
+    if params.user == previous.default_user() {
+        params.user = engine.default_user().to_string();
+    }
+    params.engine = engine;
+}
+
 /// Ancho mínimo de los campos del formulario.
 const FIELD_WIDTH: f32 = 220.0;
 
@@ -307,10 +332,13 @@ fn database_picker(
         d.insert_temp(stage_id, stage);
         previous != Some(stage)
     });
+    // Al abrirse, lo que hubiera es de la vez anterior (quizá de otro
+    // servidor): la lista nueva se pide en este mismo frame
+    let loading = Loadable::Loading(0);
+    let databases = if opened { &loading } else { databases };
     popup.sizing_pass(changed && !opened).show(|ui| {
         ui.set_min_width(FIELD_WIDTH);
         match databases {
-            // Recién abierto: la lista se pide en este mismo frame
             Loadable::NotLoaded | Loadable::Loading(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -448,4 +476,25 @@ fn swatch(
         );
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cambiar_de_motor_propone_su_puerto_y_su_usuario() {
+        let mut params = ConnectionParams::default();
+        let mut port = params.port.to_string();
+        switch_engine(&mut params, &mut port, Engine::Postgres);
+        assert_eq!((params.engine, port.as_str()), (Engine::Postgres, "5432"));
+        assert_eq!(params.user, "postgres");
+
+        // Lo que el usuario ya había escrito no se toca
+        port = "6543".into();
+        params.user = "app".into();
+        switch_engine(&mut params, &mut port, Engine::Mysql);
+        assert_eq!((params.engine, port.as_str()), (Engine::Mysql, "6543"));
+        assert_eq!(params.user, "app");
+    }
 }

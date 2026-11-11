@@ -86,6 +86,22 @@ impl ConnectionProfile {
         }
     }
 
+    /// A dónde conecta, en una línea: «PostgreSQL · app@db:5432 · tienda».
+    pub fn summary(&self) -> String {
+        let mut text = format!(
+            "{} · {}@{}:{}",
+            self.engine.label(),
+            self.user,
+            self.host,
+            self.port
+        );
+        if !self.database.is_empty() {
+            text.push_str(" · ");
+            text.push_str(&self.database);
+        }
+        text
+    }
+
     /// Tiene contraseña guardada, en el llavero o (heredada) en claro.
     pub fn has_password(&self) -> bool {
         self.password_in_keyring || self.password.is_some()
@@ -215,6 +231,25 @@ mod tests {
             ..profile
         };
         assert_eq!(sin_llavero.to_params().keyring_id, None);
+    }
+
+    #[test]
+    fn los_perfiles_anteriores_son_de_mysql() {
+        let json = r#"[{"name":"Local","host":"127.0.0.1","port":3306,"user":"root"}]"#;
+        let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(json).unwrap();
+        assert_eq!(profiles[0].to_params().engine, Engine::Mysql);
+        assert_eq!(
+            profiles[0].summary(),
+            "MySQL / MariaDB · root@127.0.0.1:3306"
+        );
+
+        profiles[0].engine = Engine::Postgres;
+        profiles[0].database = "tienda".into();
+        let json = serde_json::to_string(&profiles[0]).unwrap();
+        assert!(json.contains(r#""engine":"postgres""#), "{json}");
+        let back: ConnectionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.to_params().engine, Engine::Postgres);
+        assert_eq!(back.summary(), "PostgreSQL · root@127.0.0.1:3306 · tienda");
     }
 
     #[test]

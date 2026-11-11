@@ -1090,13 +1090,23 @@ impl Session {
     /// marcada. Si las tablas aún no están cargadas, se piden y la lista se
     /// rellena al llegar.
     fn open_export(&mut self, sh: &Shared, db: String, table: Option<String>) {
+        if !self.engine().supports_export() {
+            return;
+        }
+        // Los servidores de destino son los del mismo motor
+        let profiles = sh
+            .profiles
+            .iter()
+            .filter(|p| p.engine == self.engine())
+            .cloned()
+            .collect();
         self.request_tables(&db);
         self.modal = ModalState::ExportData {
             source_db: db.clone(),
             source_table: table,
             tables: Vec::new(),
             databases: self.schema.databases.ready().cloned().unwrap_or_default(),
-            profiles: sh.profiles.clone(),
+            profiles,
             destination: ExportDestination::SqlFile {
                 path: String::new(),
             },

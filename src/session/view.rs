@@ -195,6 +195,7 @@ impl Session {
                             server_name: &self.title,
                             conn_color,
                             single_database: self.params.only_database().is_some(),
+                            can_export: self.params.engine.supports_export(),
                         };
                         sidebar::show(
                             ui,
@@ -350,7 +351,13 @@ impl Session {
                     if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
                         let databases =
                             self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
-                        signals.sql = sql_editor::show(ui, tab, ctrl_enter || f9, databases);
+                        signals.sql = sql_editor::show(
+                            ui,
+                            tab,
+                            ctrl_enter || f9,
+                            databases,
+                            self.params.engine,
+                        );
                     }
                 }
             });

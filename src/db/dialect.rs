@@ -36,7 +36,6 @@ pub fn pg_split_table(name: &str) -> (&str, &str) {
     name.split_once('.').unwrap_or((PG_DEFAULT_SCHEMA, name))
 }
 
-#[allow(dead_code)] // `ALL` y `label`, hasta que el formulario deje elegir motor
 impl Engine {
     pub const ALL: [Engine; 2] = [Engine::Mysql, Engine::Postgres];
 
@@ -60,6 +59,70 @@ impl Engine {
             Engine::Mysql => "root",
             Engine::Postgres => "postgres",
         }
+    }
+
+    /// Charsets que ofrece el diálogo de crear una BBDD. Vacío si el motor
+    /// no los tiene por BBDD (se crea con la codificación del servidor).
+    pub fn database_charsets(self) -> &'static [&'static str] {
+        match self {
+            Engine::Mysql => &["utf8mb4", "utf8", "latin1", "ascii", "binary"],
+            Engine::Postgres => &[],
+        }
+    }
+
+    /// Tipos de columna que ofrece el diálogo de crear una tabla, y si
+    /// admiten longitud (`VARCHAR(50)`).
+    pub fn column_types(self) -> &'static [(&'static str, bool)] {
+        match self {
+            Engine::Mysql => &[
+                ("INT", true),
+                ("BIGINT", true),
+                ("SMALLINT", true),
+                ("TINYINT", true),
+                ("VARCHAR", true),
+                ("TEXT", false),
+                ("MEDIUMTEXT", false),
+                ("LONGTEXT", false),
+                ("CHAR", true),
+                ("DECIMAL", true),
+                ("FLOAT", true),
+                ("DOUBLE", true),
+                ("DATE", false),
+                ("DATETIME", false),
+                ("TIMESTAMP", false),
+                ("TIME", false),
+                ("BOOLEAN", false),
+                ("JSON", false),
+                ("BLOB", false),
+            ],
+            Engine::Postgres => &[
+                ("INTEGER", false),
+                ("BIGINT", false),
+                ("SMALLINT", false),
+                ("SERIAL", false),
+                ("BIGSERIAL", false),
+                ("VARCHAR", true),
+                ("TEXT", false),
+                ("CHAR", true),
+                ("NUMERIC", true),
+                ("REAL", false),
+                ("DOUBLE PRECISION", false),
+                ("DATE", false),
+                ("TIMESTAMP", false),
+                ("TIMESTAMPTZ", false),
+                ("TIME", false),
+                ("BOOLEAN", false),
+                ("JSONB", false),
+                ("UUID", false),
+                ("BYTEA", false),
+            ],
+        }
+    }
+
+    /// Si se pueden exportar BBDD y tablas. La exportación reconstruye las
+    /// tablas con `SHOW CREATE TABLE`, que solo existe en MySQL.
+    pub fn supports_export(self) -> bool {
+        self == Engine::Mysql
     }
 
     /// Identificador entre las comillas del motor: `` `nombre` `` o `"nombre"`.

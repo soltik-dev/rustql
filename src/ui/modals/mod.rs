@@ -250,29 +250,6 @@ pub enum ModalAction {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const CHARSETS: &[&str] = &["utf8mb4", "utf8", "latin1", "ascii", "binary"];
-const COL_TYPES: &[&str] = &[
-    "INT",
-    "BIGINT",
-    "SMALLINT",
-    "TINYINT",
-    "VARCHAR",
-    "TEXT",
-    "MEDIUMTEXT",
-    "LONGTEXT",
-    "CHAR",
-    "DECIMAL",
-    "FLOAT",
-    "DOUBLE",
-    "DATE",
-    "DATETIME",
-    "TIMESTAMP",
-    "TIME",
-    "BOOLEAN",
-    "JSON",
-    "BLOB",
-];
-
 fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
     theme::danger_button(ui, text).clicked()
 }
@@ -346,13 +323,13 @@ pub fn show(
             name,
             charset,
             error,
-        } => show_create_database(ctx, name, charset, error, busy),
+        } => show_create_database(ctx, engine, name, charset, error, busy),
         ModalState::CreateTable {
             db,
             name,
             columns,
             error,
-        } => show_create_table(ctx, db, name, columns, error, busy),
+        } => show_create_table(ctx, engine, db, name, columns, error, busy),
         ModalState::ConfirmDrop { target, typed } => show_confirm_drop(ctx, target, typed),
         ModalState::ConfirmTruncate { target } => show_confirm_truncate(ctx, target),
         ModalState::FilterInput {
@@ -437,6 +414,7 @@ pub fn show(
 
 fn show_create_database(
     ctx: &egui::Context,
+    engine: Engine,
     name: &mut String,
     charset: &mut String,
     error: &mut Option<String>,
@@ -458,15 +436,19 @@ fn show_create_database(
                 );
                 ui.end_row();
 
-                ui.label("Charset:");
-                egui::ComboBox::from_id_salt("charset_combo")
-                    .selected_text(charset.as_str())
-                    .show_ui(ui, |ui| {
-                        for &cs in CHARSETS {
-                            ui.selectable_value(charset, cs.to_string(), cs);
-                        }
-                    });
-                ui.end_row();
+                // Solo en los motores con charset por BBDD
+                let charsets = engine.database_charsets();
+                if !charsets.is_empty() {
+                    ui.label("Charset:");
+                    egui::ComboBox::from_id_salt("charset_combo")
+                        .selected_text(charset.as_str())
+                        .show_ui(ui, |ui| {
+                            for &cs in charsets {
+                                ui.selectable_value(charset, cs.to_string(), cs);
+                            }
+                        });
+                    ui.end_row();
+                }
             });
 
         if let Some(e) = error {
@@ -501,6 +483,7 @@ fn show_create_database(
 
 fn show_create_table(
     ctx: &egui::Context,
+    engine: Engine,
     db: &str,
     name: &mut String,
     columns: &mut Vec<NewColumnDef>,
@@ -569,7 +552,7 @@ fn show_create_table(
                             .selected_text(&col.col_type)
                             .width(100.0)
                             .show_ui(ui, |ui| {
-                                for &t in COL_TYPES {
+                                for &(t, _) in engine.column_types() {
                                     ui.selectable_value(&mut col.col_type, t.to_string(), t);
                                 }
                             });
@@ -849,20 +832,13 @@ pub fn build_create_table_sql(
         if col.name.trim().is_empty() {
             continue;
         }
-        let type_part = if col.length.trim().is_empty()
-            || matches!(
-                col.col_type.as_str(),
-                "TEXT"
-                    | "MEDIUMTEXT"
-                    | "LONGTEXT"
-                    | "BLOB"
-                    | "JSON"
-                    | "BOOLEAN"
-                    | "DATE"
-                    | "DATETIME"
-                    | "TIMESTAMP"
-                    | "TIME"
-            ) {
+        // Un tipo que no es de la lista (no debería llegar) se deja como venga
+        let takes_length = engine
+            .column_types()
+            .iter()
+            .find(|(name, _)| *name == col.col_type)
+            .is_none_or(|(_, takes_length)| *takes_length);
+        let type_part = if col.length.trim().is_empty() || !takes_length {
             col.col_type.clone()
         } else {
             format!("{}({})", col.col_type, col.length.trim())
@@ -1216,9 +1192,14 @@ mod tests {
             "CREATE TABLE `bd`.`t` (\n  `id` INT NOT NULL,\n  `nombre` VARCHAR(50),\n  \
              PRIMARY KEY (`id`)\n)"
         );
+        // Los tipos sin longitud la ignoran aunque el campo traiga una
+        let columns = [
+            column("id", "SERIAL", "11", true),
+            column("nombre", "VARCHAR", "50", false),
+        ];
         assert_eq!(
             build_create_table_sql(Engine::Postgres, "bd", "ventas.t", &columns),
-            "CREATE TABLE \"ventas\".\"t\" (\n  \"id\" INT NOT NULL,\n  \"nombre\" VARCHAR(50),\n  \
+            "CREATE TABLE \"ventas\".\"t\" (\n  \"id\" SERIAL NOT NULL,\n  \"nombre\" VARCHAR(50),\n  \
              PRIMARY KEY (\"id\")\n)"
         );
     }
