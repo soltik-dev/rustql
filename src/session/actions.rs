@@ -148,15 +148,7 @@ impl Session {
         }
 
         if tab_bar.new_sql_tab || (keys.ctrl_t && self.is_connected()) {
-            let db_ctx = self.selected_db().unwrap_or_default().to_string();
-            let new_idx = self.sql_tabs.len();
-            self.sql_tabs.push(SqlTab {
-                db_context: db_ctx,
-                sql_text: String::new(),
-                ..Default::default()
-            });
-            self.active_tab = ActiveTab::Sql(new_idx);
-            self.save_tabs_state(sh);
+            self.open_sql_tab(sh, None, String::new());
         }
 
         if let Some(idx) = tab_bar.close_sql_tab
@@ -172,6 +164,22 @@ impl Session {
                 };
             }
         }
+    }
+
+    /// Abre una pestaña SQL nueva con `sql_text` y pasa a ella. Su contexto
+    /// es `db` o, sin él, la BBDD seleccionada en el árbol.
+    pub fn open_sql_tab(&mut self, sh: &mut Shared, db: Option<String>, sql_text: String) {
+        if !self.is_connected() {
+            return;
+        }
+        let db_context = db.unwrap_or_else(|| self.selected_db().unwrap_or_default().to_string());
+        self.sql_tabs.push(SqlTab {
+            db_context,
+            sql_text,
+            ..Default::default()
+        });
+        self.active_tab = ActiveTab::Sql(self.sql_tabs.len() - 1);
+        self.save_tabs_state(sh);
     }
 
     /// Cierra la pestaña SQL `idx` y descarta su texto. Siempre queda al
@@ -367,15 +375,8 @@ impl Session {
                 self.switch_to_table(sh, db, table, ActiveTab::Tabla);
             }
             SidebarAction::OpenInSql { db, table } => {
-                let new_idx = self.sql_tabs.len();
                 let sql_text = format!("SELECT * FROM {} WHERE ", qualified(&db, &table));
-                self.sql_tabs.push(SqlTab {
-                    db_context: db.clone(),
-                    sql_text,
-                    ..Default::default()
-                });
-                self.active_tab = ActiveTab::Sql(new_idx);
-                self.save_tabs_state(sh);
+                self.open_sql_tab(sh, Some(db), sql_text);
             }
             SidebarAction::CloneTable { db, table } => {
                 self.modal = ModalState::CloneTable {

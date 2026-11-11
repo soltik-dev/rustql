@@ -8,6 +8,7 @@ use crate::session::{FrameKeys, Session, Shared};
 use crate::settings;
 use crate::table_state;
 use crate::ui::conn_tabs::{self, ConnTab, ConnTabsAction};
+use crate::ui::log_panel::LogAction;
 use crate::ui::modals::ModalState;
 use crate::ui::{log_panel, settings_panel, statusbar, theme};
 
@@ -318,17 +319,15 @@ impl eframe::App for RustqlApp {
         let (tabs_action, tabs_rect) = self.show_conn_tabs(ui);
 
         let session = &self.sessions[self.active];
+        let mut log_action = LogAction::None;
         if session.is_connected() && self.ui.show_log {
-            frame_bottom = egui::Panel::bottom("log_panel")
+            let panel = egui::Panel::bottom("log_panel")
                 .resizable(true)
                 .min_size(80.0)
                 .max_size(300.0)
-                .show(ui, |ui| {
-                    log_panel::show(ui, &session.query_log);
-                })
-                .response
-                .rect
-                .top();
+                .show(ui, |ui| log_panel::show(ui, &session.query_log));
+            frame_bottom = panel.response.rect.top();
+            log_action = panel.inner;
         }
 
         if self.ui.show_settings {
@@ -377,6 +376,9 @@ impl eframe::App for RustqlApp {
 
         if let Some(idx) = outcome.profile_removed {
             self.on_profile_removed(idx);
+        }
+        if let LogAction::OpenInSql(sql) = log_action {
+            self.sessions[self.active].open_sql_tab(&mut self.shared, None, sql);
         }
 
         // Cerrar invalida los índices de la barra: ignorar su acción ese frame

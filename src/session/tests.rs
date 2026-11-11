@@ -862,6 +862,18 @@ fn limpiar_el_editor_pregunta_y_luego_guarda_la_pestana_vacia() {
 }
 
 #[test]
+fn una_consulta_del_log_se_abre_en_una_pestana_sql_nueva() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    s.open_sql_tab(&mut sh, None, "SELECT del log".into());
+    assert_eq!(s.active_tab, ActiveTab::Sql(1));
+    assert_eq!(s.sql_tabs[1].sql_text, "SELECT del log");
+    // Con la BBDD de la tabla abierta como contexto, y ya guardada
+    assert_eq!(s.sql_tabs[1].db_context, "db");
+    assert_eq!(saved_sql(&s, &sh), ["", "SELECT del log"]);
+}
+
+#[test]
 fn ctrl_w_cierra_la_pestana_sql_activa_y_solo_esa() {
     let mut s = session_with_table();
     let mut sh = shared();
