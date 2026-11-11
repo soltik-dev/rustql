@@ -42,6 +42,7 @@ pub(super) fn show(
     let spacing = ui.spacing().item_spacing;
     let row_h = row_height(ui);
     let header_h = row_h + 2.0;
+    let revealing = sel.reveal;
     let (scroll_x, scroll_y) = pending_scroll(ui, g, sel, spacing, row_h);
 
     let mut col_widths = Vec::new();
@@ -99,12 +100,31 @@ pub(super) fn show(
     });
 
     let (offset_y, body_height) = outer.inner;
-    sel.layout = Some(GridLayout {
+    let layout = GridLayout {
         offset: egui::vec2(outer.state.clamped_offset().x, offset_y),
         size: egui::vec2(outer.inner_rect.width(), body_height),
         row_pitch: row_h + spacing.y,
         col_widths,
-    });
+    };
+    // El desplazamiento hasta el cursor se calculó con la geometría del frame
+    // anterior. Si en este ha cambiado (una fila nueva alarga el contenido y
+    // hace aparecer la barra de guardar, que acorta el hueco) puede haberse
+    // quedado corto: se comprueba con la de ahora y se repite. Con tope,
+    // por si el destino no fuera alcanzable.
+    if revealing
+        && !sel.reveal
+        && sel.reveal_tries < 3
+        && let Some(cell) = sel.cell
+    {
+        let (x, y) = reveal_target(&layout, g, cell, row_h, spacing);
+        let off_by = |target: Option<f32>, now: f32| target.is_some_and(|t| (t - now).abs() > 3.0);
+        if off_by(x, layout.offset.x) || off_by(y, layout.offset.y) {
+            sel.reveal = true;
+            sel.reveal_tries += 1;
+            ui.ctx().request_repaint();
+        }
+    }
+    sel.layout = Some(layout);
 
     // El grid entero es un widget enfocable: con el foco recibe las teclas.
     // egui se lo quita con cada clic que no cae sobre él (y los de dentro
@@ -143,36 +163,43 @@ fn pending_scroll(
     spacing: egui::Vec2,
     row_h: f32,
 ) -> (Option<f32>, Option<f32>) {
-    let mut scroll_x = None;
-    let mut scroll_y = None;
-    if std::mem::take(&mut sel.scroll_top) {
-        scroll_y = Some(0.0);
-    }
+    let to_top = std::mem::take(&mut sel.scroll_top).then_some(0.0);
     if !sel.reveal {
-        return (scroll_x, scroll_y);
+        return (None, to_top);
     }
     let Some(cell) = sel.cell else {
         sel.reveal = false;
-        return (scroll_x, scroll_y);
+        return (None, to_top);
     };
     // Hace falta la geometría del frame anterior; en el primero se espera
     let Some(layout) = &sel.layout else {
         ui.ctx().request_repaint();
-        return (scroll_x, scroll_y);
+        return (None, to_top);
     };
+    let (x, y) = reveal_target(layout, g, cell, row_h, spacing);
+    sel.reveal = false;
+    (x, y.or(to_top))
+}
+
+/// Desplazamiento (x, y) con el que `cell` queda a la vista con la geometría
+/// `layout`; `None` en el eje que no hay que mover.
+fn reveal_target(
+    layout: &GridLayout,
+    g: &Grid,
+    cell: CellRef,
+    row_h: f32,
+    spacing: egui::Vec2,
+) -> (Option<f32>, Option<f32>) {
     let top = cell.row.display(g.existing()) as f32 * (row_h + spacing.y);
-    if let Some(y) = scroll_into_view(top, top + row_h, layout.offset.y, layout.size.y) {
-        scroll_y = Some(y);
-    }
-    if let Some(&width) = layout.col_widths.get(cell.col) {
+    let y = scroll_into_view(top, top + row_h, layout.offset.y, layout.size.y);
+    let x = layout.col_widths.get(cell.col).and_then(|&width| {
         let left: f32 = layout.col_widths[..cell.col]
             .iter()
             .map(|w| w + spacing.x)
             .sum();
-        scroll_x = scroll_into_view(left, left + width, layout.offset.x, layout.size.x);
-    }
-    sel.reveal = false;
-    (scroll_x, scroll_y)
+        scroll_into_view(left, left + width, layout.offset.x, layout.size.x)
+    });
+    (x, y)
 }
 
 /// Ancho inicial de cada columna según su cabecera y una muestra del
@@ -424,6 +451,8 @@ fn show_editor(
     // lock_focus: con Tab, egui no se lleva el foco a otro widget
     let resp = ui.add(
         egui::TextEdit::singleline(&mut edit.buffer)
+            // La misma fuente que las celdas: el texto no cambia al editar
+            .font(egui::TextStyle::Monospace)
             .desired_width(f32::INFINITY)
             .lock_focus(true),
     );

@@ -192,6 +192,8 @@ pub struct GridSelection {
     pub(super) drag_from: Option<usize>,
     /// El cursor se movió sin el ratón: hay que desplazar el grid hasta él.
     pub(super) reveal: bool,
+    /// Veces que se ha intentado ya (ver `table::show`).
+    pub(super) reveal_tries: u8,
     /// Volver arriba (datos nuevos con otro orden o filtro).
     pub(super) scroll_top: bool,
     /// Dónde quedó cada cosa en el frame anterior.
@@ -225,6 +227,7 @@ impl GridSelection {
     pub fn move_to(&mut self, cell: CellRef) {
         self.select_cell(cell);
         self.reveal = true;
+        self.reveal_tries = 0;
     }
 
     /// Selecciona filas enteras: solo `row`, el rango desde la anterior

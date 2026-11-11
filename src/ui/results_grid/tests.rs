@@ -13,6 +13,8 @@ struct Fixture {
     column_info: Vec<ColumnInfo>,
     /// Cargando o guardando: el grid no deja editar.
     busy: bool,
+    /// Alto de la ventana.
+    height: f32,
 }
 
 fn column(name: &str, extra: &str, nullable: bool) -> ColumnInfo {
@@ -52,17 +54,18 @@ impl Fixture {
             view,
             column_info,
             busy: false,
+            height: 300.0,
         }
     }
 
-    /// Un frame de 400×300 con los eventos indicados.
+    /// Un frame de 400 de ancho con los eventos indicados.
     fn frame(&mut self, modifiers: egui::Modifiers, mut events: Vec<egui::Event>) -> GridAction {
         // Los modificadores llegan como evento y se quedan hasta el siguiente
         events.insert(0, egui::Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(400.0, 300.0),
+                egui::vec2(400.0, self.height),
             )),
             events,
             ..Default::default()
@@ -656,4 +659,46 @@ fn el_grid_de_solo_lectura_navega_y_copia_pero_no_edita() {
         Some(egui::Key::C),
     );
     assert!(matches!(action, GridAction::CopyRows(None)), "{action:?}");
+}
+
+impl Fixture {
+    /// Si la fila `display` se ve entera en la zona visible del grid.
+    fn row_visible(&self, display: usize) -> bool {
+        let layout = self.view.selection.layout.as_ref().unwrap();
+        let gap = self.ctx.global_style().spacing.item_spacing.y;
+        let top = display as f32 * layout.row_pitch;
+        let bottom = top + layout.row_pitch - gap;
+        // Margen: el contenido de la tabla acaba un par de puntos antes de
+        // lo que da la cuenta por filas
+        top >= layout.offset.y - 3.0 && bottom <= layout.offset.y + layout.size.y + 3.0
+    }
+}
+
+#[test]
+fn una_fila_recien_anadida_queda_a_la_vista() {
+    let mut f = Fixture::new(300);
+    f.focus();
+    // Lo que hace la sesión con InsertRow: añadir la fila y llevar el cursor
+    f.add_insert_row();
+    f.view.selection.move_to(CellRef {
+        row: RowRef::Insert(0),
+        col: 1,
+    });
+    // En ese mismo frame aparece la barra de guardar y el grid encoge
+    f.height = 260.0;
+    for _ in 0..4 {
+        f.idle();
+    }
+    assert!(
+        f.row_visible(300),
+        "la fila nueva no se ve: {:?}",
+        f.visible()
+    );
+
+    // Y sigue a la vista al moverse por ella
+    f.press(egui::Key::ArrowRight);
+    for _ in 0..4 {
+        f.idle();
+    }
+    assert!(f.row_visible(300), "{:?}", f.visible());
 }
