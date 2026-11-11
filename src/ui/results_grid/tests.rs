@@ -172,11 +172,13 @@ fn el_scroll_vertical_sigue_al_cursor() {
     assert_eq!(f.cursor(), Some((RowRef::Existing(60), 0)));
     let (offset, size) = f.visible();
     assert!(offset.y > 0.0, "el grid no se ha desplazado");
-    let pitch = table::ROW_H + f.ctx.global_style().spacing.item_spacing.y;
-    let top = 60.0 * pitch;
+    // El paso entre filas incluye el espacio que las separa
+    let pitch = f.view.selection.layout.as_ref().unwrap().row_pitch;
+    let gap = f.ctx.global_style().spacing.item_spacing.y;
+    let (top, bottom) = (60.0 * pitch, 61.0 * pitch - gap);
     assert!(
-        top >= offset.y && top + table::ROW_H <= offset.y + size.y + 0.5,
-        "la fila 60 ({top}) queda fuera de {}..{}",
+        top >= offset.y && bottom <= offset.y + size.y + 0.5,
+        "la fila 60 ({top}..{bottom}) queda fuera de {}..{}",
         offset.y,
         offset.y + size.y
     );

@@ -9,9 +9,14 @@ use crate::db::QueryResult;
 use crate::ui::icons::KEY;
 use crate::ui::theme;
 
-/// Altura de fila fija: la celda no cambia de tamaño al empezar a editarla.
-pub(super) const ROW_H: f32 = 22.0;
-const HEADER_H: f32 = 24.0;
+/// Altura de las filas: la del texto de las celdas más un margen, igual para
+/// todas (la celda no cambia de tamaño al empezar a editarla). Sigue al
+/// tamaño de fuente de los ajustes; con el de por defecto son 22 puntos.
+fn row_height(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Monospace) + 6.0)
+        .round()
+        .max(22.0)
+}
 
 /// Lo que ha pasado en la tabla en este frame.
 #[derive(Default)]
@@ -35,7 +40,9 @@ pub(super) fn show(
     let initial_widths = initial_col_widths(ui, g.data);
     let total_width: f32 = initial_widths.iter().sum::<f32>() + 24.0;
     let spacing = ui.spacing().item_spacing;
-    let (scroll_x, scroll_y) = pending_scroll(ui, g, sel, spacing);
+    let row_h = row_height(ui);
+    let header_h = row_h + 2.0;
+    let (scroll_x, scroll_y) = pending_scroll(ui, g, sel, spacing, row_h);
 
     let mut col_widths = Vec::new();
     let mut hscroll = egui::ScrollArea::horizontal()
@@ -50,7 +57,7 @@ pub(super) fn show(
         // Banda de fondo de la cabecera (se pinta antes de construir la tabla)
         let header_band = egui::Rect::from_min_size(
             ui.cursor().min,
-            egui::vec2(ui.available_width().max(total_width), HEADER_H),
+            egui::vec2(ui.available_width().max(total_width), header_h),
         );
         ui.painter()
             .rect_filled(header_band, 0.0, theme::get(ui).grid_header_bg);
@@ -67,7 +74,7 @@ pub(super) fn show(
             builder = builder.column(Column::initial(w).resizable(true).clip(true).at_least(40.0));
         }
         let body = builder
-            .header(HEADER_H, |mut header| {
+            .header(header_h, |mut header| {
                 for col in 0..g.cols() {
                     header.col(|ui| {
                         if header_cell(ui, g, col) {
@@ -78,7 +85,7 @@ pub(super) fn show(
             })
             .body(|body| {
                 col_widths = body.widths().to_vec();
-                body.rows(ROW_H, g.total_rows(), |mut row| {
+                body.rows(row_h, g.total_rows(), |mut row| {
                     let row_ref = RowRef::from_display(row.index(), g.existing());
                     for col in 0..g.cols() {
                         let cell = CellRef { row: row_ref, col };
@@ -95,6 +102,7 @@ pub(super) fn show(
     sel.layout = Some(GridLayout {
         offset: egui::vec2(outer.state.clamped_offset().x, offset_y),
         size: egui::vec2(outer.inner_rect.width(), body_height),
+        row_pitch: row_h + spacing.y,
         col_widths,
     });
 
@@ -133,6 +141,7 @@ fn pending_scroll(
     g: &Grid,
     sel: &mut GridSelection,
     spacing: egui::Vec2,
+    row_h: f32,
 ) -> (Option<f32>, Option<f32>) {
     let mut scroll_x = None;
     let mut scroll_y = None;
@@ -151,8 +160,8 @@ fn pending_scroll(
         ui.ctx().request_repaint();
         return (scroll_x, scroll_y);
     };
-    let top = cell.row.display(g.existing()) as f32 * (ROW_H + spacing.y);
-    if let Some(y) = scroll_into_view(top, top + ROW_H, layout.offset.y, layout.size.y) {
+    let top = cell.row.display(g.existing()) as f32 * (row_h + spacing.y);
+    if let Some(y) = scroll_into_view(top, top + row_h, layout.offset.y, layout.size.y) {
         scroll_y = Some(y);
     }
     if let Some(&width) = layout.col_widths.get(cell.col) {

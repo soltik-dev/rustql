@@ -207,6 +207,8 @@ pub(super) struct GridLayout {
     pub offset: egui::Vec2,
     /// Tamaño de la zona visible de las filas.
     pub size: egui::Vec2,
+    /// Distancia entre el comienzo de una fila y el de la siguiente.
+    pub row_pitch: f32,
     pub col_widths: Vec<f32>,
 }
 

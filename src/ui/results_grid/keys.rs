@@ -4,7 +4,6 @@
 
 use eframe::egui;
 
-use super::table::ROW_H;
 use super::{CellRef, EditingCell, Grid, GridAction, GridSelection, RowRef, Shown};
 
 /// Movimiento del cursor.
@@ -108,11 +107,11 @@ pub(super) fn handle(
     if let Some(mv) = ui.input(read_move) {
         let target = match sel.cell {
             Some(cell) => {
-                let pitch = ROW_H + ui.spacing().item_spacing.y;
+                // Filas que caben en pantalla, para Re Pág y Av Pág
                 let page = sel
                     .layout
                     .as_ref()
-                    .map_or(10, |l| (l.size.y / pitch) as usize)
+                    .map_or(10, |l| (l.size.y / l.row_pitch) as usize)
                     .max(1);
                 let from = (cell.row.display(g.existing()), cell.col);
                 apply_move(mv, from, rows, cols, page)
