@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mysql::{
@@ -7,9 +8,16 @@ use mysql::{
 };
 
 use super::{
-    ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QueryResult, Statement,
-    TableInfo, qualified, quote_ident, validate_charset,
+    CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QUERY_CANCELLED,
+    QueryResult, Statement, TableInfo, qualified, quote_ident, validate_charset,
 };
+
+/// ER_QUERY_INTERRUPTED: la sentencia se interrumpió con KILL QUERY.
+const ER_QUERY_INTERRUPTED: u16 = 1317;
+
+fn is_interrupted(e: &mysql::Error) -> bool {
+    matches!(e, mysql::Error::MySqlError(e) if e.code == ER_QUERY_INTERRUPTED)
+}
 
 fn value_to_string(v: Value) -> Option<String> {
     match v {
@@ -85,6 +93,13 @@ pub struct MysqlBackend {
     /// transacciones, variables y tablas temporales entre ejecuciones.
     /// Se abre al primer uso.
     session: Arc<Mutex<Option<Conn>>>,
+    /// Ejecución del editor que está ahora mismo en el servidor: el id de su
+    /// conexión (para KILL QUERY) y su señal de cancelación.
+    session_running: Mutex<Option<(u32, CancelFlag)>>,
+    /// Se envió un KILL QUERY a la sesión del editor. Si llegó con la
+    /// sentencia ya terminada, el servidor puede aplicárselo a la siguiente:
+    /// antes de ejecutarla se absorbe con una sentencia vacía.
+    session_killed: AtomicBool,
 }
 
 impl MysqlBackend {
@@ -125,6 +140,8 @@ impl MysqlBackend {
             pool,
             opts,
             session: Arc::default(),
+            session_running: Mutex::default(),
+            session_killed: AtomicBool::new(false),
         })
     }
 
@@ -182,7 +199,9 @@ impl DbBackend for MysqlBackend {
         db: Option<&str>,
         sql: &str,
         max_rows: usize,
+        cancel: &CancelFlag,
     ) -> DbResult<QueryResult> {
+        // El turno se espera aquí: las ejecuciones del editor van de una en una
         let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
         let conn = match &mut *session {
             Some(conn) => conn,
@@ -191,14 +210,34 @@ impl DbBackend for MysqlBackend {
                     .map_err(|e| format!("No se pudo abrir la sesión del editor: {e}"))?,
             ),
         };
-        let result = (|| {
-            if let Some(db) = db {
-                conn.query_drop(format!("USE {}", quote_ident(db)))?;
-            }
-            read_result(conn.query_iter(sql)?, max_rows)
-        })();
+        if self.session_killed.swap(false, Ordering::SeqCst) {
+            // Un KILL QUERY que llegó tarde se lo lleva esta sentencia
+            let _ = conn.query_drop("DO 0");
+        }
+        let running = |value| {
+            *self
+                .session_running
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = value;
+        };
+        // Primero anunciarse y luego mirar la señal: quien cancela hace lo
+        // contrario, así que al menos uno de los dos ve al otro
+        running(Some((conn.connection_id(), Arc::clone(cancel))));
+        let result = if cancel.load(Ordering::SeqCst) {
+            running(None);
+            return Err(QUERY_CANCELLED.into());
+        } else {
+            (|| {
+                if let Some(db) = db {
+                    conn.query_drop(format!("USE {}", quote_ident(db)))?;
+                }
+                read_result(conn.query_iter(sql)?, max_rows)
+            })()
+        };
+        running(None);
         match result {
             Ok(data) => Ok(data),
+            Err(e) if is_interrupted(&e) => Err(QUERY_CANCELLED.into()),
             Err(e) => {
                 // Conexión perdida (servidor reiniciado, timeout…): la próxima
                 // ejecución abre otra; el estado de la sesión ya se ha perdido.
@@ -208,6 +247,25 @@ impl DbBackend for MysqlBackend {
                 Err(format!("Error en query: {e}"))
             }
         }
+    }
+
+    fn cancel_in_session(&self, cancel: &CancelFlag) -> DbResult<()> {
+        cancel.store(true, Ordering::SeqCst);
+        let running = self
+            .session_running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        // Solo si es la que está en el servidor: KILL QUERY interrumpiría la
+        // de otra pestaña. La que espera su turno verá la señal al llegar
+        let Some((conn_id, _)) = running.filter(|(_, flag)| Arc::ptr_eq(flag, cancel)) else {
+            return Ok(());
+        };
+        self.session_killed.store(true, Ordering::SeqCst);
+        // Por otra conexión: la del editor está ocupada con la consulta
+        self.conn()?
+            .query_drop(format!("KILL QUERY {conn_id}"))
+            .map_err(|e| format!("No se pudo cancelar la consulta: {e}"))
     }
 
     fn execute_write(&self, sql: &str) -> DbResult<u64> {
@@ -448,7 +506,11 @@ mod tests {
         b.execute_write("CREATE TABLE rustql_test_session.t (id INT)")
             .unwrap();
         let db = Some("rustql_test_session");
-        let run = |sql: &str| b.execute_in_session(db, sql, 100).unwrap().rows;
+        let run = |sql: &str| {
+            b.execute_in_session(db, sql, 100, &CancelFlag::default())
+                .unwrap()
+                .rows
+        };
         let count = || {
             b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
                 .unwrap()
@@ -489,11 +551,13 @@ mod tests {
         b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
             .unwrap();
         let db = Some("rustql_test_cap");
-        let capped = b.execute_in_session(db, "SELECT * FROM t ORDER BY id", 3);
-        let exact = b.execute_in_session(db, "SELECT * FROM t", 5);
-        let empty = b.execute_in_session(db, "SELECT id AS n FROM t WHERE 1 = 0", 3);
+        let run =
+            |sql: &str, max_rows| b.execute_in_session(db, sql, max_rows, &CancelFlag::default());
+        let capped = run("SELECT * FROM t ORDER BY id", 3);
+        let exact = run("SELECT * FROM t", 5);
+        let empty = run("SELECT id AS n FROM t WHERE 1 = 0", 3);
         // Tras recortar, la sesión sigue utilizable
-        let after = b.execute_in_session(db, "SELECT COUNT(*) FROM t", 3);
+        let after = run("SELECT COUNT(*) FROM t", 3);
         b.execute_write("DROP DATABASE rustql_test_cap").unwrap();
 
         let capped = capped.unwrap();
@@ -506,5 +570,53 @@ mod tests {
         assert_eq!(empty.columns, ["n"], "columnas aunque no haya filas");
         assert!(empty.rows.is_empty());
         assert_eq!(after.unwrap().rows, [[Some("5".to_string())]]);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn cancelar_interrumpe_la_consulta_y_conserva_la_sesion() {
+        let b = Arc::new(test_server::backend());
+        let run = |sql: &str, cancel: &CancelFlag| b.execute_in_session(None, sql, 100, cancel);
+        run("SET @x = 7", &CancelFlag::default()).unwrap();
+
+        // Una consulta de minutos, cancelada a los 300 ms
+        let cancelled = |sql: &'static str| {
+            let cancel = CancelFlag::default();
+            let slow = {
+                let (b, cancel) = (Arc::clone(&b), Arc::clone(&cancel));
+                std::thread::spawn(move || {
+                    let start = std::time::Instant::now();
+                    (
+                        b.execute_in_session(None, sql, 100, &cancel),
+                        start.elapsed(),
+                    )
+                })
+            };
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            b.cancel_in_session(&cancel).unwrap();
+            let (result, elapsed) = slow.join().unwrap();
+            assert!(elapsed.as_secs() < 10, "{sql} tardó {elapsed:?}");
+            result
+        };
+        let join = "SELECT COUNT(*) FROM information_schema.COLUMNS a, \
+                    information_schema.COLUMNS b, information_schema.COLUMNS c";
+        assert_eq!(cancelled(join).unwrap_err(), QUERY_CANCELLED);
+        // SLEEP interrumpido no da error (devuelve 1): termina, que es lo
+        // que importa, y el servidor dice lo que tenga que decir
+        if let Err(e) = cancelled("SELECT SLEEP(60)") {
+            assert_eq!(e, QUERY_CANCELLED);
+        }
+
+        // La sesión es la misma (conserva la variable) y la siguiente
+        // consulta no hereda la cancelación
+        let after = run("SELECT @x", &CancelFlag::default()).unwrap();
+        assert_eq!(after.rows, [[Some("7".to_string())]]);
+
+        // Cancelada antes de empezar, no llega al servidor
+        let never = CancelFlag::default();
+        b.cancel_in_session(&never).unwrap();
+        assert_eq!(run("SET @x = 8", &never).unwrap_err(), QUERY_CANCELLED);
+        let untouched = run("SELECT @x", &CancelFlag::default()).unwrap();
+        assert_eq!(untouched.rows, [[Some("7".to_string())]]);
     }
 }

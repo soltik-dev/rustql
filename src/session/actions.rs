@@ -188,6 +188,8 @@ impl Session {
         if idx >= self.sql_tabs.len() {
             return;
         }
+        // Su consulta, si aún se está ejecutando, ya no le interesa a nadie
+        self.cancel_editor(idx);
         self.sql_tabs.remove(idx);
         if self.sql_tabs.is_empty() {
             self.sql_tabs.push(SqlTab::default());
@@ -427,6 +429,7 @@ impl Session {
                 self.save_tabs_state(sh);
                 self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
             }
+            SqlEditorAction::Cancel => self.cancel_editor(tab_idx),
             // Limpiar no se puede deshacer: se pregunta antes
             SqlEditorAction::Clear => {
                 if let Some(tab) = self.sql_tabs.get(tab_idx) {

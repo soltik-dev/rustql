@@ -2,7 +2,7 @@ use super::schema::SchemaResult;
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::*;
-use crate::db::{ColumnInfo, DatabaseInfo, DbResult, TableInfo};
+use crate::db::{CancelFlag, ColumnInfo, DatabaseInfo, DbResult, QUERY_CANCELLED, TableInfo};
 use crate::ui::connection_panel::SaveProfile;
 use crate::ui::modals::NewColumnDef;
 use crate::ui::sql_editor::SqlEditorAction;
@@ -24,8 +24,27 @@ impl DbBackend for FakeBackend {
             ..Default::default()
         })
     }
-    fn execute_in_session(&self, _: Option<&str>, sql: &str, _: usize) -> DbResult<QueryResult> {
+    fn execute_in_session(
+        &self,
+        _: Option<&str>,
+        sql: &str,
+        _: usize,
+        cancel: &CancelFlag,
+    ) -> DbResult<QueryResult> {
+        // «LENTA» no termina hasta que la cancelan
+        let start = Instant::now();
+        while sql == "LENTA" && !cancel.load(Ordering::SeqCst) {
+            assert!(start.elapsed() < Duration::from_secs(10), "sin cancelar");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(QUERY_CANCELLED.into());
+        }
         self.execute_query(sql)
+    }
+    fn cancel_in_session(&self, cancel: &CancelFlag) -> DbResult<()> {
+        cancel.store(true, Ordering::SeqCst);
+        Ok(())
     }
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
         Ok(Vec::new())
@@ -749,6 +768,43 @@ fn el_resultado_del_editor_va_a_su_pestana() {
     assert!(s.sql_tabs[0].running.is_none());
     assert!(matches!(s.sql_tabs[0].result, Some(Ok(_))));
     assert_eq!(s.query_log.len(), 1);
+}
+
+#[test]
+fn cancelar_termina_la_consulta_del_editor() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    s.active_tab = ActiveTab::Sql(0);
+    s.run_editor(0, "LENTA".into(), String::new(), 10);
+    assert!(s.sql_tabs[0].running.is_some());
+
+    let signals = || FrameSignals {
+        sql: SqlEditorAction::Cancel,
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    s.apply_signals(&ctx, &mut sh, signals(), FrameKeys::default());
+    // Pedirlo dos veces no lanza dos cancelaciones
+    let pending = s.jobs.pending();
+    s.apply_signals(&ctx, &mut sh, signals(), FrameKeys::default());
+    assert_eq!(s.jobs.pending(), pending);
+
+    finish_jobs(&mut s, &mut sh);
+    let tab = &s.sql_tabs[0];
+    assert!(tab.running.is_none() && tab.cancel.is_none());
+    assert_eq!(tab.result, Some(Err(QUERY_CANCELLED.to_string())));
+}
+
+#[test]
+fn cerrar_una_pestana_sql_cancela_su_consulta() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
+    s.run_editor(1, "LENTA".into(), String::new(), 10);
+    s.close_sql_tab(&mut sh, 1);
+    assert_eq!(s.sql_tabs.len(), 1);
+    // Si no se cancelara, el hilo no terminaría nunca (ni el test)
+    finish_jobs(&mut s, &mut sh);
 }
 
 #[test]

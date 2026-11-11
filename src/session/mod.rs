@@ -14,8 +14,8 @@ use eframe::egui;
 use self::jobs::{JobResult, Jobs};
 pub use self::schema::SchemaCache;
 use crate::db::{
-    ConnectEvent, ConnectionParams, DbBackend, DbResult, ExportDestination, ExportEvent,
-    ExportOptions, QueryResult, Statement, qualified, quote_ident,
+    CancelFlag, ConnectEvent, ConnectionParams, DbBackend, DbResult, ExportDestination,
+    ExportEvent, ExportOptions, QueryResult, Statement, qualified, quote_ident,
 };
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
@@ -246,13 +246,18 @@ impl Session {
     }
 
     /// Vuelve al formulario. La query en curso, si la hay, se descarta: su
-    /// resultado ya no corresponde a nada que se esté mostrando.
+    /// resultado ya no corresponde a nada que se esté mostrando. Las del
+    /// editor se cancelan también en el servidor, que si no las terminaría.
     fn disconnect(&mut self) {
+        for idx in 0..self.sql_tabs.len() {
+            self.cancel_editor(idx);
+        }
         self.state = ConnState::Disconnected;
         self.jobs.new_epoch();
         self.table_view.query_loading = false;
         for tab in &mut self.sql_tabs {
             tab.running = None;
+            tab.cancel = None;
         }
     }
 }
@@ -277,10 +282,12 @@ impl Session {
     fn run_editor(&mut self, tab_idx: usize, sql: String, db_context: String, max_rows: usize) {
         self.editor_runs += 1;
         let token = self.editor_runs;
+        let cancel = CancelFlag::default();
+        let job_cancel = Arc::clone(&cancel);
         let spawned = self.spawn_job(move |b| {
             let start = Instant::now();
             let db = (!db_context.is_empty()).then_some(db_context.as_str());
-            let result = b.execute_in_session(db, &sql, max_rows);
+            let result = b.execute_in_session(db, &sql, max_rows, &job_cancel);
             JobResult::Editor {
                 token,
                 sql,
@@ -290,7 +297,21 @@ impl Session {
         });
         if spawned && let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
             tab.running = Some(token);
+            tab.cancel = Some(cancel);
         }
+    }
+
+    /// Cancela la consulta que está ejecutando la pestaña `tab_idx`, si hay
+    /// alguna. Su resultado llegará como error `QUERY_CANCELLED`.
+    fn cancel_editor(&mut self, tab_idx: usize) {
+        let Some(cancel) = self.sql_tabs.get(tab_idx).and_then(|t| t.cancel.clone()) else {
+            return;
+        };
+        // Ya pedido: una vez basta
+        if cancel.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.spawn_job(move |b| JobResult::EditorCancel(b.cancel_in_session(&cancel)));
     }
 
     fn apply_editor_result(
@@ -307,6 +328,7 @@ impl Session {
         // La pestaña puede haberse cerrado mientras tanto
         if let Some(tab) = self.sql_tabs.iter_mut().find(|t| t.running == Some(token)) {
             tab.running = None;
+            tab.cancel = None;
             tab.result = Some(result);
             tab.result_run = token;
             tab.elapsed_ms = Some(elapsed_ms);
@@ -890,6 +912,11 @@ impl Session {
                 elapsed_ms,
                 result,
             } => self.apply_editor_result(token, sql, elapsed_ms, result),
+            JobResult::EditorCancel(Ok(())) => {}
+            // La consulta sigue en marcha: que conste por qué
+            JobResult::EditorCancel(Err(e)) => {
+                self.push_log(LogEntry::err("Cancelar la consulta", 0, e));
+            }
         }
     }
 

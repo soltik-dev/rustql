@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-use crate::db::QueryResult;
+use crate::db::{CancelFlag, QUERY_CANCELLED, QueryResult};
 use crate::settings::CopyFormat;
 use crate::ui::results_grid::{self, GridAction, GridSelection};
 use crate::ui::{CMD, sql_highlight, theme};
@@ -16,6 +16,8 @@ pub struct SqlTab {
     pub result: Option<Result<QueryResult, String>>,
     /// Ejecución en curso (su número), si la hay.
     pub running: Option<u64>,
+    /// Señal para cancelar la ejecución en curso; activada, ya se ha pedido.
+    pub cancel: Option<CancelFlag>,
     /// Ejecución que dio `result`: distingue un resultado del siguiente.
     pub result_run: u64,
     /// Lo que tardó la consulta de `result`.
@@ -34,6 +36,8 @@ pub enum SqlEditorAction {
     },
     /// Borrar la consulta (la sesión pregunta antes).
     Clear,
+    /// Cancelar la consulta que se está ejecutando.
+    Cancel,
 }
 
 /// Panel "SQL": editor de consultas libre. Mientras la consulta anterior no
@@ -49,6 +53,10 @@ pub fn show(
 ) -> SqlEditorAction {
     let mut action = SqlEditorAction::None;
     let running = tab.running.is_some();
+    let cancelling = tab
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst));
     let SqlTab {
         db_context,
         sql_text,
@@ -108,7 +116,18 @@ pub fn show(
         }
         if running {
             ui.spinner();
-            ui.label("Ejecutando…");
+            if cancelling {
+                ui.label("Cancelando…");
+            } else {
+                ui.label("Ejecutando…");
+                if ui
+                    .button("Cancelar")
+                    .on_hover_text("Interrumpe la consulta en el servidor")
+                    .clicked()
+                {
+                    action = SqlEditorAction::Cancel;
+                }
+            }
         }
     });
     ui.separator();
@@ -157,6 +176,10 @@ pub fn show(
                     .color(p.text_muted),
                 );
             });
+        }
+        // Cancelarla fue cosa del usuario: no es un error
+        Some(Err(e)) if e == QUERY_CANCELLED => {
+            ui.label(egui::RichText::new("Consulta cancelada").color(p.text_muted));
         }
         Some(Err(e)) => {
             theme::error_card(ui, &format!("Error: {e}"));
