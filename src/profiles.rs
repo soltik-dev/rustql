@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::db::ConnectionParams;
+use crate::db::{ConnectionParams, Engine};
 
 /// Color identificativo de una conexión: tiñe su pestaña y su árbol del sidebar.
 /// Los presets se resuelven en theme.rs con variante clara/oscura.
@@ -52,6 +52,9 @@ pub struct ConnectionProfile {
     #[serde(default)]
     pub id: String,
     pub name: String,
+    /// Motor del servidor. Los perfiles anteriores a PostgreSQL son de MySQL.
+    #[serde(default)]
+    pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -73,6 +76,7 @@ pub struct ConnectionProfile {
 impl ConnectionProfile {
     pub fn to_params(&self) -> ConnectionParams {
         ConnectionParams {
+            engine: self.engine,
             host: self.host.clone(),
             port: self.port,
             user: self.user.clone(),
@@ -190,6 +194,7 @@ mod tests {
         let profile = ConnectionProfile {
             id: "abc".into(),
             name: "Prod".into(),
+            engine: Engine::Mysql,
             host: "db".into(),
             port: 3306,
             user: "app".into(),

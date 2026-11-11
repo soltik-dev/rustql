@@ -301,6 +301,7 @@ impl Session {
                         selected_table,
                         &mut self.table_view,
                         col_info_slice,
+                        self.params.engine,
                         // Con query en curso: spinner en el grid
                         running,
                     );

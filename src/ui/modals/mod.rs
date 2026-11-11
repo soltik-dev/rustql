@@ -7,8 +7,8 @@ use eframe::egui;
 use self::export::show_export_data;
 pub use self::export::{ExportPhase, ExportRunning, TableExportEntry, TableExportState};
 
+use crate::db::Engine;
 use crate::db::export::{ExportDestination, ExportOptions};
-use crate::db::{qualified, quote_ident};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
 use crate::ui::results_grid::SortSpec;
@@ -334,7 +334,12 @@ fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egu
 /// Renderiza el modal activo sobre todo lo demás.
 /// Debe llamarse desde `update()` después de todos los paneles, pasando `ctx`.
 /// `busy`: hay una escritura en curso (los formularios esperan su resultado).
-pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAction {
+pub fn show(
+    ctx: &egui::Context,
+    modal: &mut ModalState,
+    engine: Engine,
+    busy: bool,
+) -> ModalAction {
     match modal {
         ModalState::None => ModalAction::None,
         ModalState::CreateDatabase {
@@ -354,7 +359,7 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             col_name,
             value,
             operator,
-        } => show_filter_input(ctx, col_name, value, operator),
+        } => show_filter_input(ctx, engine, col_name, value, operator),
         ModalState::ConfirmSwitchTable {
             new_db,
             new_table,
@@ -741,6 +746,7 @@ const FILTER_OPERATORS: &[FilterOperator] = &[
 
 fn show_filter_input(
     ctx: &egui::Context,
+    engine: Engine,
     col_name: &mut String,
     value: &mut String,
     operator: &mut FilterOperator,
@@ -785,7 +791,7 @@ fn show_filter_input(
                 let apply_clicked = theme::primary_button(ui, "Aplicar").clicked();
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if apply_clicked || enter_pressed {
-                    let frag = build_filter_fragment(col_name, operator, value);
+                    let frag = build_filter_fragment(engine, col_name, operator, value);
                     action = ModalAction::ApplyFilter { sql_fragment: frag };
                 }
                 if ui.button("Cancelar").clicked() {
@@ -802,25 +808,40 @@ fn show_filter_input(
     action
 }
 
-fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str) -> String {
-    let esc_col = quote_ident(col_name);
-    let esc_val = crate::db::escape_sql(value);
+fn build_filter_fragment(
+    engine: Engine,
+    col_name: &str,
+    operator: &FilterOperator,
+    value: &str,
+) -> String {
+    let compare = |op: &str| {
+        format!(
+            "{} {op} {}",
+            engine.quote_ident(col_name),
+            engine.literal(value)
+        )
+    };
     match operator {
-        FilterOperator::Equals => format!("{esc_col} = '{esc_val}'"),
-        FilterOperator::NotEquals => format!("{esc_col} != '{esc_val}'"),
-        FilterOperator::Contains => format!("{esc_col} LIKE '%{esc_val}%'"),
-        FilterOperator::StartsWith => format!("{esc_col} LIKE '{esc_val}%'"),
-        FilterOperator::EndsWith => format!("{esc_col} LIKE '%{esc_val}'"),
-        FilterOperator::GreaterThan => format!("{esc_col} > '{esc_val}'"),
-        FilterOperator::LessThan => format!("{esc_col} < '{esc_val}'"),
-        FilterOperator::GreaterOrEqual => format!("{esc_col} >= '{esc_val}'"),
-        FilterOperator::LessOrEqual => format!("{esc_col} <= '{esc_val}'"),
+        FilterOperator::Equals => compare("="),
+        FilterOperator::NotEquals => compare("!="),
+        FilterOperator::Contains => engine.like(col_name, &format!("%{value}%")),
+        FilterOperator::StartsWith => engine.like(col_name, &format!("{value}%")),
+        FilterOperator::EndsWith => engine.like(col_name, &format!("%{value}")),
+        FilterOperator::GreaterThan => compare(">"),
+        FilterOperator::LessThan => compare("<"),
+        FilterOperator::GreaterOrEqual => compare(">="),
+        FilterOperator::LessOrEqual => compare("<="),
     }
 }
 
 // ── Helpers para construir CREATE TABLE SQL ───────────────────────────────────
 
-pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) -> String {
+pub fn build_create_table_sql(
+    engine: Engine,
+    db: &str,
+    name: &str,
+    columns: &[NewColumnDef],
+) -> String {
     let mut parts = Vec::new();
     let mut pks = Vec::new();
 
@@ -850,13 +871,13 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
         let null_part = if col.not_null { " NOT NULL" } else { "" };
         parts.push(format!(
             "  {} {}{}",
-            quote_ident(col.name.trim()),
+            engine.quote_ident(col.name.trim()),
             type_part,
             null_part
         ));
 
         if col.primary_key {
-            pks.push(quote_ident(col.name.trim()));
+            pks.push(engine.quote_ident(col.name.trim()));
         }
     }
 
@@ -866,7 +887,7 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
 
     format!(
         "CREATE TABLE {} (\n{}\n)",
-        qualified(db, name),
+        engine.qualified(db, name),
         parts.join(",\n")
     )
 }
@@ -1148,5 +1169,57 @@ fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
         ModalAction::Cancel
     } else {
         ModalAction::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtros_del_dialogo_en_cada_dialecto() {
+        let fragment = |engine, op| build_filter_fragment(engine, "no`m\"bre", &op, "O'Brien");
+        assert_eq!(
+            fragment(Engine::Mysql, FilterOperator::Equals),
+            "`no``m\"bre` = 'O''Brien'"
+        );
+        assert_eq!(
+            fragment(Engine::Mysql, FilterOperator::Contains),
+            "`no``m\"bre` LIKE '%O''Brien%'"
+        );
+        assert_eq!(
+            fragment(Engine::Postgres, FilterOperator::GreaterOrEqual),
+            "\"no`m\"\"bre\" >= 'O''Brien'"
+        );
+        // En PostgreSQL, sin distinguir mayúsculas y sobre cualquier tipo
+        assert_eq!(
+            fragment(Engine::Postgres, FilterOperator::StartsWith),
+            "\"no`m\"\"bre\"::text ILIKE 'O''Brien%'"
+        );
+    }
+
+    #[test]
+    fn crear_tabla_en_cada_dialecto() {
+        let column = |name: &str, col_type: &str, length: &str, key: bool| NewColumnDef {
+            name: name.into(),
+            col_type: col_type.into(),
+            length: length.into(),
+            not_null: key,
+            primary_key: key,
+        };
+        let columns = [
+            column("id", "INT", "", true),
+            column("nombre", "VARCHAR", "50", false),
+        ];
+        assert_eq!(
+            build_create_table_sql(Engine::Mysql, "bd", "t", &columns),
+            "CREATE TABLE `bd`.`t` (\n  `id` INT NOT NULL,\n  `nombre` VARCHAR(50),\n  \
+             PRIMARY KEY (`id`)\n)"
+        );
+        assert_eq!(
+            build_create_table_sql(Engine::Postgres, "bd", "ventas.t", &columns),
+            "CREATE TABLE \"ventas\".\"t\" (\n  \"id\" INT NOT NULL,\n  \"nombre\" VARCHAR(50),\n  \
+             PRIMARY KEY (\"id\")\n)"
+        );
     }
 }

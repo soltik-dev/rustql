@@ -282,7 +282,7 @@ impl Session {
         if let Some(columns) = self.schema.columns(db, table) {
             self.table_view.primary_keys = columns
                 .iter()
-                .filter(|c| c.column_key == "PRI")
+                .filter(|c| c.is_primary())
                 .map(|c| c.name.clone())
                 .collect();
         }

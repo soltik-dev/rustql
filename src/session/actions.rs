@@ -11,7 +11,7 @@ use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::db::QueryResult;
-use crate::db::{connect_mysql_progress, escape_sql, qualified, quote_ident};
+use crate::db::{Engine, connect_mysql_progress};
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
@@ -244,9 +244,12 @@ impl Session {
             GridAction::FilterByClipboard { col_name } => {
                 match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                     Ok(text) => {
-                        let esc_col = quote_ident(&col_name);
-                        let esc_val = escape_sql(&text);
-                        let filter = format!("{esc_col} = '{esc_val}'");
+                        let engine = self.engine();
+                        let filter = format!(
+                            "{} = {}",
+                            engine.quote_ident(&col_name),
+                            engine.literal(&text)
+                        );
                         self.request_reload(sh, Reload::Filter(filter));
                     }
                     // En un aviso: como error de la tabla tapaba el grid
@@ -283,7 +286,7 @@ impl Session {
                 if let Some(data) = &self.table_view.table_data {
                     let table = self.schema.selected_table().map(|(_, table)| table);
                     let rows = &self.table_view.selection.rows;
-                    copy_rows(ctx, sh, data, rows, &fmt, table);
+                    copy_rows(ctx, sh, data, rows, &fmt, table, self.engine());
                 }
             }
             GridAction::PageChanged(page) => self.request_reload(sh, Reload::Page(page)),
@@ -385,7 +388,10 @@ impl Session {
                 self.switch_to_table(sh, db, table, ActiveTab::Tabla);
             }
             SidebarAction::OpenInSql { db, table } => {
-                let sql_text = format!("SELECT * FROM {} WHERE ", qualified(&db, &table));
+                let sql_text = format!(
+                    "SELECT * FROM {} WHERE ",
+                    self.engine().qualified(&db, &table)
+                );
                 self.open_sql_tab(sh, Some(db), sql_text);
             }
             SidebarAction::CloneTable { db, table } => {
@@ -443,7 +449,15 @@ impl Session {
                 if let Some(tab) = self.sql_tabs.get(tab_idx)
                     && let Some(Ok(data)) = &tab.result
                 {
-                    copy_rows(ctx, sh, data, &tab.selection.rows, &fmt, None);
+                    copy_rows(
+                        ctx,
+                        sh,
+                        data,
+                        &tab.selection.rows,
+                        &fmt,
+                        None,
+                        self.engine(),
+                    );
                 }
             }
             // Limpiar no se puede deshacer: se pregunta antes
@@ -503,7 +517,7 @@ impl Session {
             // hasta saber el resultado; las confirmaciones se cierran ya.
             ModalAction::CreateDatabase { name, charset } => self.create_database(name, charset),
             ModalAction::CreateTable { db, name, columns } => {
-                let sql = modals::build_create_table_sql(&db, &name, &columns);
+                let sql = modals::build_create_table_sql(self.engine(), &db, &name, &columns);
                 self.create_table(db, name, sql);
             }
             ModalAction::DropDatabase(db) => {
@@ -646,6 +660,7 @@ impl Session {
         let profile = ConnectionProfile {
             id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
             name,
+            engine: self.params.engine,
             host: self.params.host.clone(),
             port: self.params.port,
             user: self.params.user.clone(),
@@ -761,8 +776,9 @@ fn copy_rows(
     rows: &BTreeSet<usize>,
     fmt: &CopyFormat,
     table: Option<&str>,
+    engine: Engine,
 ) {
-    let copied = results_grid::copy_rows(ctx, data, rows, fmt, table);
+    let copied = results_grid::copy_rows(ctx, data, rows, fmt, table, engine);
     let format = match fmt {
         CopyFormat::Csv => "CSV",
         CopyFormat::Tsv => "TSV",

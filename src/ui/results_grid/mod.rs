@@ -24,7 +24,7 @@ pub use self::state::{
     CellRef, EditingCell, GridAction, GridSelection, InsertValue, PendingEdit, PendingInsert,
     RowRef, SortDir, SortSpec, TableViewState,
 };
-use crate::db::{ColumnInfo, QueryResult};
+use crate::db::{ColumnInfo, Engine, QueryResult};
 use crate::settings::CopyFormat;
 use crate::ui::icons::PLUS;
 use crate::ui::{CMD, theme};
@@ -49,6 +49,8 @@ struct Grid<'a> {
     /// Los datos son los de una tabla: se puede ordenar y filtrar relanzando
     /// su consulta.
     queryable: bool,
+    /// Motor de la conexión: los filtros del menú se escriben en su dialecto.
+    engine: Engine,
     /// Página de la tabla que se muestra, si los datos van por páginas.
     pager: Option<Pager>,
 }
@@ -214,6 +216,7 @@ pub fn show(
     selected_table: Option<(&str, &str)>,
     view: &mut TableViewState,
     column_info: &[ColumnInfo],
+    engine: Engine,
     busy: bool,
 ) -> GridAction {
     let Some((db, table)) = selected_table else {
@@ -242,7 +245,7 @@ pub fn show(
 
     // Sin la estructura (aún cargando) se supone que hay clave: si no la
     // hay, se sabrá antes de que dé tiempo a guardar nada
-    let keyed = column_info.is_empty() || column_info.iter().any(|c| c.column_key == "PRI");
+    let keyed = column_info.is_empty() || column_info.iter().any(ColumnInfo::is_primary);
     let pager = Pager {
         page: view.page,
         page_size: view.page_size,
@@ -275,6 +278,7 @@ pub fn show(
         editable: !busy,
         keyed,
         queryable: true,
+        engine,
         // Mientras carga, la página que se ve ya no es la pedida
         pager: (!busy).then_some(pager),
     };
@@ -312,6 +316,7 @@ pub fn show_read_only(
         editable: false,
         keyed: false,
         queryable: false,
+        engine: Engine::default(),
         pager: None,
     };
     let mut editing = None;
@@ -326,10 +331,17 @@ pub fn copy_rows(
     rows: &BTreeSet<usize>,
     fmt: &CopyFormat,
     table: Option<&str>,
+    engine: Engine,
 ) -> usize {
     let rows: Vec<&Vec<Option<String>>> = rows.iter().filter_map(|&i| data.rows.get(i)).collect();
     if !rows.is_empty() {
-        ctx.copy_text(format_rows_for_copy(&data.columns, &rows, fmt, table));
+        ctx.copy_text(format_rows_for_copy(
+            &data.columns,
+            &rows,
+            fmt,
+            table,
+            engine,
+        ));
     }
     rows.len()
 }

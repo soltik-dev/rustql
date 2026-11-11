@@ -25,6 +25,7 @@ fn column(name: &str, extra: &str, nullable: bool) -> ColumnInfo {
         default_val: None,
         column_key: String::new(),
         extra: extra.into(),
+        is_auto: extra.contains("auto_increment"),
     }
 }
 
@@ -83,6 +84,7 @@ impl Fixture {
                         Some(("db", "t")),
                         &mut self.view,
                         &self.column_info,
+                        Engine::Mysql,
                         self.busy,
                     );
                 });
@@ -537,6 +539,7 @@ fn la_celda_muestra_el_cambio_pendiente() {
         editable: true,
         keyed: true,
         queryable: true,
+        engine: Engine::Mysql,
         pager: None,
     };
     let cell = |row, col| CellRef {

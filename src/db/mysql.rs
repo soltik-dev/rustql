@@ -8,9 +8,22 @@ use mysql::{
 };
 
 use super::{
-    CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QUERY_CANCELLED,
-    QueryResult, Statement, TableInfo, qualified, quote_ident, validate_charset,
+    CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
+    QUERY_CANCELLED, QueryResult, Statement, TableInfo, validate_charset,
 };
+
+// El dialecto de este backend, para él y para la exportación
+pub(super) fn quote_ident(s: &str) -> String {
+    Engine::Mysql.quote_ident(s)
+}
+
+pub(super) fn qualified(db: &str, table: &str) -> String {
+    Engine::Mysql.qualified(db, table)
+}
+
+pub(super) fn literal(s: &str) -> String {
+    Engine::Mysql.literal(s)
+}
 
 /// ER_QUERY_INTERRUPTED: la sentencia se interrumpió con KILL QUERY.
 const ER_QUERY_INTERRUPTED: u16 = 1317;
@@ -171,6 +184,10 @@ impl MysqlBackend {
 }
 
 impl DbBackend for MysqlBackend {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+
     fn list_databases(&self) -> DbResult<Vec<String>> {
         if let Some(only) = &self.only_database {
             return Ok(vec![only.clone()]);
@@ -199,7 +216,7 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("Error en query: {e}"))
     }
 
-    fn execute_query(&self, sql: &str) -> DbResult<QueryResult> {
+    fn execute_query(&self, _db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
         let mut conn = self.conn()?;
         conn.query_iter(sql)
             .and_then(|set| read_result(set, usize::MAX))
@@ -280,7 +297,7 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("No se pudo cancelar la consulta: {e}"))
     }
 
-    fn execute_write(&self, sql: &str) -> DbResult<u64> {
+    fn execute_write(&self, _db: Option<&str>, sql: &str) -> DbResult<u64> {
         let mut conn = self.conn()?;
         conn.query_drop(sql)
             .map_err(|e| format!("Error en escritura: {e}"))?;
@@ -344,6 +361,7 @@ impl DbBackend for MysqlBackend {
             .iter()
             .map(|row| {
                 let default_raw = col(row, 3);
+                let extra = col(row, 5);
                 ColumnInfo {
                     name: col(row, 0),
                     col_type: col(row, 1),
@@ -354,7 +372,8 @@ impl DbBackend for MysqlBackend {
                         Some(default_raw)
                     },
                     column_key: col(row, 4),
-                    extra: col(row, 5),
+                    is_auto: extra.contains("auto_increment"),
+                    extra,
                 }
             })
             .collect())
@@ -367,25 +386,25 @@ impl DbBackend for MysqlBackend {
             quote_ident(name),
             charset
         );
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
     fn drop_database(&self, name: &str) -> DbResult<()> {
         let sql = format!("DROP DATABASE {}", quote_ident(name));
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
     fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!("DROP TABLE {}", qualified(db, table));
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!("TRUNCATE TABLE {}", qualified(db, table));
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
-    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()> {
+    fn execute_transaction(&self, _db: Option<&str>, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
             .map_err(|e| format!("Error iniciando transacción: {e}"))?;
@@ -423,22 +442,31 @@ mod tests {
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
         let qdb = quote_ident(db);
-        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}"))
+        b.execute_write(None, &format!("DROP DATABASE IF EXISTS {qdb}"))
             .unwrap();
-        b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();
-        b.execute_write(&format!(
-            "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
+        b.execute_write(None, &format!("CREATE DATABASE {qdb}"))
+            .unwrap();
+        b.execute_write(
+            None,
+            &format!(
+                "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
              v VARCHAR(10) NOT NULL DEFAULT 'x', n INT NULL)"
-        ))
+            ),
+        )
         .unwrap();
-        b.execute_write(&format!("INSERT INTO {qdb}.t (v) VALUES ('a'), ('b')"))
+        b.execute_write(
+            None,
+            &format!("INSERT INTO {qdb}.t (v) VALUES ('a'), ('b')"),
+        )
+        .unwrap();
+        b.execute_write(None, &format!("ANALYZE TABLE {qdb}.t"))
             .unwrap();
-        b.execute_write(&format!("ANALYZE TABLE {qdb}.t")).unwrap();
 
         let tables = b.get_tables_info(db);
         let columns = b.get_columns_info(db, "t");
         let all = b.list_all_tables();
-        b.execute_write(&format!("DROP DATABASE {qdb}")).unwrap();
+        b.execute_write(None, &format!("DROP DATABASE {qdb}"))
+            .unwrap();
 
         let tables = tables.unwrap();
         assert_eq!(tables.len(), 1);
@@ -448,8 +476,9 @@ mod tests {
         let names: Vec<_> = columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["id", "v", "n"]);
         assert!(columns[0].extra.contains("auto_increment"));
+        assert!(columns[0].is_auto && !columns[1].is_auto);
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
-        assert_eq!(columns[0].column_key, "PRI");
+        assert!(columns[0].is_primary() && !columns[1].is_primary());
         assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
     }
 
@@ -457,11 +486,11 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_conexion_limitada_a_una_bbdd_solo_ensena_esa() {
         let all = test_server::backend();
-        all.execute_write("DROP DATABASE IF EXISTS rustql_test_only")
+        all.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_only")
             .unwrap();
-        all.execute_write("CREATE DATABASE rustql_test_only")
+        all.execute_write(None, "CREATE DATABASE rustql_test_only")
             .unwrap();
-        all.execute_write("CREATE TABLE rustql_test_only.t (id INT)")
+        all.execute_write(None, "CREATE TABLE rustql_test_only.t (id INT)")
             .unwrap();
         let params = ConnectionParams {
             database: " rustql_test_only ".into(),
@@ -473,7 +502,7 @@ mod tests {
         let tables = only.list_all_tables();
         let info = only.get_databases_info();
         // Es la BBDD por defecto: las consultas no necesitan nombrarla
-        let unqualified = only.execute_query("SELECT COUNT(*) FROM t");
+        let unqualified = only.execute_query(None, "SELECT COUNT(*) FROM t");
         // El botón de elegir del formulario lista todas, haya o no una puesta
         let picker = crate::db::list_server_databases(&params);
         let missing = MysqlBackend::connect_with_progress(
@@ -483,7 +512,8 @@ mod tests {
             },
             |_| {},
         );
-        all.execute_write("DROP DATABASE rustql_test_only").unwrap();
+        all.execute_write(None, "DROP DATABASE rustql_test_only")
+            .unwrap();
 
         assert_eq!(databases.unwrap(), ["rustql_test_only"]);
         assert_eq!(
@@ -508,15 +538,19 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn una_consulta_sin_filas_conserva_sus_columnas() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_empty")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_empty")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_empty")
+        b.execute_write(None, "CREATE DATABASE rustql_test_empty")
             .unwrap();
-        b.execute_write("CREATE TABLE rustql_test_empty.t (id INT PRIMARY KEY, v VARCHAR(10))")
+        b.execute_write(
+            None,
+            "CREATE TABLE rustql_test_empty.t (id INT PRIMARY KEY, v VARCHAR(10))",
+        )
+        .unwrap();
+        let empty = b.execute_query(None, "SELECT * FROM rustql_test_empty.t");
+        let filtered = b.execute_query(None, "SELECT v FROM rustql_test_empty.t WHERE id = 1");
+        b.execute_write(None, "DROP DATABASE rustql_test_empty")
             .unwrap();
-        let empty = b.execute_query("SELECT * FROM rustql_test_empty.t");
-        let filtered = b.execute_query("SELECT v FROM rustql_test_empty.t WHERE id = 1");
-        b.execute_write("DROP DATABASE rustql_test_empty").unwrap();
 
         // Sin las columnas, el grid no puede mostrar la cabecera ni dejar
         // insertar la primera fila
@@ -531,13 +565,20 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_transaccion_se_deshace_si_no_encuentra_la_fila() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_rows")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_rows")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_rows").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_rows.t (id INT PRIMARY KEY, v VARCHAR(10))")
+        b.execute_write(None, "CREATE DATABASE rustql_test_rows")
             .unwrap();
-        b.execute_write("INSERT INTO rustql_test_rows.t VALUES (1,'a'),(2,'b')")
-            .unwrap();
+        b.execute_write(
+            None,
+            "CREATE TABLE rustql_test_rows.t (id INT PRIMARY KEY, v VARCHAR(10))",
+        )
+        .unwrap();
+        b.execute_write(
+            None,
+            "INSERT INTO rustql_test_rows.t VALUES (1,'a'),(2,'b')",
+        )
+        .unwrap();
         let update = |v: &str, id: &str| Statement {
             sql: "UPDATE rustql_test_rows.t SET v = ? WHERE id = ?".into(),
             params: vec![Some(v.into()), Some(id.into())],
@@ -545,11 +586,12 @@ mod tests {
         };
 
         // La fila 9 no existe (otro la borró): tampoco se guarda la 1
-        let missing = b.execute_transaction(&[update("x", "1"), update("y", "9")]);
+        let missing = b.execute_transaction(None, &[update("x", "1"), update("y", "9")]);
         // Dejar una fila con el valor que ya tenía no es «no encontrada»
-        let unchanged = b.execute_transaction(&[update("b", "2")]);
-        let rows = b.execute_query("SELECT v FROM rustql_test_rows.t ORDER BY id");
-        b.execute_write("DROP DATABASE rustql_test_rows").unwrap();
+        let unchanged = b.execute_transaction(None, &[update("b", "2")]);
+        let rows = b.execute_query(None, "SELECT v FROM rustql_test_rows.t ORDER BY id");
+        b.execute_write(None, "DROP DATABASE rustql_test_rows")
+            .unwrap();
 
         let err = missing.unwrap_err();
         assert!(err.contains("encontró 0"), "{err}");
@@ -564,11 +606,11 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_session")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_session")
+        b.execute_write(None, "CREATE DATABASE rustql_test_session")
             .unwrap();
-        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)")
+        b.execute_write(None, "CREATE TABLE rustql_test_session.t (id INT)")
             .unwrap();
         let db = Some("rustql_test_session");
         let run = |sql: &str| {
@@ -577,7 +619,7 @@ mod tests {
                 .rows
         };
         let count = || {
-            b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
+            b.execute_query(None, "SELECT COUNT(*) FROM rustql_test_session.t")
                 .unwrap()
                 .rows[0][0]
                 .clone()
@@ -600,7 +642,7 @@ mod tests {
         run("COMMIT");
         assert_eq!(count(), Some("1".into()));
 
-        b.execute_write("DROP DATABASE rustql_test_session")
+        b.execute_write(None, "DROP DATABASE rustql_test_session")
             .unwrap();
     }
 
@@ -608,13 +650,17 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn el_editor_lee_como_mucho_max_rows() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_cap")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_cap").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)")
+        b.execute_write(None, "CREATE DATABASE rustql_test_cap")
             .unwrap();
-        b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
+        b.execute_write(None, "CREATE TABLE rustql_test_cap.t (id INT)")
             .unwrap();
+        b.execute_write(
+            None,
+            "INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)",
+        )
+        .unwrap();
         let db = Some("rustql_test_cap");
         let run =
             |sql: &str, max_rows| b.execute_in_session(db, sql, max_rows, &CancelFlag::default());
@@ -623,7 +669,8 @@ mod tests {
         let empty = run("SELECT id AS n FROM t WHERE 1 = 0", 3);
         // Tras recortar, la sesión sigue utilizable
         let after = run("SELECT COUNT(*) FROM t", 3);
-        b.execute_write("DROP DATABASE rustql_test_cap").unwrap();
+        b.execute_write(None, "DROP DATABASE rustql_test_cap")
+            .unwrap();
 
         let capped = capped.unwrap();
         assert_eq!(capped.rows.len(), 3);

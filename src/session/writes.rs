@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use super::jobs::JobResult;
 use super::{SelectedNode, Session, Shared};
-use crate::db::{DbBackend, DbResult, Statement, qualified};
+use crate::db::{DbBackend, DbResult, Statement};
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::ui::modals::{ModalState, Reload};
@@ -109,7 +109,7 @@ impl Session {
     pub(super) fn create_table(&mut self, db: String, name: String, sql: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, sql.clone(), || b.execute_write(&sql));
+            let result = logged(&mut log, sql.clone(), || b.execute_write(Some(&db), &sql));
             WriteResult {
                 write: Write::CreateTable { db, name },
                 log,
@@ -171,7 +171,7 @@ impl Session {
             let failed = tables
                 .iter()
                 .filter_map(|table| {
-                    let label = format!("TRUNCATE TABLE {}", qualified(&db, table));
+                    let label = format!("TRUNCATE TABLE {}", b.engine().qualified(&db, table));
                     logged(&mut log, label, || b.truncate_table(&db, table).map(|()| 0))
                         .err()
                         .map(|e| format!("{table}: {e}"))
@@ -188,12 +188,15 @@ impl Session {
     pub(super) fn clone_table(&mut self, db: String, source: String, name: String, data: bool) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let (src, dst) = (qualified(&db, &source), qualified(&db, &name));
-            let create = format!("CREATE TABLE {dst} LIKE {src}");
-            let mut result = logged(&mut log, create.clone(), || b.execute_write(&create));
+            let engine = b.engine();
+            let (src, dst) = (engine.qualified(&db, &source), engine.qualified(&db, &name));
+            let create = engine.create_table_like(&dst, &src);
+            let mut result = logged(&mut log, create.clone(), || {
+                b.execute_write(Some(&db), &create)
+            });
             if result.is_ok() && data {
                 let copy = format!("INSERT INTO {dst} SELECT * FROM {src}");
-                result = logged(&mut log, copy.clone(), || b.execute_write(&copy));
+                result = logged(&mut log, copy.clone(), || b.execute_write(Some(&db), &copy));
             }
             WriteResult {
                 write: Write::CloneTable { db, name },
@@ -236,7 +239,8 @@ impl Session {
             let mut log = Vec::new();
             let statements = stmts.len() as u64;
             let result = logged(&mut log, summary, || {
-                b.execute_transaction(&stmts).map(|()| statements)
+                b.execute_transaction(Some(&db), &stmts)
+                    .map(|()| statements)
             });
             WriteResult {
                 write: Write::Commit {

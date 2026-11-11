@@ -12,13 +12,16 @@ use crate::ui::sql_editor::SqlEditorAction;
 struct FakeBackend;
 
 impl DbBackend for FakeBackend {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
     fn list_databases(&self) -> DbResult<Vec<String>> {
         Ok(Vec::new())
     }
     fn list_tables(&self, _: &str) -> DbResult<Vec<String>> {
         Ok(Vec::new())
     }
-    fn execute_query(&self, _: &str) -> DbResult<QueryResult> {
+    fn execute_query(&self, _: Option<&str>, _: &str) -> DbResult<QueryResult> {
         Ok(QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -41,7 +44,7 @@ impl DbBackend for FakeBackend {
         if cancel.load(Ordering::SeqCst) {
             return Err(QUERY_CANCELLED.into());
         }
-        self.execute_query(sql)
+        self.execute_query(None, sql)
     }
     fn cancel_in_session(&self, cancel: &CancelFlag) -> DbResult<()> {
         cancel.store(true, Ordering::SeqCst);
@@ -59,7 +62,7 @@ impl DbBackend for FakeBackend {
     fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
         Ok(Vec::new())
     }
-    fn execute_write(&self, _: &str) -> DbResult<u64> {
+    fn execute_write(&self, _: Option<&str>, _: &str) -> DbResult<u64> {
         Ok(0)
     }
     fn create_database(&self, _: &str, _: &str) -> DbResult<()> {
@@ -74,7 +77,7 @@ impl DbBackend for FakeBackend {
     fn truncate_table(&self, _: &str, _: &str) -> DbResult<()> {
         Ok(())
     }
-    fn execute_transaction(&self, _: &[Statement]) -> DbResult<()> {
+    fn execute_transaction(&self, _: Option<&str>, _: &[Statement]) -> DbResult<()> {
         Ok(())
     }
 }
@@ -104,6 +107,7 @@ fn column(name: &str, key: &str, extra: &str) -> ColumnInfo {
         default_val: None,
         column_key: key.into(),
         extra: extra.into(),
+        is_auto: extra.contains("auto_increment"),
     }
 }
 
@@ -313,9 +317,11 @@ fn edit(row_idx: usize, col_idx: usize, value: Option<&str>) -> PendingEdit {
     }
 }
 
-#[test]
-fn cambios_pendientes_como_sentencias_con_parametros() {
+/// Sentencias de un DELETE, un UPDATE (clave y otra columna de la misma
+/// fila) y un INSERT pendientes, en el dialecto de `engine`.
+fn pending_statements_for(engine: Engine) -> Vec<Statement> {
     let mut s = session_with_table();
+    s.params.engine = engine;
     s.table_view.table_data = Some(QueryResult {
         columns: vec!["id".into(), "v".into()],
         rows: vec![
@@ -334,27 +340,65 @@ fn cambios_pendientes_como_sentencias_con_parametros() {
         ],
         auto_cols: vec![false, false],
     });
+    // Y una fila con todo por defecto
+    s.table_view.pending_inserts.push(PendingInsert {
+        values: vec![InsertValue::Default, InsertValue::Default],
+        auto_cols: vec![false, false],
+    });
+    s.pending_statements().unwrap()
+}
 
-    let stmts = s.pending_statements().unwrap();
-    let p = |v: &[Option<&str>]| v.iter().map(|x| x.map(String::from)).collect::<Vec<_>>();
+fn statement(sql: &str, params: &[Option<&str>], single_row: bool) -> Statement {
+    Statement {
+        sql: sql.into(),
+        params: params.iter().map(|x| x.map(String::from)).collect(),
+        single_row,
+    }
+}
+
+#[test]
+fn cambios_pendientes_como_sentencias_con_parametros() {
     assert_eq!(
-        stmts,
+        pending_statements_for(Engine::Mysql),
         [
-            Statement {
-                sql: "DELETE FROM `db`.`t` WHERE `id` = ?".into(),
-                params: p(&[Some("2")]),
-                single_row: true,
-            },
-            Statement {
-                sql: "UPDATE `db`.`t` SET `id` = ?, `v` = ? WHERE `id` = ?".into(),
-                params: p(&[Some("10"), None, Some("1")]),
-                single_row: true,
-            },
-            Statement {
-                sql: "INSERT INTO `db`.`t` (`id`, `v`) VALUES (?, ?)".into(),
-                params: p(&[Some("3"), Some("x'y")]),
-                single_row: false,
-            },
+            statement("DELETE FROM `db`.`t` WHERE `id` = ?", &[Some("2")], true),
+            statement(
+                "UPDATE `db`.`t` SET `id` = ?, `v` = ? WHERE `id` = ?",
+                &[Some("10"), None, Some("1")],
+                true
+            ),
+            statement(
+                "INSERT INTO `db`.`t` (`id`, `v`) VALUES (?, ?)",
+                &[Some("3"), Some("x'y")],
+                false
+            ),
+            statement("INSERT INTO `db`.`t` () VALUES ()", &[], false),
+        ]
+    );
+}
+
+#[test]
+fn cambios_pendientes_en_el_dialecto_de_postgres() {
+    // Parámetros numerados, comillas dobles y el esquema en vez de la BBDD
+    assert_eq!(
+        pending_statements_for(Engine::Postgres),
+        [
+            statement(
+                r#"DELETE FROM "public"."t" WHERE "id" = $1"#,
+                &[Some("2")],
+                true
+            ),
+            statement(
+                r#"UPDATE "public"."t" SET "id" = $1, "v" = $2 WHERE "id" = $3"#,
+                &[Some("10"), None, Some("1")],
+                true
+            ),
+            statement(
+                r#"INSERT INTO "public"."t" ("id", "v") VALUES ($1, $2)"#,
+                &[Some("3"), Some("x'y")],
+                false
+            ),
+            statement(r#"INSERT INTO "public"."t" DEFAULT VALUES"#, &[], false),
         ]
     );
 }
@@ -373,17 +417,24 @@ fn sin_clave_primaria_no_se_editan_filas() {
 #[ignore = "necesita RUSTQL_TEST_MYSQL"]
 fn guardar_cambios_contra_el_servidor() {
     let b = crate::db::test_server::backend();
-    b.execute_write("DROP DATABASE IF EXISTS rustql_test_grid")
+    b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_grid")
         .unwrap();
-    b.execute_write("CREATE DATABASE rustql_test_grid").unwrap();
-    b.execute_write("CREATE TABLE rustql_test_grid.t (id VARCHAR(20) PRIMARY KEY, v TEXT)")
+    b.execute_write(None, "CREATE DATABASE rustql_test_grid")
         .unwrap();
-    b.execute_write("INSERT INTO rustql_test_grid.t VALUES ('a','uno'),('b','dos'),('c','tres')")
-        .unwrap();
+    b.execute_write(
+        None,
+        "CREATE TABLE rustql_test_grid.t (id VARCHAR(20) PRIMARY KEY, v TEXT)",
+    )
+    .unwrap();
+    b.execute_write(
+        None,
+        "INSERT INTO rustql_test_grid.t VALUES ('a','uno'),('b','dos'),('c','tres')",
+    )
+    .unwrap();
     let select = "SELECT * FROM rustql_test_grid.t ORDER BY id";
 
     let mut s = Session::new(0);
-    s.table_view.table_data = Some(b.execute_query(select).unwrap());
+    s.table_view.table_data = Some(b.execute_query(None, select).unwrap());
     let columns = b.get_columns_info("rustql_test_grid", "t").unwrap();
     s.schema.columns_info.insert(
         ("rustql_test_grid".into(), "t".into()),
@@ -412,8 +463,9 @@ fn guardar_cambios_contra_el_servidor() {
     let ConnState::Connected(b) = &s.state else {
         unreachable!()
     };
-    let rows = b.execute_query(select).map(|r| r.rows);
-    b.execute_write("DROP DATABASE rustql_test_grid").unwrap();
+    let rows = b.execute_query(None, select).map(|r| r.rows);
+    b.execute_write(None, "DROP DATABASE rustql_test_grid")
+        .unwrap();
 
     assert!(saved, "{:?}", s.modal);
     let row = |id: &str, v: Option<&str>| vec![Some(id.to_string()), v.map(String::from)];
@@ -462,7 +514,7 @@ fn vaciar_todas_sin_haber_desplegado_el_arbol() {
         "INSERT INTO rustql_test_truncate.hija VALUES (1)",
         "INSERT INTO rustql_test_truncate.suelta VALUES (1), (2)",
     ] {
-        b.execute_write(sql).unwrap();
+        b.execute_write(None, sql).unwrap();
     }
     let mut s = Session::new(0);
     s.state = ConnState::Connected(Arc::new(b));
@@ -478,13 +530,16 @@ fn vaciar_todas_sin_haber_desplegado_el_arbol() {
         unreachable!()
     };
     let count = |t: &str| {
-        b.execute_query(&format!("SELECT COUNT(*) FROM rustql_test_truncate.{t}"))
-            .unwrap()
-            .rows[0][0]
+        b.execute_query(
+            None,
+            &format!("SELECT COUNT(*) FROM rustql_test_truncate.{t}"),
+        )
+        .unwrap()
+        .rows[0][0]
             .clone()
     };
     let (suelta, hija, padre) = (count("suelta"), count("hija"), count("padre"));
-    b.execute_write("DROP DATABASE rustql_test_truncate")
+    b.execute_write(None, "DROP DATABASE rustql_test_truncate")
         .unwrap();
 
     assert_eq!(suelta, Some("0".into()));
@@ -557,11 +612,12 @@ fn clonar_fila_copia_valores_y_nulls_salvo_el_auto_increment() {
 #[ignore = "necesita RUSTQL_TEST_MYSQL"]
 fn fila_nueva_contra_el_servidor() {
     let b = crate::db::test_server::backend();
-    b.execute_write("DROP DATABASE IF EXISTS rustql_test_insert")
+    b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_insert")
         .unwrap();
-    b.execute_write("CREATE DATABASE rustql_test_insert")
+    b.execute_write(None, "CREATE DATABASE rustql_test_insert")
         .unwrap();
     b.execute_write(
+        None,
         "CREATE TABLE rustql_test_insert.t (id INT AUTO_INCREMENT PRIMARY KEY, \
          creado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, n INT NULL, \
          v VARCHAR(10) NOT NULL DEFAULT 'x')",
@@ -595,8 +651,9 @@ fn fila_nueva_contra_el_servidor() {
     let ConnState::Connected(b) = &s.state else {
         unreachable!()
     };
-    let rows = b.execute_query(select).map(|r| r.rows);
-    b.execute_write("DROP DATABASE rustql_test_insert").unwrap();
+    let rows = b.execute_query(None, select).map(|r| r.rows);
+    b.execute_write(None, "DROP DATABASE rustql_test_insert")
+        .unwrap();
 
     assert!(saved, "{:?}", s.modal);
     let some = |v: &str| Some(v.to_string());
@@ -1017,14 +1074,20 @@ fn cambiar_de_pagina_con_cambios_pregunta_y_ordenar_vuelve_a_la_primera() {
 #[ignore = "necesita RUSTQL_TEST_MYSQL"]
 fn paginas_contra_el_servidor() {
     let b = crate::db::test_server::backend();
-    b.execute_write("DROP DATABASE IF EXISTS rustql_test_pages")
+    b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_pages")
         .unwrap();
-    b.execute_write("CREATE DATABASE rustql_test_pages")
+    b.execute_write(None, "CREATE DATABASE rustql_test_pages")
         .unwrap();
-    b.execute_write("CREATE TABLE rustql_test_pages.t (id INT PRIMARY KEY)")
-        .unwrap();
-    b.execute_write("INSERT INTO rustql_test_pages.t VALUES (1),(2),(3),(4),(5)")
-        .unwrap();
+    b.execute_write(
+        None,
+        "CREATE TABLE rustql_test_pages.t (id INT PRIMARY KEY)",
+    )
+    .unwrap();
+    b.execute_write(
+        None,
+        "INSERT INTO rustql_test_pages.t VALUES (1),(2),(3),(4),(5)",
+    )
+    .unwrap();
     let mut s = Session::new(0);
     let mut sh = shared();
     sh.settings.query_limit = 2;
@@ -1047,7 +1110,8 @@ fn paginas_contra_el_servidor() {
     let ConnState::Connected(b) = &s.state else {
         unreachable!()
     };
-    b.execute_write("DROP DATABASE rustql_test_pages").unwrap();
+    b.execute_write(None, "DROP DATABASE rustql_test_pages")
+        .unwrap();
 
     let page = |ids: &[&str], more| (ids.iter().map(|s| s.to_string()).collect(), more);
     assert_eq!(

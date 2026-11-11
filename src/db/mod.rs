@@ -1,12 +1,15 @@
+pub mod dialect;
 pub mod export;
 pub mod mysql;
 
 use std::sync::Arc;
 
+pub use dialect::{Engine, ParamList};
 pub use export::{ExportDestination, ExportEvent, ExportOptions};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {
+    pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -50,10 +53,12 @@ impl ConnectionParams {
 
 impl Default for ConnectionParams {
     fn default() -> Self {
+        let engine = Engine::default();
         Self {
+            engine,
             host: "127.0.0.1".into(),
-            port: 3306,
-            user: "root".into(),
+            port: engine.default_port(),
+            user: engine.default_user().into(),
             password: String::new(),
             keyring_id: None,
             database: String::new(),
@@ -70,7 +75,7 @@ pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
 /// Error con el que termina una ejecución del editor cancelada.
 pub const QUERY_CANCELLED: &str = "Consulta cancelada.";
 
-/// Sentencia con parámetros posicionales (`?`). Los valores viajan aparte
+/// Sentencia con parámetros (ver `ParamList`). Los valores viajan aparte
 /// del SQL: no hace falta escaparlos y llegan intactos (`None` = NULL).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
@@ -114,38 +119,18 @@ pub struct ColumnInfo {
     pub col_type: String,
     pub is_nullable: bool,
     pub default_val: Option<String>,
+    /// Tipo de clave de la que forma parte: «PRI», «UNI», «MUL» o nada.
     pub column_key: String,
     pub extra: String,
+    /// El servidor le da valor al insertar (AUTO_INCREMENT, serial,
+    /// identidad): en una fila nueva no se escribe.
+    pub is_auto: bool,
 }
 
-/// Escapa un valor para uso dentro de comillas simples en SQL.
-/// Cubre todas las secuencias de escape requeridas por MySQL. La comilla se
-/// dobla (`''`) en vez de escaparse con `\'`: si el servidor tiene
-/// NO_BACKSLASH_ESCAPES en el sql_mode, `\'` cerraría la cadena y el resto
-/// del valor se ejecutaría como SQL. Con `''` lo peor que pasa en ese modo es
-/// que las barras se lean literalmente.
-pub fn escape_sql(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\0', "\\0")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\x1a', "\\Z")
-        .replace('\'', "''")
-}
-
-/// Escapa un identificador para uso dentro de backticks en SQL.
-pub fn escape_ident(s: &str) -> String {
-    s.replace('`', "``")
-}
-
-/// Identificador entre backticks: `` `nombre` ``.
-pub fn quote_ident(s: &str) -> String {
-    format!("`{}`", escape_ident(s))
-}
-
-/// Tabla cualificada con su BBDD: `` `bd`.`tabla` ``.
-pub fn qualified(db: &str, table: &str) -> String {
-    format!("{}.{}", quote_ident(db), quote_ident(table))
+impl ColumnInfo {
+    pub fn is_primary(&self) -> bool {
+        self.column_key == "PRI"
+    }
 }
 
 /// Valida que un nombre de charset MySQL solo contenga caracteres seguros.
@@ -163,7 +148,14 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
 /// Backend de una conexión. Es `Sync` y todos sus métodos toman `&self`: se
 /// comparte (`Arc`) entre la UI y los hilos de trabajo, que piden conexiones
 /// a su pool cuando las necesitan.
+///
+/// Los métodos con `db: Option<&str>` ejecutan SQL en esa BBDD. MySQL ve
+/// todas desde cualquier conexión y no la necesita (las tablas van
+/// cualificadas con su BBDD); en PostgreSQL decide a cuál se conecta. Sin
+/// ella, en la BBDD con la que se abrió la conexión.
 pub trait DbBackend: Send + Sync {
+    fn engine(&self) -> Engine;
+
     // ── Lectura (no modifican el estado del backend) ───────────────────────────
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
@@ -172,7 +164,7 @@ pub trait DbBackend: Send + Sync {
     fn list_all_tables(&self) -> DbResult<Vec<(String, String)>>;
 
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
-    fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
+    fn execute_query(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
 
     /// SQL del editor, en una conexión propia que se mantiene entre
     /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
@@ -201,7 +193,7 @@ pub trait DbBackend: Send + Sync {
     // ── Escritura (modifican datos en el servidor) ─────────────────────────────
 
     /// Ejecuta SQL de escritura (INSERT/UPDATE/DELETE/DDL). Devuelve filas afectadas.
-    fn execute_write(&self, sql: &str) -> DbResult<u64>;
+    fn execute_write(&self, db: Option<&str>, sql: &str) -> DbResult<u64>;
 
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()>;
     fn drop_database(&self, name: &str) -> DbResult<()>;
@@ -211,7 +203,7 @@ pub trait DbBackend: Send + Sync {
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla, o una `single_row` no encuentra su fila, se hace
     /// ROLLBACK y se devuelve el error.
-    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
+    fn execute_transaction(&self, db: Option<&str>, stmts: &[Statement]) -> DbResult<()>;
 }
 
 pub enum ConnectEvent {
@@ -246,7 +238,7 @@ pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>>
 /// Crean y borran sus propias BBDD `rustql_test_*`.
 #[cfg(test)]
 pub mod test_server {
-    use super::ConnectionParams;
+    use super::{ConnectionParams, Engine};
 
     pub fn params() -> ConnectionParams {
         let url = std::env::var("RUSTQL_TEST_MYSQL")
@@ -255,6 +247,7 @@ pub mod test_server {
         let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
         let (host, port) = addr.rsplit_once(':').expect("falta :puerto");
         ConnectionParams {
+            engine: Engine::Mysql,
             host: host.into(),
             port: port.parse().expect("puerto"),
             user: user.into(),
@@ -280,21 +273,8 @@ mod tests {
     const ATTACK: &str = "\\' OR 1=1 -- ";
 
     #[test]
-    fn identificadores_entre_backticks() {
-        assert_eq!(quote_ident("a`b"), "`a``b`");
-        assert_eq!(qualified("bd", "ta`bla"), "`bd`.`ta``bla`");
-    }
-
-    #[test]
-    fn escape_sql_dobla_las_comillas() {
-        assert_eq!(escape_sql("it's"), "it''s");
-        assert_eq!(escape_sql(ATTACK), "\\\\'' OR 1=1 -- ");
-        assert_eq!(escape_sql("a\nb\\c"), "a\\nb\\\\c");
-    }
-
-    #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
-    fn escape_sql_no_permite_inyectar_en_ningun_sql_mode() {
+    fn un_literal_no_permite_inyectar_en_ningun_sql_mode() {
         let backend = test_server::backend();
         // Una sola conexión: sql_mode es de sesión
         let mut conn = backend.conn().unwrap();
@@ -313,15 +293,15 @@ mod tests {
                 .unwrap();
             let matches: Option<u64> = conn
                 .query_first(format!(
-                    "SELECT COUNT(*) FROM rustql_test_escape.t WHERE v = '{}'",
-                    escape_sql(ATTACK)
+                    "SELECT COUNT(*) FROM rustql_test_escape.t WHERE v = {}",
+                    Engine::Mysql.literal(ATTACK)
                 ))
                 .unwrap();
             assert_eq!(matches, Some(0), "inyección con sql_mode={mode:?}");
             if mode.is_empty() {
                 for value in tricky {
                     let back: Option<String> = conn
-                        .query_first(format!("SELECT '{}'", escape_sql(value)))
+                        .query_first(format!("SELECT {}", Engine::Mysql.literal(value)))
                         .unwrap();
                     assert_eq!(back.as_deref(), Some(value));
                 }

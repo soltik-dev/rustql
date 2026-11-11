@@ -7,9 +7,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use mysql::PooledConn;
 use mysql::prelude::Queryable;
 
+use super::ConnectionParams;
 use super::DbBackend;
-use super::mysql::MysqlBackend;
-use super::{ConnectionParams, escape_sql, qualified, quote_ident};
+use super::mysql::{MysqlBackend, literal, qualified, quote_ident};
 
 // ── Tipos públicos ─────────────────────────────────────────────────────────────
 
@@ -307,7 +307,7 @@ fn export_to_same_server_db(
     // Crear la BBDD destino si no existe
     let create_db_sql = format!("CREATE DATABASE IF NOT EXISTS {}", quote_ident(target_db));
     backend
-        .execute_query(&create_db_sql)
+        .execute_query(None, &create_db_sql)
         .map_err(|e| format!("No se pudo crear la base de datos '{target_db}': {e}"))?;
 
     // Una única conexión para toda la copia: FOREIGN_KEY_CHECKS es de sesión
@@ -366,10 +366,10 @@ fn export_to_remote(
 ) -> Result<(usize, u64), String> {
     // Crear BBDD destino si no existe
     dst_backend
-        .execute_query(&format!(
-            "CREATE DATABASE IF NOT EXISTS {}",
-            quote_ident(target_db)
-        ))
+        .execute_query(
+            None,
+            &format!("CREATE DATABASE IF NOT EXISTS {}", quote_ident(target_db)),
+        )
         .map_err(|e| format!("No se pudo crear la BBDD destino '{target_db}': {e}"))?;
 
     // Sesión estable en destino con FOREIGN_KEY_CHECKS desactivado (ver
@@ -422,7 +422,10 @@ fn copy_table_remote(
 
     // SELECT en origen, INSERT en destino en batches
     let data = src
-        .execute_query(&format!("SELECT * FROM {}", qualified(source_db, table)))
+        .execute_query(
+            None,
+            &format!("SELECT * FROM {}", qualified(source_db, table)),
+        )
         .map_err(|e| format!("SELECT: {e}"))?;
 
     if data.rows.is_empty() {
@@ -446,7 +449,7 @@ fn copy_table_remote(
                     .iter()
                     .map(|v| match v {
                         None => "NULL".to_string(),
-                        Some(s) => format!("'{}'", escape_sql(s)),
+                        Some(s) => literal(s),
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -474,7 +477,7 @@ const SAME_TARGET_ERROR: &str = "El destino es la misma base de datos del mismo 
 fn same_server(a: &MysqlBackend, b: &MysqlBackend) -> Result<bool, String> {
     let identity = |backend: &MysqlBackend| {
         backend
-            .execute_query("SELECT @@hostname, @@port, @@datadir")
+            .execute_query(None, "SELECT @@hostname, @@port, @@datadir")
             .map(|r| r.rows.into_iter().next())
     };
     let (id_a, id_b) = (identity(a)?, identity(b)?);
@@ -488,10 +491,10 @@ fn get_create_table_ddl(
     table: &str,
 ) -> Result<String, String> {
     let result = backend
-        .execute_query(&format!(
-            "SHOW CREATE TABLE {}",
-            qualified(source_db, table)
-        ))
+        .execute_query(
+            None,
+            &format!("SHOW CREATE TABLE {}", qualified(source_db, table)),
+        )
         .map_err(|e| format!("SHOW CREATE TABLE: {e}"))?;
 
     result
@@ -545,7 +548,10 @@ fn export_table_to_writer(
     }
 
     let data = backend
-        .execute_query(&format!("SELECT * FROM {}", qualified(source_db, table)))
+        .execute_query(
+            None,
+            &format!("SELECT * FROM {}", qualified(source_db, table)),
+        )
         .map_err(|e| format!("SELECT: {e}"))?;
 
     if data.rows.is_empty() {
@@ -569,7 +575,7 @@ fn export_table_to_writer(
                     .iter()
                     .map(|v| match v {
                         None => "NULL".to_string(),
-                        Some(s) => format!("'{}'", escape_sql(s)),
+                        Some(s) => literal(s),
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -607,13 +613,16 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn no_copia_una_bbdd_sobre_si_misma() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_export")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_export")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_export")
+        b.execute_write(None, "CREATE DATABASE rustql_test_export")
             .unwrap();
-        b.execute_write("CREATE TABLE rustql_test_export.t (id INT PRIMARY KEY)")
-            .unwrap();
-        b.execute_write("INSERT INTO rustql_test_export.t VALUES (1)")
+        b.execute_write(
+            None,
+            "CREATE TABLE rustql_test_export.t (id INT PRIMARY KEY)",
+        )
+        .unwrap();
+        b.execute_write(None, "INSERT INTO rustql_test_export.t VALUES (1)")
             .unwrap();
 
         // Mismo servidor a través de un perfil «remoto», con DROP IF EXISTS
@@ -633,9 +642,10 @@ mod tests {
         );
         let events: Vec<ExportEvent> = rx.iter().collect();
         let rows = b
-            .execute_query("SELECT COUNT(*) FROM rustql_test_export.t")
+            .execute_query(None, "SELECT COUNT(*) FROM rustql_test_export.t")
             .map(|r| r.rows[0][0].clone());
-        b.execute_write("DROP DATABASE rustql_test_export").unwrap();
+        b.execute_write(None, "DROP DATABASE rustql_test_export")
+            .unwrap();
 
         assert!(
             matches!(events.as_slice(), [ExportEvent::Failed(e)] if e == SAME_TARGET_ERROR),
@@ -670,7 +680,7 @@ mod tests {
             "INSERT INTO rustql_test_dump.t VALUES \
              (1, 'it''s'), (2, 'barra \\\\ y salto\\n'), (3, NULL), (4, '')",
         ] {
-            b.execute_write(sql).unwrap();
+            b.execute_write(None, sql).unwrap();
         }
         let path = std::env::temp_dir().join(format!("rustql-test-{}.sql", std::process::id()));
         let rx = spawn_export(
@@ -698,8 +708,10 @@ mod tests {
         let mut conn = b.conn().unwrap();
         conn.query_drop("USE rustql_test_dump").unwrap();
         let source: Vec<(i32, Option<String>)> = conn.query(select).unwrap();
-        b.execute_write("DROP DATABASE rustql_test_dump").unwrap();
-        b.execute_write("DROP DATABASE rustql_test_dump2").unwrap();
+        b.execute_write(None, "DROP DATABASE rustql_test_dump")
+            .unwrap();
+        b.execute_write(None, "DROP DATABASE rustql_test_dump2")
+            .unwrap();
 
         assert!(
             matches!(

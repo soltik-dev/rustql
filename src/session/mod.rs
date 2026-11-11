@@ -14,8 +14,8 @@ use eframe::egui;
 use self::jobs::{JobResult, Jobs};
 pub use self::schema::SchemaCache;
 use crate::db::{
-    CancelFlag, ConnectEvent, ConnectionParams, DbBackend, DbResult, ExportDestination,
-    ExportEvent, ExportOptions, QueryResult, Statement, qualified, quote_ident,
+    CancelFlag, ConnectEvent, ConnectionParams, DbBackend, DbResult, Engine, ExportDestination,
+    ExportEvent, ExportOptions, ParamList, QueryResult, Statement,
 };
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
@@ -236,6 +236,12 @@ impl Session {
             || self.writes_in_flight > 0
     }
 
+    /// Motor de la conexión (o del formulario): en su dialecto se escribe
+    /// el SQL que compone la sesión.
+    pub fn engine(&self) -> Engine {
+        self.params.engine
+    }
+
     pub fn is_connected(&self) -> bool {
         matches!(self.state, ConnState::Connected(_))
     }
@@ -353,18 +359,19 @@ impl Session {
         }
     }
 
-    /// Carga los datos de la tabla en segundo plano. Sustituye a la consulta
-    /// en curso, si la hay.
-    fn run_query_async(&mut self, sql: String) {
+    /// Carga los datos de una tabla de `db` en segundo plano. Sustituye a la
+    /// consulta en curso, si la hay.
+    fn run_query_async(&mut self, db: &str, sql: String) {
         if !self.is_connected() {
             return;
         }
         self.table_view.data_generation += 1;
         let generation = self.table_view.data_generation;
         self.table_view.query_loading = true;
+        let db = db.to_string();
         self.spawn_job(move |b| {
             let start = Instant::now();
-            let result = b.execute_query(&sql);
+            let result = b.execute_query(Some(&db), &sql);
             JobResult::TableData {
                 generation,
                 sql,
@@ -382,6 +389,7 @@ impl Session {
     }
 
     fn build_sql(&self, db: &str, table: &str) -> String {
+        let engine = self.engine();
         let filter = self.table_view.filter_text.trim();
 
         let order_by = if self.table_view.sort_specs.is_empty() {
@@ -397,7 +405,7 @@ impl Session {
                     } else {
                         "ASC"
                     };
-                    format!("{} {dir}", quote_ident(&s.col_name))
+                    format!("{} {dir}", engine.quote_ident(&s.col_name))
                 })
                 .collect();
             format!(" ORDER BY {}", parts.join(", "))
@@ -410,7 +418,7 @@ impl Session {
         if tv.page > 0 {
             limit.push_str(&format!(" OFFSET {}", tv.page * tv.page_size));
         }
-        let from = qualified(db, table);
+        let from = engine.qualified(db, table);
         if filter.is_empty() {
             format!("SELECT * FROM {from}{order_by}{limit}")
         } else {
@@ -428,7 +436,7 @@ impl Session {
             self.table_view.page = 0;
         }
         let sql = self.build_sql(db, table);
-        self.run_query_async(sql);
+        self.run_query_async(db, sql);
     }
 
     /// Tras escribir en `db` (crear, clonar, vaciar…): descarta sus cachés de
@@ -499,7 +507,8 @@ impl Session {
         };
         let tv = &self.table_view;
         let data = tv.table_data.as_ref().ok_or("No hay datos cargados.")?;
-        let target = qualified(db, table);
+        let engine = self.engine();
+        let target = engine.qualified(db, table);
         let edits_rows = !tv.pending_deletes.is_empty() || !tv.pending_edits.is_empty();
         if edits_rows && self.schema.open_table_columns().is_none() {
             return Err(
@@ -511,17 +520,19 @@ impl Session {
                 "La tabla no tiene clave primaria: no se pueden editar ni eliminar filas.".into(),
             );
         }
-        let row_key = |row_idx: usize| {
-            pk_condition(data, &tv.primary_keys, row_idx)
+        // Condición que identifica la fila, con su clave como parámetros
+        let row_key = |row_idx: usize, params: &mut ParamList| {
+            pk_condition(data, &tv.primary_keys, row_idx, engine, params)
                 .ok_or_else(|| format!("No se encuentra la clave primaria de la fila {row_idx}."))
         };
 
         let mut stmts = Vec::new();
         for &row_idx in &tv.pending_deletes {
-            let (condition, params) = row_key(row_idx)?;
+            let mut params = ParamList::new(engine);
+            let condition = row_key(row_idx, &mut params)?;
             stmts.push(Statement {
                 sql: format!("DELETE FROM {target} WHERE {condition}"),
-                params,
+                params: params.into_values(),
                 single_row: true,
             });
         }
@@ -535,26 +546,25 @@ impl Session {
         }
         for (row_idx, edits) in edits_by_row {
             let mut sets = Vec::new();
-            let mut params = Vec::new();
+            let mut params = ParamList::new(engine);
             for edit in edits {
                 let col = data
                     .columns
                     .get(edit.col_idx)
                     .ok_or_else(|| format!("No existe la columna {}.", edit.col_idx))?;
-                sets.push(format!("{} = ?", quote_ident(col)));
-                params.push((!edit.is_null).then(|| edit.new_value.clone()));
+                let value = params.push((!edit.is_null).then(|| edit.new_value.clone()));
+                sets.push(format!("{} = {value}", engine.quote_ident(col)));
             }
-            let (condition, key) = row_key(row_idx)?;
-            params.extend(key);
+            let condition = row_key(row_idx, &mut params)?;
             stmts.push(Statement {
                 sql: format!("UPDATE {target} SET {} WHERE {condition}", sets.join(", ")),
-                params,
+                params: params.into_values(),
                 single_row: true,
             });
         }
 
         // Las columnas en DEFAULT se omiten para que el servidor ponga su
-        // valor por defecto; si son todas, `INSERT INTO t () VALUES ()`.
+        // valor por defecto; si son todas, la fila entera va por defecto.
         for ins in &tv.pending_inserts {
             let (cols, params): (Vec<String>, Vec<Option<String>>) = data
                 .columns
@@ -566,15 +576,11 @@ impl Session {
                         InsertValue::Null => None,
                         InsertValue::Value(v) => Some(v.clone()),
                     };
-                    Some((quote_ident(col), param))
+                    Some((engine.quote_ident(col), param))
                 })
                 .unzip();
-            let placeholders = vec!["?"; cols.len()].join(", ");
             stmts.push(Statement {
-                sql: format!(
-                    "INSERT INTO {target} ({}) VALUES ({placeholders})",
-                    cols.join(", ")
-                ),
+                sql: engine.insert(&target, &cols),
                 params,
                 single_row: false,
             });
@@ -583,7 +589,8 @@ impl Session {
     }
 
     /// Fila nueva para el grid: vacía (todo DEFAULT, que el servidor
-    /// completa) o copia de `source_row`. Las AUTO_INCREMENT, siempre DEFAULT.
+    /// completa) o copia de `source_row`. Las columnas a las que el servidor
+    /// da valor (AUTO_INCREMENT, serial…), siempre DEFAULT.
     fn new_insert_row(&self, source_row: Option<usize>) -> Option<PendingInsert> {
         let data = self.table_view.table_data.as_ref()?;
         if data.columns.is_empty() {
@@ -594,7 +601,7 @@ impl Session {
             .map(|i| {
                 columns_info
                     .and_then(|ci| ci.get(i))
-                    .is_some_and(|c| c.extra.contains("auto_increment"))
+                    .is_some_and(|c| c.is_auto)
             })
             .collect();
         let source = source_row.and_then(|r| data.rows.get(r));
@@ -846,23 +853,28 @@ impl Session {
     }
 }
 
-/// Condición `WHERE` que identifica la fila `row_idx` por su clave primaria,
-/// con sus valores como parámetros. `None` si falta la fila o alguna columna
+/// Condición `WHERE` que identifica la fila `row_idx` por su clave primaria;
+/// sus valores se añaden a `params`. `None` si falta la fila o alguna columna
 /// de la clave: una condición parcial podría afectar a varias filas.
 fn pk_condition(
     data: &QueryResult,
     primary_keys: &[String],
     row_idx: usize,
-) -> Option<(String, Vec<Option<String>>)> {
+    engine: Engine,
+    params: &mut ParamList,
+) -> Option<String> {
     let row = data.rows.get(row_idx)?;
-    let mut parts = Vec::new();
-    let mut params = Vec::new();
+    // Antes de añadir ningún parámetro: con la clave a medias no se añade
+    let mut key = Vec::new();
     for pk in primary_keys {
         let col_idx = data.columns.iter().position(|c| c == pk)?;
-        parts.push(format!("{} = ?", quote_ident(pk)));
-        params.push(row.get(col_idx)?.clone());
+        key.push((pk, row.get(col_idx)?.clone()));
     }
-    Some((parts.join(" AND "), params))
+    let parts: Vec<String> = key
+        .into_iter()
+        .map(|(pk, value)| format!("{} = {}", engine.quote_ident(pk), params.push(value)))
+        .collect();
+    Some(parts.join(" AND "))
 }
 
 // ── Loop principal ────────────────────────────────────────────────────────────
@@ -1213,7 +1225,12 @@ impl Session {
             signals = signals.data_requests_only();
         }
         // ── Modal (sobre todo) ────────────────────────────────────────────
-        let modal_action = modals_ui::show(ctx, &mut self.modal, self.writes_in_flight > 0);
+        let modal_action = modals_ui::show(
+            ctx,
+            &mut self.modal,
+            self.params.engine,
+            self.writes_in_flight > 0,
+        );
 
         let (connect, selected, save, delete) = (
             signals.connect,
