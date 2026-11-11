@@ -91,10 +91,10 @@ impl Session {
             ActiveTab::Sql(i) => {
                 if let Some(tab) = self.sql_tabs.get(i)
                     && tab.running.is_none()
-                    && !tab.sql_text.trim().is_empty()
+                    && let Some(sql) = tab.sql_to_run()
                 {
                     let action = SqlEditorAction::Execute {
-                        sql: tab.sql_text.trim().to_string(),
+                        sql,
                         db_context: tab.db_context.clone(),
                     };
                     self.handle_sql_action(sh, action);
@@ -173,11 +173,7 @@ impl Session {
             return;
         }
         let db_context = db.unwrap_or_else(|| self.selected_db().unwrap_or_default().to_string());
-        self.sql_tabs.push(SqlTab {
-            db_context,
-            sql_text,
-            ..Default::default()
-        });
+        self.sql_tabs.push(SqlTab::new(db_context, sql_text));
         self.active_tab = ActiveTab::Sql(self.sql_tabs.len() - 1);
         self.save_tabs_state(sh);
     }

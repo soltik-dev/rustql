@@ -20,7 +20,7 @@ use crate::db::{
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
-use crate::settings::{self, AppSettings, SavedSqlTab};
+use crate::settings::{self, AppSettings};
 use crate::table_state::{self, TableStates};
 use crate::ui::modals as modals_ui;
 use crate::ui::modals::{
@@ -776,14 +776,7 @@ impl Session {
         if !self.is_connected() {
             return;
         }
-        let tabs = self
-            .sql_tabs
-            .iter()
-            .map(|t| SavedSqlTab {
-                db_context: t.db_context.clone(),
-                sql_text: t.sql_text.clone(),
-            })
-            .collect();
+        let tabs = self.sql_tabs.iter().map(SqlTab::saved).collect();
         sh.settings.sql_tabs_by_conn.insert(self.params.key(), tabs);
         settings::save(&sh.settings);
     }
@@ -810,14 +803,7 @@ impl Session {
         self.sql_tabs = if saved.is_empty() {
             vec![SqlTab::default()]
         } else {
-            saved
-                .iter()
-                .map(|t| SqlTab {
-                    db_context: t.db_context.clone(),
-                    sql_text: t.sql_text.clone(),
-                    ..Default::default()
-                })
-                .collect()
+            saved.iter().map(SqlTab::restore).collect()
         };
         if migrated {
             self.save_tabs_state(sh);

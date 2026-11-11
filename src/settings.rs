@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 pub struct SavedSqlTab {
     pub db_context: String,
     pub sql_text: String,
+    /// Alto que el usuario le dio al editor (ver SqlTab::editor_height).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_height: Option<f32>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
