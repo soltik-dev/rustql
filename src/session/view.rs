@@ -181,17 +181,20 @@ impl Session {
                 .min_size(160.0)
                 .show(ui, |ui| {
                     ui.push_id(sid, |ui| {
+                        let view = sidebar::SidebarView {
+                            databases: &self.schema.databases,
+                            tables: &self.schema.tables_cache,
+                            selected_db: sel_db,
+                            selected_table: sel_table,
+                            favorites: &sh.settings.fav_tables,
+                            server_name: &self.title,
+                            conn_color,
+                        };
                         sidebar::show(
                             ui,
-                            &self.schema.databases,
-                            &self.schema.tables_cache,
-                            sel_db,
-                            sel_table,
+                            &view,
                             &mut self.schema.table_search,
-                            &sh.settings.fav_tables,
                             &mut self.show_only_fav,
-                            &self.title,
-                            conn_color,
                         )
                     })
                     .inner
@@ -213,15 +216,19 @@ impl Session {
 
         // ── Tab bar ───────────────────────────────────────────────
         {
-            let db_name_tab = self.schema.selected_db();
-            let table_name_tab = self.schema.selected_table().map(|(_, table)| table);
-            let (has_db, has_table) = (db_name_tab.is_some(), table_name_tab.is_some());
             let sql_titles: Vec<String> = self
                 .sql_tabs
                 .iter()
                 .enumerate()
                 .map(|(i, tab)| tab.title(i))
                 .collect();
+            let view = tab_bar::TabBarView {
+                active: self.active_tab,
+                server_name: &self.title,
+                db_name: self.schema.selected_db(),
+                table_name: self.schema.selected_table().map(|(_, table)| table),
+                sql_titles: &sql_titles,
+            };
 
             egui::Panel::top("tab_bar")
                 .min_size(30.0)
@@ -229,17 +236,7 @@ impl Session {
                 .show(ui, |ui| {
                     ui.push_id(sid, |ui| {
                         ui.add_space(2.0);
-                        signals.tab_bar = tab_bar::show(
-                            ui,
-                            self.active_tab,
-                            has_db,
-                            has_table,
-                            &self.title,
-                            db_name_tab,
-                            table_name_tab,
-                            &sql_titles,
-                            &mut self.sql_tab_rename,
-                        );
+                        signals.tab_bar = tab_bar::show(ui, &view, &mut self.sql_tab_rename);
                     });
                 });
         }

@@ -41,18 +41,29 @@ impl TabRename {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn show(
-    ui: &mut egui::Ui,
-    active: ActiveTab,
-    has_db: bool,
-    has_table: bool,
-    server_name: &str,
-    db_name: Option<&str>,
-    table_name: Option<&str>,
-    sql_titles: &[String],
-    rename: &mut Option<TabRename>,
-) -> TabBarResult {
+/// Lo que enseña la barra: la pestaña activa y a qué se refiere cada una.
+pub struct TabBarView<'a> {
+    pub active: ActiveTab,
+    pub server_name: &'a str,
+    /// BBDD seleccionada; sin ella su pestaña está desactivada.
+    pub db_name: Option<&'a str>,
+    /// Tabla abierta; sin ella Estructura y Datos están desactivadas.
+    pub table_name: Option<&'a str>,
+    /// Título de cada pestaña SQL.
+    pub sql_titles: &'a [String],
+}
+
+/// Barra de pestañas de la sesión. `rename` es estado suyo: la pestaña SQL
+/// cuyo nombre se está editando.
+pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>) -> TabBarResult {
+    let TabBarView {
+        active,
+        server_name,
+        db_name,
+        table_name,
+        sql_titles,
+    } = *view;
+    let (has_db, has_table) = (db_name.is_some(), table_name.is_some());
     let mut result = TabBarResult::default();
     // La pestaña que se renombraba ya no existe
     if rename.as_ref().is_some_and(|r| r.idx >= sql_titles.len()) {
@@ -252,17 +263,14 @@ mod tests {
             self.ctx
                 .run_ui(input, |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
-                        result = show(
-                            ui,
-                            ActiveTab::Servidor,
-                            false,
-                            false,
-                            "srv",
-                            None,
-                            None,
-                            &self.titles,
-                            &mut self.rename,
-                        );
+                        let view = TabBarView {
+                            active: ActiveTab::Servidor,
+                            server_name: "srv",
+                            db_name: None,
+                            table_name: None,
+                            sql_titles: &self.titles,
+                        };
+                        result = show(ui, &view, &mut self.rename);
                     });
                 })
                 .drop_without_applying_deltas();
