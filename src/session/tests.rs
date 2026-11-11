@@ -5,6 +5,7 @@ use super::*;
 use crate::db::{CancelFlag, ColumnInfo, DatabaseInfo, DbResult, QUERY_CANCELLED, TableInfo};
 use crate::ui::connection_panel::SaveProfile;
 use crate::ui::modals::NewColumnDef;
+use crate::ui::results_grid::GridAction;
 use crate::ui::sql_editor::SqlEditorAction;
 
 /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
@@ -83,6 +84,7 @@ fn shared() -> Shared {
         settings: AppSettings::default(),
         profiles: Vec::new(),
         table_states: TableStates::default(),
+        toasts: Default::default(),
     }
 }
 
@@ -915,6 +917,54 @@ fn limpiar_el_editor_pregunta_y_luego_guarda_la_pestana_vacia() {
     s.handle_modal_action(ModalAction::ClearSql(0), &mut sh);
     assert!(s.sql_tabs[0].sql_text.is_empty());
     assert_eq!(saved_sql(&s, &sh), [""]);
+}
+
+#[test]
+fn guardar_y_las_escrituras_se_confirman_con_un_aviso() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    s.table_view.pending_deletes.insert(1);
+    s.table_view.pending_edits = vec![edit(0, 0, Some("x"))];
+    s.commit_pending_changes(&mut sh, AfterCommit::ReloadData);
+    assert!(matches!(s.modal, ModalState::None));
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(sh.toasts.texts(), ["2 cambios guardados en «t»"]);
+
+    s.truncate("db".into(), Some(vec!["t".into()]));
+    s.create_table("db".into(), "nueva".into(), "CREATE TABLE …".into());
+    finish_jobs(&mut s, &mut sh);
+    let texts = sh.toasts.texts();
+    assert!(texts.contains(&"Tabla «db.t» vaciada"), "{texts:?}");
+    assert!(texts.contains(&"Tabla «db.nueva» creada"), "{texts:?}");
+    assert!(!sh.toasts.has_error());
+}
+
+#[test]
+fn copiar_filas_dice_cuantas_y_en_que_formato() {
+    let mut s = session_with_table();
+    let mut sh = shared();
+    let ctx = egui::Context::default();
+    s.table_view.selection.rows = [0, 1].into();
+    let copy = |fmt| FrameSignals {
+        grid: GridAction::CopyRows(fmt),
+        ..Default::default()
+    };
+    s.apply_signals(&ctx, &mut sh, copy(None), FrameKeys::default());
+    assert_eq!(sh.toasts.texts(), ["2 filas copiadas (CSV)"]);
+
+    // Las del resultado de una pestaña SQL, igual
+    s.active_tab = ActiveTab::Sql(0);
+    s.sql_tabs[0].result = Some(Ok(data(&["7"])));
+    s.sql_tabs[0].selection.rows = [0].into();
+    let signals = FrameSignals {
+        sql: SqlEditorAction::CopyRows(Some(crate::settings::CopyFormat::Tsv)),
+        ..Default::default()
+    };
+    s.apply_signals(&ctx, &mut sh, signals, FrameKeys::default());
+    assert_eq!(
+        sh.toasts.texts(),
+        ["2 filas copiadas (CSV)", "1 fila copiada (TSV)"]
+    );
 }
 
 #[test]

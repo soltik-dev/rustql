@@ -31,6 +31,7 @@ use crate::ui::results_grid::{
 };
 use crate::ui::sql_editor::SqlTab;
 use crate::ui::tab_bar::{ActiveTab, TabRename};
+use crate::ui::toasts::Toasts;
 
 // ── Estados de la conexión ───────────────────────────────────────────────────
 
@@ -82,6 +83,8 @@ pub struct Shared {
     pub profiles: Vec<ConnectionProfile>,
     /// Estado persistido por tabla (sort, filtro, historial)
     pub table_states: TableStates,
+    /// Avisos no modales: los lanza cualquier sesión y los dibuja la app.
+    pub toasts: Toasts,
 }
 
 /// Teclas globales del frame: solo las recibe la sesión activa.
@@ -904,6 +907,8 @@ impl Session {
             JobResult::EditorCancel(Ok(())) => {}
             // La consulta sigue en marcha: que conste por qué
             JobResult::EditorCancel(Err(e)) => {
+                sh.toasts
+                    .error(format!("No se pudo cancelar la consulta: {e}"));
                 self.push_log(LogEntry::err("Cancelar la consulta", 0, e));
             }
         }
@@ -1118,8 +1123,10 @@ impl Session {
                     }
                 }
                 Err(e) => {
-                    self.error_message =
-                        Some(format!("No se guardó la contraseña en el llavero: {e}"));
+                    // En el formulario y, por si ya no se está en él, en un aviso
+                    let message = format!("No se guardó la contraseña en el llavero: {e}");
+                    sh.toasts.error(message.clone());
+                    self.error_message = Some(message);
                 }
             }
         }

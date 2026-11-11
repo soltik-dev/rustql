@@ -123,18 +123,19 @@ pub enum SqlEditorAction {
     Clear,
     /// Cancelar la consulta que se está ejecutando.
     Cancel,
+    /// Copiar las filas seleccionadas del resultado (`None`: en el formato
+    /// de los ajustes).
+    CopyRows(Option<CopyFormat>),
 }
 
 /// Panel "SQL": editor de consultas libre. Mientras la consulta anterior no
 /// termina no se puede lanzar otra. `run_pressed`: el atajo de ejecutar
-/// (Ctrl+Enter, o F9 como en HeidiSQL). `copy_format`: formato en el que
-/// Ctrl+C copia las filas seleccionadas del resultado.
+/// (Ctrl+Enter, o F9 como en HeidiSQL).
 pub fn show(
     ui: &mut egui::Ui,
     tab: &mut SqlTab,
     run_pressed: bool,
     databases: &[String],
-    copy_format: &CopyFormat,
 ) -> SqlEditorAction {
     ui.push_id(("sql_tab", tab.uid), |ui| {
         let (mut action, execute_held) = toolbar(ui, tab, databases);
@@ -149,7 +150,11 @@ pub fn show(
         }
         ui.separator();
         editor(ui, tab, execute_held);
-        result(ui, tab, copy_format);
+        if let Some(fmt) = result(ui, tab)
+            && action == SqlEditorAction::None
+        {
+            action = SqlEditorAction::CopyRows(fmt);
+        }
         action
     })
     .inner
@@ -332,8 +337,9 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool) {
     );
 }
 
-/// Resultado de la última ejecución.
-fn result(ui: &mut egui::Ui, tab: &mut SqlTab, copy_format: &CopyFormat) {
+/// Resultado de la última ejecución. Devuelve el formato si el usuario pide
+/// copiar las filas seleccionadas (`Some(None)`: el de los ajustes).
+fn result(ui: &mut egui::Ui, tab: &mut SqlTab) -> Option<Option<CopyFormat>> {
     let p = theme::get(ui);
     let muted = |ui: &mut egui::Ui, text: String| {
         ui.label(egui::RichText::new(text).color(p.text_muted));
@@ -383,11 +389,11 @@ fn result(ui: &mut egui::Ui, tab: &mut SqlTab, copy_format: &CopyFormat) {
             let grid_action =
                 results_grid::show_read_only(ui, tab.result_run, data, &mut tab.selection);
             if let GridAction::CopyRows(fmt) = grid_action {
-                let fmt = fmt.as_ref().unwrap_or(copy_format);
-                results_grid::copy_rows(ui.ctx(), data, &tab.selection.rows, fmt, None);
+                return Some(fmt);
             }
         }
     }
+    None
 }
 
 #[cfg(test)]
@@ -439,7 +445,7 @@ mod tests {
             self.ctx
                 .run_ui(input, |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
-                        action = show(ui, &mut self.tab, run_pressed, &[], &CopyFormat::Csv);
+                        action = show(ui, &mut self.tab, run_pressed, &[]);
                     });
                 })
                 .drop_without_applying_deltas();

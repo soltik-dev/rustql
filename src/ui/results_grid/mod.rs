@@ -286,18 +286,19 @@ pub fn show_read_only(
 }
 
 /// Copia al portapapeles las filas `rows` de `data` en el formato `fmt`.
-/// `table` es el nombre que llevan los INSERT.
+/// `table` es el nombre que llevan los INSERT. Devuelve cuántas ha copiado.
 pub fn copy_rows(
     ctx: &egui::Context,
     data: &QueryResult,
     rows: &BTreeSet<usize>,
     fmt: &CopyFormat,
     table: Option<&str>,
-) {
+) -> usize {
     let rows: Vec<&Vec<Option<String>>> = rows.iter().filter_map(|&i| data.rows.get(i)).collect();
     if !rows.is_empty() {
         ctx.copy_text(format_rows_for_copy(&data.columns, &rows, fmt, table));
     }
+    rows.len()
 }
 
 /// Teclado y tabla de un grid, sea el de una tabla o uno de solo lectura.

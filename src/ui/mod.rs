@@ -15,6 +15,7 @@ pub mod statusbar;
 pub mod tab_bar;
 pub mod table_structure;
 pub mod theme;
+pub mod toasts;
 
 /// Prefijo de los atajos con la tecla de comando: Ctrl en Linux y Windows,
 /// ⌘ en macOS (egui la expone como `Modifiers::command`).

@@ -347,13 +347,7 @@ impl Session {
                     if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
                         let databases =
                             self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
-                        signals.sql = sql_editor::show(
-                            ui,
-                            tab,
-                            ctrl_enter || f9,
-                            databases,
-                            &sh.settings.copy_format,
-                        );
+                        signals.sql = sql_editor::show(ui, tab, ctrl_enter || f9, databases);
                     }
                 }
             });

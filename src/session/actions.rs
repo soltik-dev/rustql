@@ -10,6 +10,7 @@ use eframe::egui;
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
+use crate::db::QueryResult;
 use crate::db::{connect_mysql_progress, escape_sql, qualified, quote_ident};
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
@@ -26,6 +27,7 @@ use crate::ui::results_grid::{self, ApplyBarAction, CellRef, GridAction, InsertV
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::{SqlEditorAction, SqlTab};
 use crate::ui::tab_bar::{ActiveTab, TabBarResult};
+use std::collections::BTreeSet;
 
 impl Session {
     /// Aplica lo que el usuario hizo en el frame, en orden: lo de un
@@ -62,16 +64,16 @@ impl Session {
             self.disconnect();
         }
         if keys.f5 {
-            self.refresh_active_tab(sh);
+            self.refresh_active_tab(ctx, sh);
         }
         self.handle_filter_action(sh, signals.filter);
         self.handle_db_info_action(sh, signals.db_info);
-        self.handle_sql_action(sh, signals.sql);
+        self.handle_sql_action(ctx, sh, signals.sql);
     }
 
     /// F5: vuelve a leer lo que muestra la pestaña activa (antes recargaba
     /// siempre la tabla abierta, se estuviera viendo o no).
-    fn refresh_active_tab(&mut self, sh: &mut Shared) {
+    fn refresh_active_tab(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         match self.active_tab {
             // Datos y estructura de la tabla abierta
             ActiveTab::Datos => self.request_reload(sh, Reload::Refresh),
@@ -97,7 +99,7 @@ impl Session {
                         sql,
                         db_context: tab.db_context.clone(),
                     };
-                    self.handle_sql_action(sh, action);
+                    self.handle_sql_action(ctx, sh, action);
                 }
             }
         }
@@ -244,13 +246,11 @@ impl Session {
                         let filter = format!("{esc_col} = '{esc_val}'");
                         self.request_reload(sh, Reload::Filter(filter));
                     }
-                    // En un diálogo: como error de la tabla tapaba el grid
+                    // En un aviso: como error de la tabla tapaba el grid
                     // hasta la siguiente recarga
                     Err(e) => {
-                        self.modal = ModalState::Error {
-                            title: "No se pudo leer el portapapeles".into(),
-                            message: e.to_string(),
-                        };
+                        sh.toasts
+                            .error(format!("No se pudo leer el portapapeles: {e}"));
                     }
                 }
             }
@@ -276,7 +276,12 @@ impl Session {
                 }
             }
             GridAction::CopyRows(fmt) => {
-                self.copy_selected_rows(ctx, fmt.as_ref().unwrap_or(&sh.settings.copy_format));
+                let fmt = fmt.unwrap_or_else(|| sh.settings.copy_format.clone());
+                if let Some(data) = &self.table_view.table_data {
+                    let table = self.schema.selected_table().map(|(_, table)| table);
+                    let rows = &self.table_view.selection.rows;
+                    copy_rows(ctx, sh, data, rows, &fmt, table);
+                }
             }
             GridAction::None => {}
         }
@@ -297,14 +302,6 @@ impl Session {
         });
         if let Some(id) = tv.selection.focus_id {
             ctx.memory_mut(|m| m.request_focus(id));
-        }
-    }
-
-    /// Copia las filas seleccionadas al portapapeles en el formato `fmt`.
-    fn copy_selected_rows(&self, ctx: &egui::Context, fmt: &CopyFormat) {
-        if let Some(data) = &self.table_view.table_data {
-            let table = self.schema.selected_table().map(|(_, table)| table);
-            results_grid::copy_rows(ctx, data, &self.table_view.selection.rows, fmt, table);
         }
     }
 
@@ -366,6 +363,7 @@ impl Session {
                 };
             }
             SidebarAction::CopyTableName(name) => {
+                sh.toasts.info(format!("«{name}» copiado al portapapeles"));
                 ctx.copy_text(name);
             }
             SidebarAction::Refresh => self.schema.clear(),
@@ -424,7 +422,7 @@ impl Session {
         }
     }
 
-    fn handle_sql_action(&mut self, sh: &mut Shared, action: SqlEditorAction) {
+    fn handle_sql_action(&mut self, ctx: &egui::Context, sh: &mut Shared, action: SqlEditorAction) {
         let ActiveTab::Sql(tab_idx) = self.active_tab else {
             return;
         };
@@ -436,6 +434,14 @@ impl Session {
                 self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
             }
             SqlEditorAction::Cancel => self.cancel_editor(tab_idx),
+            SqlEditorAction::CopyRows(fmt) => {
+                let fmt = fmt.unwrap_or_else(|| sh.settings.copy_format.clone());
+                if let Some(tab) = self.sql_tabs.get(tab_idx)
+                    && let Some(Ok(data)) = &tab.result
+                {
+                    copy_rows(ctx, sh, data, &tab.selection.rows, &fmt, None);
+                }
+            }
             // Limpiar no se puede deshacer: se pregunta antes
             SqlEditorAction::Clear => {
                 if let Some(tab) = self.sql_tabs.get(tab_idx) {
@@ -494,7 +500,7 @@ impl Session {
             ModalAction::CreateDatabase { name, charset } => self.create_database(name, charset),
             ModalAction::CreateTable { db, name, columns } => {
                 let sql = modals::build_create_table_sql(&db, &name, &columns);
-                self.create_table(db, sql);
+                self.create_table(db, name, sql);
             }
             ModalAction::DropDatabase(db) => {
                 self.modal = ModalState::None;
@@ -597,6 +603,8 @@ impl Session {
             self.selected_profile_idx = None;
             self.profile_name.clear();
             profiles::save(&sh.profiles);
+            sh.toasts
+                .info(format!("Favorito «{}» eliminado", profile.name));
             removed = Some(idx);
         }
 
@@ -662,6 +670,8 @@ impl Session {
         }
         self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
         profiles::save(&sh.profiles);
+        sh.toasts
+            .success(format!("Favorito «{}» guardado", self.profile_name.trim()));
     }
 
     /// Pasa el puerto del formulario a los parámetros. Si no es un puerto
@@ -710,5 +720,28 @@ impl Session {
             start: Instant::now(),
         };
         self.error_message = None;
+    }
+}
+
+/// Copia al portapapeles las filas `rows` de `data` en el formato `fmt` y lo
+/// confirma con un aviso. `table` es el nombre que llevan los INSERT.
+fn copy_rows(
+    ctx: &egui::Context,
+    sh: &mut Shared,
+    data: &QueryResult,
+    rows: &BTreeSet<usize>,
+    fmt: &CopyFormat,
+    table: Option<&str>,
+) {
+    let copied = results_grid::copy_rows(ctx, data, rows, fmt, table);
+    let format = match fmt {
+        CopyFormat::Csv => "CSV",
+        CopyFormat::Tsv => "TSV",
+        CopyFormat::SqlInserts => "INSERT",
+    };
+    match copied {
+        0 => {}
+        1 => sh.toasts.info(format!("1 fila copiada ({format})")),
+        n => sh.toasts.info(format!("{n} filas copiadas ({format})")),
     }
 }

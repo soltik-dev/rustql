@@ -12,6 +12,8 @@ use crate::ui::log_panel::LogAction;
 use crate::ui::modals::ModalState;
 use crate::ui::{log_panel, settings_panel, statusbar, theme};
 
+const STATUSBAR_HEIGHT: f32 = 26.0;
+
 /// Visibilidad de los paneles globales (comunes a todas las conexiones).
 pub struct UiPanelState {
     pub show_sidebar: bool,
@@ -89,6 +91,7 @@ impl RustqlApp {
                 settings,
                 profiles,
                 table_states: table_state::load(),
+                toasts: Default::default(),
             },
             ui,
             keyring_migration,
@@ -299,7 +302,7 @@ impl eframe::App for RustqlApp {
             let statusbar_frame =
                 egui::Frame::side_top_panel(ui.style()).fill(theme::get(ui).bg_sunken);
             egui::Panel::bottom("statusbar")
-                .exact_size(26.0)
+                .exact_size(STATUSBAR_HEIGHT)
                 .frame(statusbar_frame)
                 .show(ui, |ui| {
                     statusbar::show(
@@ -392,6 +395,9 @@ impl eframe::App for RustqlApp {
                 ConnTabsAction::New => self.new_session(),
             }
         }
+
+        // Avisos: sobre todo lo demás, por encima de la barra de estado
+        self.shared.toasts.show(ctx, STATUSBAR_HEIGHT + 12.0);
     }
 }
 
@@ -409,6 +415,7 @@ mod tests {
                 settings: settings::AppSettings::default(),
                 profiles: Vec::new(),
                 table_states: Default::default(),
+                toasts: Default::default(),
             },
             ui: UiPanelState {
                 show_sidebar: true,
