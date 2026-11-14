@@ -665,6 +665,8 @@ impl Session {
             port: self.params.port,
             user: self.params.user.clone(),
             database: self.params.database.trim().to_string(),
+            tls: self.params.tls,
+            tls_ca: self.params.tls_ca.trim().to_string(),
             // Una contraseña nueva se marca cuando el llavero la confirma
             // (poll_keyring). Con el campo vacío se conserva la que había.
             password_in_keyring: had_keyring && self.save_password,

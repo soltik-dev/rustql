@@ -2,14 +2,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mysql::{
-    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value,
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, SslOpts, Value,
     consts::CapabilityFlags,
     prelude::{Protocol, Queryable},
 };
 
 use super::{
     CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
-    QUERY_CANCELLED, QueryResult, Statement, TableInfo, validate_charset,
+    QUERY_CANCELLED, QueryResult, Statement, TableInfo, TlsMode, tls, validate_charset,
 };
 
 // El dialecto de este backend, para él y para la exportación
@@ -127,31 +127,65 @@ impl MysqlBackend {
         }
         let password = params.resolve_password()?;
         on_status("Estableciendo conexión TCP...");
-        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
-        // max:4 deja que los trabajos en segundo plano (datos, metadatos,
-        // escrituras) no esperen unos a otros; el editor SQL va aparte.
-        let pool_constraints = PoolConstraints::new(0, 4).unwrap();
-        let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
-        let opts: Opts = OptsBuilder::new()
-            .ip_or_hostname(Some(params.host.as_str()))
-            .tcp_port(params.port)
-            .user(Some(params.user.as_str()))
-            .pass(Some(password.as_str()))
-            // BBDD por defecto de la conexión: si no existe o el usuario no
-            // puede entrar, lo dice el servidor al conectar
-            .db_name(params.only_database())
-            // Filas afectadas = filas encontradas por el WHERE, aunque el
-            // UPDATE las deje como estaban: así se distingue «ya tenía ese
-            // valor» de «la fila no existe» (ver execute_transaction).
-            .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS)
-            .pool_opts(pool_opts)
-            .into();
-
-        let pool = Pool::new(opts.clone()).map_err(|e| format!("Error de conexión: {e}"))?;
+        tls::install_provider();
+        let strict = params.tls != TlsMode::Prefer;
+        let build = |with_tls: bool| -> Opts {
+            // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
+            // max:4 deja que los trabajos en segundo plano (datos, metadatos,
+            // escrituras) no esperen unos a otros; el editor SQL va aparte.
+            let pool_constraints = PoolConstraints::new(0, 4).unwrap();
+            let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
+            let any_certificate = params.tls.accepts_any_certificate();
+            let ca_file = params
+                .ca_file()
+                .filter(|_| !any_certificate)
+                .map(std::path::PathBuf::from);
+            let ssl = SslOpts::default()
+                .with_danger_accept_invalid_certs(any_certificate)
+                .with_danger_skip_domain_validation(any_certificate)
+                .with_root_cert_path(ca_file);
+            OptsBuilder::new()
+                .ip_or_hostname(Some(params.host.as_str()))
+                .tcp_port(params.port)
+                .user(Some(params.user.as_str()))
+                .pass(Some(password.as_str()))
+                // BBDD por defecto de la conexión: si no existe o el usuario no
+                // puede entrar, lo dice el servidor al conectar
+                .db_name(params.only_database())
+                // Filas afectadas = filas encontradas por el WHERE, aunque el
+                // UPDATE las deje como estaban: así se distingue «ya tenía ese
+                // valor» de «la fila no existe» (ver execute_transaction).
+                .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS)
+                .ssl_opts(with_tls.then_some(ssl))
+                // En local el crate cambia la conexión TCP por el socket del
+                // servidor, que no va cifrado (ni lo necesita). Si se exige
+                // TLS, la conexión se queda en la que lo lleva
+                .prefer_socket(!strict)
+                .pool_opts(pool_opts)
+                .into()
+        };
+        // Abre el pool y comprueba que se puede entrar
+        let open = |opts: Opts| -> mysql::Result<(Pool, Opts)> {
+            let pool = Pool::new(opts.clone())?;
+            pool.get_conn()?;
+            Ok((pool, opts))
+        };
 
         on_status("Autenticando...");
-        pool.get_conn()
-            .map_err(|e| format!("No se pudo conectar: {e}"))?;
+        let (pool, opts) = match open(build(true)) {
+            // «Cifrar si se puede»: si no se puede (el servidor no ofrece TLS
+            // o solo versiones antiguas), sin cifrar. Un error del servidor
+            // (contraseña, permisos) llega ya con TLS: no es de cifrado
+            Err(e) if !strict && !matches!(e, mysql::Error::MySqlError(_)) => open(build(false)),
+            result => result,
+        }
+        .map_err(|e| {
+            let error = e.to_string();
+            format!(
+                "No se pudo conectar: {error}{}",
+                tls::hint(params.tls, &error)
+            )
+        })?;
 
         on_status("Conexión establecida.");
         Ok(Self {
@@ -532,6 +566,43 @@ mod tests {
         assert!(picker.contains(&"information_schema".to_string()));
         let err = missing.err().expect("no existe");
         assert!(err.contains("rustql_test_no_existe"), "{err}");
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL y RUSTQL_TEST_CA"]
+    fn niveles_de_seguridad_de_la_conexion() {
+        let connect = |tls, ca| {
+            MysqlBackend::connect_with_progress(
+                &test_server::with_tls(test_server::params(), tls, ca),
+                |_| {},
+            )
+        };
+        let cipher = |b: &MysqlBackend| {
+            let status = b.execute_query(None, "SHOW SESSION STATUS LIKE 'Ssl_cipher'");
+            status.unwrap().rows[0][1].clone().unwrap_or_default()
+        };
+
+        // Por defecto: entra, cifre o no (en local el crate pasa al socket)
+        connect(TlsMode::Prefer, false).unwrap();
+        // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
+        let required = connect(TlsMode::Require, false).unwrap();
+        assert_ne!(cipher(&required), "", "la conexión va por TLS");
+        // Verificar sin decir qué autoridad lo firma: no se conoce
+        let unknown = connect(TlsMode::Verify, false)
+            .err()
+            .expect("CA desconocida");
+        assert!(unknown.contains("fichero de CA"), "{unknown}");
+        // Con su CA, el certificado vale (y es de 127.0.0.1)
+        let verified = connect(TlsMode::Verify, true).unwrap();
+        assert_ne!(cipher(&verified), "");
+        // La sesión del editor usa la misma conexión segura
+        let run = verified.execute_in_session(
+            None,
+            "SHOW SESSION STATUS LIKE 'Ssl_cipher'",
+            10,
+            &CancelFlag::default(),
+        );
+        assert_ne!(run.unwrap().rows[0][1], Some(String::new()));
     }
 
     #[test]

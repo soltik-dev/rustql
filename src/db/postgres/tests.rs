@@ -558,7 +558,9 @@ fn errores_de_conexion_legibles() {
         },
         |_| {},
     );
-    assert!(nobody_listening.is_err());
+    // Con su causa, no solo «error connecting to server»
+    let err = nobody_listening.err().expect("nadie escucha");
+    assert!(err.to_lowercase().contains("refused"), "{err}");
 }
 
 #[test]
@@ -616,4 +618,35 @@ fn una_conexion_caida_en_el_pool_no_se_nota() {
         let result = b.execute_query(Some("postgres"), "SELECT 1").unwrap();
         assert_eq!(result.rows, [text(&["1"])]);
     }
+}
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_POSTGRES y RUSTQL_TEST_CA"]
+fn niveles_de_seguridad_de_la_conexion() {
+    use crate::db::test_server::with_tls;
+    let connect =
+        |tls, ca| PostgresBackend::connect_with_progress(&with_tls(pg_params(), tls, ca), |_| {});
+    let encrypted = |b: &PostgresBackend| {
+        let sql = "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()";
+        b.execute_query(None, sql).unwrap().rows == [text(&["t"])]
+    };
+
+    // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
+    assert!(encrypted(&connect(TlsMode::Require, false).unwrap()));
+    // Verificar sin decir qué autoridad lo firma: no se conoce
+    let unknown = connect(TlsMode::Verify, false)
+        .err()
+        .expect("CA desconocida");
+    assert!(unknown.contains("fichero de CA"), "{unknown}");
+    // Con su CA, el certificado vale (y es de 127.0.0.1)
+    let verified = connect(TlsMode::Verify, true).unwrap();
+    assert!(encrypted(&verified));
+    // También las conexiones que se abren después: otra BBDD, el editor y
+    // la que cancela una consulta
+    verified.list_tables("template1").unwrap();
+    let cancel = CancelFlag::default();
+    verified
+        .execute_in_session(None, "SELECT 1", 1, &cancel)
+        .unwrap();
+    verified.cancel_in_session(&cancel).unwrap();
 }

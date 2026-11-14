@@ -2,11 +2,13 @@ pub mod dialect;
 pub mod export;
 pub mod mysql;
 pub mod postgres;
+pub mod tls;
 
 use std::sync::Arc;
 
 pub use dialect::{Engine, ParamList};
 pub use export::{ExportDestination, ExportEvent, ExportOptions};
+pub use tls::TlsMode;
 
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {
@@ -21,6 +23,11 @@ pub struct ConnectionParams {
     /// Base de datos a la que se limita la conexión: el árbol solo enseña
     /// esa. Vacía = todas las del servidor.
     pub database: String,
+    /// Si la conexión va cifrada y si se comprueba el certificado.
+    pub tls: TlsMode,
+    /// Fichero PEM con la autoridad que firma el certificado del servidor,
+    /// para `TlsMode::Verify`. Vacío = solo las autoridades públicas.
+    pub tls_ca: String,
 }
 
 impl ConnectionParams {
@@ -32,6 +39,12 @@ impl ConnectionParams {
 
     /// La contraseña escrita o, si está vacía, la del llavero. Puede bloquear
     /// (el llavero puede pedir desbloqueo): solo desde hilos de trabajo.
+    /// El fichero de CA con el que verificar al servidor, si se indicó.
+    pub fn ca_file(&self) -> Option<&str> {
+        let path = self.tls_ca.trim();
+        (!path.is_empty()).then_some(path)
+    }
+
     /// La base de datos a la que se limita la conexión, si se indicó alguna.
     pub fn only_database(&self) -> Option<&str> {
         let database = self.database.trim();
@@ -63,6 +76,8 @@ impl Default for ConnectionParams {
             password: String::new(),
             keyring_id: None,
             database: String::new(),
+            tls: TlsMode::default(),
+            tls_ca: String::new(),
         }
     }
 }
@@ -262,7 +277,8 @@ pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>>
 
 /// Servidores reales para los tests marcados `#[ignore]`:
 /// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto` y
-/// `RUSTQL_TEST_POSTGRES=…`, con `cargo test -- --ignored`.
+/// `RUSTQL_TEST_POSTGRES=…`, con `cargo test -- --ignored`. Los de TLS
+/// necesitan además `RUSTQL_TEST_CA` (ver `with_tls`).
 /// Crean y borran sus propias BBDD `rustql_test_*`.
 #[cfg(test)]
 pub mod test_server {
@@ -282,6 +298,8 @@ pub mod test_server {
             password: password.into(),
             keyring_id: None,
             database: String::new(),
+            tls: Default::default(),
+            tls_ca: String::new(),
         }
     }
 
@@ -291,6 +309,21 @@ pub mod test_server {
 
     pub fn backend() -> super::mysql::MysqlBackend {
         super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
+    }
+
+    /// Parámetros de `base` con el nivel de seguridad `tls`. Para verificar,
+    /// `RUSTQL_TEST_CA` es el fichero de la autoridad que firma el
+    /// certificado de los servidores de prueba (válido para 127.0.0.1).
+    pub fn with_tls(base: ConnectionParams, tls: super::TlsMode, ca: bool) -> ConnectionParams {
+        ConnectionParams {
+            tls,
+            tls_ca: if ca {
+                std::env::var("RUSTQL_TEST_CA").expect("RUSTQL_TEST_CA=/ruta/ca.crt")
+            } else {
+                String::new()
+            },
+            ..base
+        }
     }
 
     pub fn pg_params() -> ConnectionParams {

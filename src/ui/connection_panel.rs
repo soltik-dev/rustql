@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::db::{ConnectionParams, Engine};
+use crate::db::{ConnectionParams, Engine, TlsMode};
 use crate::loadable::Loadable;
 use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::secrets;
@@ -104,22 +104,29 @@ pub fn show_form(ui: &mut egui::Ui, view: FormView<'_>) -> FormResult {
     let mut result = FormResult::default();
     let p = theme::get(ui);
 
-    ui.add_space(32.0);
-    ui.vertical_centered(|ui| {
-        ui.heading("RustQL");
-        ui.label(egui::RichText::new("Conectar a base de datos").color(p.text_muted));
-    });
-    ui.add_space(20.0);
+    // Con scroll: en una ventana baja, o con el error de conexión a la vista,
+    // el formulario no cabe entero
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.add_space(32.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("RustQL");
+                ui.label(egui::RichText::new("Conectar a base de datos").color(p.text_muted));
+            });
+            ui.add_space(20.0);
 
-    ui.vertical_centered(|ui| {
-        ui.set_max_width(420.0);
-        egui::Frame::NONE
-            .fill(p.bg_raised)
-            .stroke(egui::Stroke::new(1.0, p.border_subtle))
-            .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
-            .inner_margin(egui::Margin::same(20))
-            .show(ui, |ui| show_form_fields(ui, view, &mut result));
-    });
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(420.0);
+                egui::Frame::NONE
+                    .fill(p.bg_raised)
+                    .stroke(egui::Stroke::new(1.0, p.border_subtle))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
+                    .inner_margin(egui::Margin::same(20))
+                    .show(ui, |ui| show_form_fields(ui, view, &mut result));
+            });
+            ui.add_space(16.0);
+        });
 
     result
 }
@@ -206,6 +213,47 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
                 }
             });
             ui.end_row();
+
+            ui.label("Seguridad:");
+            egui::ComboBox::from_id_salt("tls_mode")
+                .selected_text(params.tls.label())
+                .width(field_width)
+                .show_ui(ui, |ui| {
+                    for mode in TlsMode::ALL {
+                        ui.selectable_value(&mut params.tls, mode, mode.label())
+                            .on_hover_text(mode.description());
+                    }
+                })
+                .response
+                .on_hover_text(params.tls.description());
+            ui.end_row();
+
+            // Solo al verificar: la autoridad que firma el certificado
+            if params.tls == TlsMode::Verify {
+                ui.label("Fichero de CA:");
+                ui.allocate_ui_with_layout(row, layout, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.button("…").on_hover_text("Elegir el fichero").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Certificados", &["pem", "crt", "cer"])
+                            .add_filter("Todos", &["*"])
+                            .pick_file()
+                    {
+                        params.tls_ca = path.to_string_lossy().to_string();
+                    }
+                    let edit = egui::TextEdit::singleline(&mut params.tls_ca)
+                        .hint_text("Autoridades públicas")
+                        .desired_width(ui.available_width());
+                    let resp = ui.add(edit).on_hover_text(
+                        "Certificado (PEM) de la autoridad que firma el del servidor.\n\
+                         Vacío, solo se confía en las autoridades públicas.",
+                    );
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        connect = true;
+                    }
+                });
+                ui.end_row();
+            }
             result.connect |= connect;
 
             ui.label("");
@@ -277,17 +325,38 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
     ui.separator();
     ui.add_space(12.0);
 
-    if let Some(err) = error_message {
-        theme::error_card(ui, err);
+    let error = error_message.as_ref().map(|err| {
+        let card = theme::error_card_response(ui, err);
         ui.add_space(8.0);
-    }
-
-    ui.vertical_centered(|ui| {
-        ui.spacing_mut().button_padding = egui::vec2(48.0, 8.0);
-        if theme::primary_button(ui, "Conectar").clicked() {
-            result.connect = true;
-        }
+        card
     });
+
+    let button = ui
+        .vertical_centered(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(48.0, 8.0);
+            let button = theme::primary_button(ui, "Conectar");
+            if button.clicked() {
+                result.connect = true;
+            }
+            button
+        })
+        .inner;
+
+    // Un error nuevo se lleva a la vista (con el botón): puede haber quedado
+    // por debajo de la ventana. Solo al aparecer, para no retener el scroll
+    let seen_id = ui.scope_id().with("connection_error_seen");
+    let seen: Option<String> = ui.data(|d| d.get_temp(seen_id));
+    if seen.as_ref() != error_message.as_ref() {
+        if let Some(card) = &error {
+            ui.scroll_to_rect(card.rect.union(button.rect), None);
+        }
+        ui.data_mut(|d| match error_message {
+            Some(err) => {
+                d.insert_temp(seen_id, err.clone());
+            }
+            None => d.remove::<String>(seen_id),
+        });
+    }
 }
 
 /// Cambia el motor del formulario. El puerto y el usuario, si eran los

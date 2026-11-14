@@ -17,10 +17,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, pin_mut, stream};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio::runtime::Runtime;
+use tokio_postgres::config::SslMode;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::private::BytesMut;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
@@ -30,7 +28,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::dialect::{pg_split_table, pg_table_name};
 use super::{
     CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
-    QUERY_CANCELLED, QueryResult, Statement, TableInfo,
+    QUERY_CANCELLED, QueryResult, Statement, TableInfo, TlsMode, tls,
 };
 
 const SQL: Engine = Engine::Postgres;
@@ -68,17 +66,42 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// El error tal como lo cuenta el servidor, con su detalle y su pista.
+/// El error tal como lo cuenta el servidor, con su detalle y su pista. Si
+/// no es del servidor (red, TLS…), con su causa: el crate solo dice de qué
+/// tipo es («error connecting to server») y deja el porqué en la cadena de
+/// causas.
 fn describe(e: &tokio_postgres::Error) -> String {
-    let Some(db) = e.as_db_error() else {
-        return e.to_string();
-    };
-    let mut text = db.message().to_string();
-    for extra in [db.detail(), db.hint()].into_iter().flatten() {
-        text.push('\n');
-        text.push_str(extra);
+    if let Some(db) = e.as_db_error() {
+        let mut text = db.message().to_string();
+        for extra in [db.detail(), db.hint()].into_iter().flatten() {
+            text.push('\n');
+            text.push_str(extra);
+        }
+        return text;
+    }
+    let mut text = e.to_string();
+    let mut cause = std::error::Error::source(e);
+    while let Some(inner) = cause {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        cause = inner.source();
     }
     text
+}
+
+/// El servidor cerró la conexión (se reinició, un administrador la terminó,
+/// un cortafuegos la cortó): el fallo no es de la consulta.
+fn connection_lost(e: &tokio_postgres::Error) -> bool {
+    e.is_closed()
+        || matches!(
+            e.code(),
+            Some(code) if *code == SqlState::ADMIN_SHUTDOWN || *code == SqlState::CRASH_SHUTDOWN
+        )
+}
+
+/// El fallo es de la negociación de TLS, no del servidor ni de la red.
+fn is_tls_failure(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error().is_none() && e.to_string().contains("TLS handshake")
 }
 
 fn is_cancelled(e: &tokio_postgres::Error) -> bool {
@@ -114,69 +137,6 @@ impl ToSql for TextParam<'_> {
     }
 
     to_sql_checked!();
-}
-
-/// Acepta cualquier certificado del servidor: la conexión va cifrada pero no
-/// se comprueba con quién se habla. Es lo que hace libpq por defecto
-/// (`sslmode=prefer`), y lo que permite entrar en los servidores con
-/// certificado autofirmado, que son la mayoría.
-#[derive(Debug)]
-struct AnyCertificate(Arc<CryptoProvider>);
-
-impl ServerCertVerifier for AnyCertificate {
-    fn verify_server_cert(
-        &self,
-        _: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-fn tls_connector() -> DbResult<MakeRustlsConnect> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| format!("No se pudo preparar TLS: {e}"))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
-        .with_no_client_auth();
-    Ok(MakeRustlsConnect::new(config))
 }
 
 /// Lee el primer conjunto de resultados de una ejecución (el de la primera
@@ -322,7 +282,12 @@ impl PostgresBackend {
             .user(params.user.trim())
             .password(password)
             .application_name("RustQL")
-            .connect_timeout(Duration::from_secs(15));
+            .connect_timeout(Duration::from_secs(15))
+            // Con «cifrar si se puede», sin TLS si el servidor no lo ofrece
+            .ssl_mode(match params.tls {
+                TlsMode::Prefer => SslMode::Prefer,
+                TlsMode::Require | TlsMode::Verify => SslMode::Require,
+            });
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -333,7 +298,7 @@ impl PostgresBackend {
         let mut backend = Self {
             rt,
             config,
-            tls: tls_connector()?,
+            tls: MakeRustlsConnect::new(tls::client_config(params.tls, params.ca_file())?),
             only_database: params.only_database().map(str::to_string),
             home: String::new(),
             pools: Pools::default(),
@@ -353,13 +318,26 @@ impl PostgresBackend {
                 .collect(),
         };
         let mut first_error = None;
-        for db in candidates {
+        let mut candidates = candidates.into_iter();
+        let mut next = candidates.next();
+        while let Some(db) = next {
             match backend.rt.block_on(backend.open(db)) {
                 Ok(client) => {
                     backend.home = db.to_string();
                     lock(&backend.pool(db).idle).push((Instant::now(), client));
                     on_status("Conexión establecida.");
                     return Ok(backend);
+                }
+                // «Cifrar si se puede», y no se puede: el servidor ofrece TLS
+                // pero no se llega a un acuerdo (solo versiones antiguas).
+                // Como libpq, se entra sin cifrar
+                Err(e)
+                    if params.tls == TlsMode::Prefer
+                        && backend.config.get_ssl_mode() != SslMode::Disable
+                        && is_tls_failure(&e) =>
+                {
+                    backend.config.ssl_mode(SslMode::Disable);
+                    continue;
                 }
                 Err(e) => {
                     // Solo merece la pena probar otra BBDD si el fallo es de
@@ -374,18 +352,19 @@ impl PostgresBackend {
                     if !about_database {
                         break;
                     }
+                    next = candidates.next();
                 }
             }
         }
         let error = first_error.map(|e| describe(&e)).unwrap_or_default();
-        Err(if params.only_database().is_some() {
-            format!("No se pudo conectar: {error}")
-        } else {
-            format!(
-                "No se pudo conectar: {error}\n\nSi el servidor solo te deja entrar en tu base \
-                 de datos, indícala en el campo «Base de datos»."
-            )
-        })
+        let hint = match tls::hint(params.tls, &error) {
+            "" if params.only_database().is_none() => {
+                "\n\nSi el servidor solo te deja entrar en tu base de datos, indícala en el \
+                 campo «Base de datos»."
+            }
+            hint => hint,
+        };
+        Err(format!("No se pudo conectar: {error}{hint}"))
     }
 
     /// Abre una conexión nueva a `db`.
@@ -440,10 +419,9 @@ impl PostgresBackend {
     /// Lectura completa en `db`.
     async fn query(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
         let mut result = read_results(&*self.client(db).await?, sql, usize::MAX).await;
-        // La conexión que esperaba en el pool resultó estar caída (el
-        // servidor se reinició, un cortafuegos la cortó): una lectura se
-        // puede repetir sin más en una nueva
-        if result.as_ref().is_err_and(tokio_postgres::Error::is_closed) {
+        // La conexión que esperaba en el pool resultó estar caída: una
+        // lectura se puede repetir sin más en una nueva
+        if result.as_ref().is_err_and(connection_lost) {
             let client = self.client_from(db, true).await?;
             result = read_results(&client, sql, usize::MAX).await;
         }

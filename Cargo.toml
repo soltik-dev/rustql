@@ -6,13 +6,16 @@ edition = "2024"
 [dependencies]
 eframe = "0.37"
 egui_extras = "0.37"
-mysql = "28"
-# PostgreSQL. Con TLS en Rust puro (rustls + ring): sin openssl, para el
+# TLS de los dos motores en Rust puro (rustls + ring): sin openssl, para el
 # build portable con glibc antigua, igual que el llavero.
+mysql = { version = "28", features = ["rustls-tls-ring"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Autoridades públicas para verificar el certificado del servidor (las mismas
+# que usa el crate de MySQL): no dependen de lo instalado en cada sistema.
+webpki-roots = "1"
 # `std` explícito: en Linux lo activa de rebote el llavero, pero en Windows y
 # macOS nadie, y sin él no existen los streams con concurrencia (`buffered`).
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

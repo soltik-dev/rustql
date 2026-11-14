@@ -385,6 +385,11 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
 
 /// Card de error: fondo rojizo translúcido con borde y texto en danger.
 pub fn error_card(ui: &mut egui::Ui, text: &str) {
+    error_card_response(ui, text);
+}
+
+/// Como `error_card`, para quien necesita saber dónde ha quedado.
+pub fn error_card_response(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let p = get(ui);
     egui::Frame::NONE
         .fill(p.danger.gamma_multiply(0.12))
@@ -394,5 +399,6 @@ pub fn error_card(ui: &mut egui::Ui, text: &str) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(egui::RichText::new(text).color(p.danger));
-        });
+        })
+        .response
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::db::{ConnectionParams, Engine};
+use crate::db::{ConnectionParams, Engine, TlsMode};
 
 /// Color identificativo de una conexión: tiñe su pestaña y su árbol del sidebar.
 /// Los presets se resuelven en theme.rs con variante clara/oscura.
@@ -61,6 +61,12 @@ pub struct ConnectionProfile {
     /// Base de datos a la que se limita la conexión; vacía = todas.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub database: String,
+    /// Seguridad de la conexión; por defecto, cifrar si se puede.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tls: TlsMode,
+    /// Fichero de CA para verificar al servidor; vacío = autoridades públicas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tls_ca: String,
     /// La contraseña está en el llavero del sistema, bajo `id`.
     #[serde(default)]
     pub password_in_keyring: bool,
@@ -73,6 +79,10 @@ pub struct ConnectionProfile {
     pub color: Option<ConnColor>,
 }
 
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
 impl ConnectionProfile {
     pub fn to_params(&self) -> ConnectionParams {
         ConnectionParams {
@@ -83,6 +93,8 @@ impl ConnectionProfile {
             password: self.password.clone().unwrap_or_default(),
             keyring_id: self.password_in_keyring.then(|| self.id.clone()),
             database: self.database.clone(),
+            tls: self.tls,
+            tls_ca: self.tls_ca.clone(),
         }
     }
 
@@ -98,6 +110,10 @@ impl ConnectionProfile {
         if !self.database.is_empty() {
             text.push_str(" · ");
             text.push_str(&self.database);
+        }
+        if self.tls != TlsMode::default() {
+            text.push_str(" · ");
+            text.push_str(self.tls.label());
         }
         text
     }
@@ -215,6 +231,8 @@ mod tests {
             port: 3306,
             user: "app".into(),
             database: String::new(),
+            tls: TlsMode::default(),
+            tls_ca: String::new(),
             password_in_keyring: true,
             password: None,
             color: None,
