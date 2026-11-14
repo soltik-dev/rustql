@@ -3,6 +3,8 @@
 //! iguales en todos los motores. El resto del programa compone su SQL con
 //! esto y no asume ninguno.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -19,21 +21,48 @@ pub enum Engine {
 pub const PG_DEFAULT_SCHEMA: &str = "public";
 
 /// Nombre con el que se enseña la tabla `table` del esquema `schema` de
-/// PostgreSQL. Una del esquema por defecto que lleve un punto en el nombre
-/// conserva el prefijo: sin él se leería como `esquema.tabla`.
+/// PostgreSQL: `tabla` o `esquema.tabla`. El esquema acaba en el primer
+/// punto, así que hay dos casos que se escriben de otra forma para que el
+/// nombre se pueda volver a leer:
+/// - una tabla del esquema por defecto con un punto en el nombre conserva
+///   el prefijo (`public.a.b`);
+/// - un esquema con un punto en el nombre va entre comillas (`"a.b".tabla`).
 pub fn pg_table_name(schema: &str, table: &str) -> String {
     if schema == PG_DEFAULT_SCHEMA && !table.contains('.') {
         table.to_string()
+    } else if schema.contains('.') || schema.starts_with('"') {
+        format!("\"{}\".{table}", schema.replace('"', "\"\""))
     } else {
         format!("{schema}.{table}")
     }
 }
 
-/// Esquema y tabla de un nombre dado por `pg_table_name`. El esquema acaba
-/// en el primer punto: los que llevan un punto en su nombre no se pueden
-/// expresar así (y el servidor dirá que la tabla no existe).
-pub fn pg_split_table(name: &str) -> (&str, &str) {
-    name.split_once('.').unwrap_or((PG_DEFAULT_SCHEMA, name))
+/// Esquema y tabla de un nombre dado por `pg_table_name`.
+pub fn pg_split_table(name: &str) -> (Cow<'_, str>, &str) {
+    if let Some(split) = split_quoted_schema(name) {
+        return split;
+    }
+    let (schema, table) = name.split_once('.').unwrap_or((PG_DEFAULT_SCHEMA, name));
+    (Cow::Borrowed(schema), table)
+}
+
+/// `"esquema".tabla`, con las comillas del esquema dobladas. `None` si el
+/// nombre no tiene esa forma (y entonces las comillas son parte del nombre).
+fn split_quoted_schema(name: &str) -> Option<(Cow<'_, str>, &str)> {
+    let rest = name.strip_prefix('"')?;
+    let mut search_from = 0;
+    loop {
+        let quote = search_from + rest[search_from..].find('"')?;
+        match rest[quote + 1..].chars().next()? {
+            // Comilla doblada: sigue siendo el esquema
+            '"' => search_from = quote + 2,
+            '.' => {
+                let schema = rest[..quote].replace("\"\"", "\"");
+                return Some((Cow::Owned(schema), &rest[quote + 2..]));
+            }
+            _ => return None,
+        }
+    }
 }
 
 impl Engine {
@@ -139,7 +168,7 @@ impl Engine {
             Engine::Mysql => self.quote_ident(table),
             Engine::Postgres => {
                 let (schema, table) = pg_split_table(table);
-                format!("{}.{}", self.quote_ident(schema), self.quote_ident(table))
+                format!("{}.{}", self.quote_ident(&schema), self.quote_ident(table))
             }
         }
     }
@@ -302,10 +331,26 @@ mod tests {
             // Sin el prefijo se leería como la tabla «b» del esquema «a»
             ("public", "a.b", "public.a.b"),
             ("ventas", "a.b", "ventas.a.b"),
+            // Un esquema con un punto va entre comillas
+            ("a.b", "t", "\"a.b\".t"),
+            ("a.b", "t.u", "\"a.b\".t.u"),
+            ("a\".b", "t", "\"a\"\".b\".t"),
+            ("\"raro", "t", "\"\"\"raro\".t"),
+            // Unas comillas que no encierran un esquema son parte del nombre
+            ("public", "\"x\"y", "\"x\"y"),
+            ("public", "\"abierta", "\"abierta"),
+            ("public", "\"x\".y", "public.\"x\".y"),
+            ("ven\"tas", "t", "ven\"tas.t"),
         ] {
             assert_eq!(pg_table_name(schema, table), shown);
-            assert_eq!(pg_split_table(shown), (schema, table));
+            let (back_schema, back_table) = pg_split_table(shown);
+            assert_eq!(
+                (back_schema.as_ref(), back_table),
+                (schema, table),
+                "{shown}"
+            );
         }
+        assert_eq!(Postgres.table_ref("\"a.b\".t"), "\"a.b\".\"t\"");
     }
 
     #[test]

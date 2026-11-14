@@ -312,7 +312,12 @@ impl Session {
                 }
 
                 ActiveTab::Servidor => match &self.schema.databases_info {
-                    Loadable::Ready(dbs) => server_info::show(ui, &self.params.host, dbs),
+                    Loadable::Ready(dbs) => {
+                        let tables = &self.schema.tables_cache;
+                        server_info::show(ui, &self.params.host, dbs, |db| {
+                            tables.get(db).and_then(Loadable::ready).map(Vec::len)
+                        });
+                    }
                     other => show_loading(ui, other),
                 },
 

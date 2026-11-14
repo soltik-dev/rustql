@@ -33,6 +33,8 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
          CREATE SCHEMA ventas;
          CREATE TABLE ventas.pedidos (id int PRIMARY KEY);
          CREATE TABLE \"con.punto\" (id int);
+         CREATE SCHEMA \"es.quema\";
+         CREATE TABLE \"es.quema\".t (id int PRIMARY KEY);
          INSERT INTO clientes (nombre) VALUES ('a'), ('b'), ('c');
          ANALYZE clientes;",
     )
@@ -43,10 +45,16 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
     let all = b.list_all_tables();
     let info = b.get_tables_info(db);
     let server = b.get_databases_info();
-    // La tabla del otro esquema se lee con el nombre que le da el árbol
+    // Las tablas de otros esquemas se leen con el nombre que les da el
+    // árbol, también si el esquema lleva un punto
     let other = b.execute_query(
         Some(db),
         &format!("SELECT * FROM {}", SQL.qualified(db, "ventas.pedidos")),
+    );
+    let dotted = b.get_columns_info(db, "\"es.quema\".t");
+    let dotted_rows = b.execute_query(
+        Some(db),
+        &format!("SELECT * FROM {}", SQL.qualified(db, "\"es.quema\".t")),
     );
     b.drop_database(db).unwrap();
 
@@ -59,6 +67,7 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
         "clientes",
         "public.con.punto",
         "v_clientes",
+        "\"es.quema\".t",
         "ventas.pedidos",
     ];
     assert_eq!(tables.unwrap(), expected);
@@ -77,6 +86,8 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
     assert_eq!((info[0].row_count, info[0].engine.as_str()), (3, "heap"));
     assert!(info[0].size_bytes > 0);
     assert_eq!(other.unwrap().columns, ["id"]);
+    assert!(dotted.unwrap()[0].is_primary());
+    assert_eq!(dotted_rows.unwrap().columns, ["id"]);
 
     let server = server.unwrap();
     let this = server.iter().find(|d| d.name == db).expect("en la lista");

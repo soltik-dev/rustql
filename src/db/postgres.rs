@@ -641,7 +641,7 @@ impl DbBackend for PostgresBackend {
              LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE n.nspname = {} AND c.relname = {} AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum",
-            SQL.literal(schema),
+            SQL.literal(&schema),
             SQL.literal(table)
         );
         let result = self.rt.block_on(self.query(Some(db), &sql))?;
