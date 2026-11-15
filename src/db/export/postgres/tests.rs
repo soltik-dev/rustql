@@ -410,3 +410,122 @@ fn una_carpeta_con_un_fichero_por_tabla_y_lo_que_no_se_exporta() {
         "una vista no tiene datos:\n{view}"
     );
 }
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_POSTGRES"]
+fn una_tabla_grande_se_copia_por_bloques_y_se_puede_cancelar() {
+    let (db, copy) = ("rustql_test_chunks_pg", "rustql_test_chunks_pg2");
+    let b = pg_backend();
+    for name in [db, copy] {
+        b.drop_database(name).ok();
+        b.create_database(name, "").unwrap();
+    }
+    b.execute_write(
+        Some(db),
+        "CREATE TABLE grande (id int PRIMARY KEY, v text);
+         INSERT INTO grande SELECT n, repeat('x', 50) || n FROM generate_series(1, 10000) n;
+         CREATE TABLE pequena (id int PRIMARY KEY);
+         INSERT INTO pequena VALUES (1), (2)",
+    )
+    .unwrap();
+    let target = || ExportDestination::SameServerDb {
+        target_db: copy.into(),
+    };
+    let options = |batch_size| ExportOptions {
+        batch_size,
+        drop_if_exists: true,
+        ..Default::default()
+    };
+    let batches = |events: &[ExportEvent]| -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ExportEvent::RowsCopied(rows) => Some(*rows),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Entera: en bloques del tamaño pedido, y llega completa
+    let whole = export(db, &["grande", "pequena"], target(), options(1000));
+    let copied = b.execute_query(
+        Some(copy),
+        "SELECT count(*), sum(id), count(DISTINCT v) FROM grande",
+    );
+
+    // Cancelada al llegar el primer bloque: no sigue hasta el final
+    let cancel = Arc::new(AtomicBool::new(false));
+    let rx = spawn_export(
+        pg_params(),
+        db.into(),
+        vec!["grande".into(), "pequena".into()],
+        target(),
+        options(100),
+        Arc::clone(&cancel),
+    );
+    let mut cancelled = Vec::new();
+    for event in rx.iter() {
+        if matches!(event, ExportEvent::RowsCopied(_)) {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        cancelled.push(event);
+    }
+
+    // Si el destino rechaza un bloque, esa tabla falla (y deja de leerse en
+    // el origen) y las demás siguen
+    b.execute_write(
+        Some(copy),
+        "DROP TABLE IF EXISTS grande, pequena;
+         CREATE TABLE grande (id int PRIMARY KEY CHECK (id < 2500), v text);
+         CREATE TABLE pequena (id int PRIMARY KEY)",
+    )
+    .unwrap();
+    let rejected = export(
+        db,
+        &["grande", "pequena"],
+        target(),
+        ExportOptions {
+            batch_size: 1000,
+            include_create: false,
+            ..Default::default()
+        },
+    );
+    let after_rejected = b.execute_query(Some(copy), "SELECT count(*) FROM pequena");
+    b.drop_database(db).unwrap();
+    b.drop_database(copy).unwrap();
+
+    assert_eq!(finished(&whole), Some((2, 10002)), "{:?}", errors(&whole));
+    let sizes = batches(&whole);
+    assert_eq!(
+        sizes.len(),
+        11,
+        "diez bloques de la grande y uno de la pequeña"
+    );
+    assert!(sizes[..10].iter().all(|rows| *rows == 1000), "{sizes:?}");
+    assert_eq!(
+        copied.unwrap().rows,
+        [text(&["10000", "50005000", "10000"])]
+    );
+
+    assert!(matches!(cancelled.last(), Some(ExportEvent::Cancelled)));
+    assert!(batches(&cancelled).len() < 20, "se detuvo enseguida");
+
+    let errors = errors(&rejected);
+    assert!(
+        matches!(errors.as_slice(), [e] if e.starts_with("grande: INSERT: ")),
+        "{errors:?}"
+    );
+    assert!(matches!(
+        rejected.last(),
+        Some(ExportEvent::Finished {
+            total_tables: 1,
+            total_rows: 2,
+            ..
+        })
+    ));
+    assert_eq!(after_rejected.unwrap().rows, [text(&["2"])]);
+}
+
+fn text(values: &[&str]) -> Vec<Option<String>> {
+    values.iter().map(|v| Some(v.to_string())).collect()
+}

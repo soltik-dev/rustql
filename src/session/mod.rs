@@ -1052,8 +1052,9 @@ impl Session {
                             e.state = TableExportState::Done { rows };
                         }
                         running.done_count += 1;
-                        running.rows_done += rows;
                     }
+                    // Las filas se van contando según llegan sus bloques
+                    Ok(ExportEvent::RowsCopied(rows)) => running.rows_done += rows,
                     Ok(ExportEvent::TableError { table, error }) => {
                         log_entries.push(LogEntry::err(
                             format!("Exportar «{table}»"),

@@ -12,12 +12,12 @@
 use std::collections::HashMap;
 
 use super::{
-    ExportDestination, ExportOptions, Job, SAME_TARGET_ERROR, Sink, Source, TableData, TableScript,
-    Totals, export_into, export_to_file, export_to_folder,
+    ExportDestination, ExportOptions, Job, RowBatch, SAME_TARGET_ERROR, Sink, Source, TableData,
+    TableScript, Totals, export_into, export_to_file, export_to_folder,
 };
 use crate::db::dialect::{PG_DEFAULT_SCHEMA, pg_split_table};
 use crate::db::postgres::{Dedicated, PostgresBackend};
-use crate::db::{ConnectionParams, DbBackend, DbResult, Engine, QueryResult};
+use crate::db::{ConnectionParams, DbBackend, DbResult, Engine};
 
 const SQL: Engine = Engine::Postgres;
 
@@ -465,8 +465,19 @@ impl Source for PgSource<'_> {
         }
     }
 
-    fn rows(&self, select: &str) -> DbResult<QueryResult> {
-        self.session.query(select)
+    fn read_rows(&self, select: &str, batch: usize, each: &mut RowBatch<'_>) -> DbResult<()> {
+        self.session
+            .read_batches(select, batch, &mut |columns, rows| {
+                let literals = rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|cell| cell.map_or("NULL".into(), |value| SQL.literal(&value)))
+                            .collect()
+                    })
+                    .collect();
+                each(columns, literals)
+            })
     }
 }
 

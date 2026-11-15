@@ -62,6 +62,27 @@ fn value_to_string(v: Value) -> Option<String> {
     }
 }
 
+/// Un valor leído del servidor, escrito como literal SQL. Lo que no es
+/// texto válido (el contenido de un BLOB) va en hexadecimal: como cadena se
+/// estropearía.
+pub(super) fn sql_literal(v: Value) -> String {
+    match v {
+        Value::NULL => "NULL".into(),
+        Value::Bytes(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => literal(&text),
+            Err(not_text) => {
+                let hex: String = not_text
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect();
+                format!("0x{hex}")
+            }
+        },
+        other => value_to_string(other).map_or("NULL".into(), |text| literal(&text)),
+    }
+}
+
 /// Lee el primer conjunto de resultados: sus columnas —que vienen aunque no
 /// haya ninguna fila— y, como mucho, `max_rows` filas. Al soltar `set`, el
 /// crate lee y descarta lo que quede.

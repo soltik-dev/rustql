@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use super::{ConnectionParams, DbResult, Engine, QueryResult};
+use super::{ConnectionParams, DbResult, Engine};
 
 // ── Tipos públicos ─────────────────────────────────────────────────────────────
 
@@ -70,6 +70,9 @@ pub enum ExportEvent {
         elapsed_ms: u64,
     },
     Cancelled,
+    /// Filas copiadas desde el aviso anterior: las tablas se copian por
+    /// bloques, y una grande tarda.
+    RowsCopied(u64),
     /// Error fatal que aborta toda la exportación (conexión, fichero, etc.).
     Failed(String),
 }
@@ -195,8 +198,15 @@ trait Source {
     /// en su propio `TableScript::create`.
     fn drop_together(&self, tables: &[String]) -> DbResult<Vec<String>>;
     fn script(&self, table: &str, options: &ExportOptions) -> DbResult<TableScript>;
-    fn rows(&self, select: &str) -> DbResult<QueryResult>;
+    /// Lee las filas de `select` sin traerlas todas a memoria: las entrega
+    /// a `each` en bloques de hasta `batch`, con los nombres de las columnas
+    /// y cada valor ya escrito como literal SQL. Si `each` falla, deja de
+    /// leer y devuelve su error.
+    fn read_rows(&self, select: &str, batch: usize, each: &mut RowBatch<'_>) -> DbResult<()>;
 }
+
+/// Lo que recibe cada bloque de filas: columnas y valores como literales.
+type RowBatch<'a> = dyn FnMut(&[String], Vec<Vec<String>>) -> DbResult<()> + 'a;
 
 /// Destino de las sentencias: un fichero o una conexión.
 trait Sink {
@@ -257,14 +267,15 @@ fn section(sink: &mut dyn Sink, title: &str) -> DbResult<()> {
     sink.comment("")
 }
 
-/// Crea la tabla en `sink` y copia sus datos. Devuelve las filas copiadas y
-/// lo que queda por ejecutar cuando estén todas las tablas.
+/// Crea la tabla en `sink` y copia sus datos, bloque a bloque. Devuelve las
+/// filas copiadas y lo que queda por ejecutar cuando estén todas las tablas.
 fn export_table(
     source: &dyn Source,
     sink: &mut dyn Sink,
     table: &str,
-    options: &ExportOptions,
+    job: &Job,
 ) -> DbResult<(u64, Vec<String>)> {
+    let options = job.options;
     let script = source.script(table, options)?;
     // Sin nada que escribir ahora (una vista, que va al final), sin cabecera
     if !script.create.is_empty() || script.data.is_some() || !script.after_data.is_empty() {
@@ -274,35 +285,33 @@ fn export_table(
 
     let mut total_rows = 0;
     if let Some(data) = script.data.filter(|_| options.include_data) {
-        let rows = source
-            .rows(&data.select)
-            .map_err(|e| format!("SELECT: {e}"))?;
         let engine = source.engine();
-        let columns: Vec<String> = rows.columns.iter().map(|c| engine.quote_ident(c)).collect();
-        let header = format!(
-            "{} ({}) {}",
-            data.insert_into,
-            columns.join(", "),
-            data.values_keyword
-        );
-        for batch in rows.rows.chunks(options.batch_size.max(1)) {
-            let values: Vec<String> = batch
+        let mut header = None;
+        let mut write_batch = |columns: &[String], rows: Vec<Vec<String>>| {
+            // Una tabla grande son muchos bloques: se puede cancelar entre ellos
+            if job.cancelled() {
+                return Err("Exportación cancelada.".to_string());
+            }
+            let header = header.get_or_insert_with(|| {
+                let columns: Vec<String> = columns.iter().map(|c| engine.quote_ident(c)).collect();
+                format!(
+                    "{} ({}) {}",
+                    data.insert_into,
+                    columns.join(", "),
+                    data.values_keyword
+                )
+            });
+            let values: Vec<String> = rows
                 .iter()
-                .map(|row| {
-                    let cells: Vec<String> = row
-                        .iter()
-                        .map(|cell| match cell {
-                            None => "NULL".to_string(),
-                            Some(value) => engine.literal(value),
-                        })
-                        .collect();
-                    format!("({})", cells.join(", "))
-                })
+                .map(|row| format!("({})", row.join(", ")))
                 .collect();
             sink.run(&format!("{header}\n{}", values.join(",\n")))
                 .map_err(|e| format!("INSERT: {e}"))?;
-        }
-        total_rows = rows.rows.len() as u64;
+            total_rows += rows.len() as u64;
+            job.send(ExportEvent::RowsCopied(rows.len() as u64));
+            Ok(())
+        };
+        source.read_rows(&data.select, options.batch_size.max(1), &mut write_batch)?;
     }
     sink.run_all(&script.after_data)?;
     Ok((total_rows, script.finish))
@@ -335,7 +344,7 @@ fn export_into(source: &dyn Source, sink: &mut dyn Sink, job: &Job) -> DbResult<
         }
         job.send(ExportEvent::TableStarted(table.clone()));
         let table = table.clone();
-        match export_table(source, sink, &table, job.options) {
+        match export_table(source, sink, &table, job) {
             Ok((rows, finish)) if finish.is_empty() => {
                 done += 1;
                 total_rows += rows;
@@ -380,7 +389,7 @@ fn export_to_folder(source: &dyn Source, folder: &str, job: &Job) -> DbResult<To
         if job.options.drop_if_exists {
             sink.run_all(&source.drop_together(&[table.to_string()])?)?;
         }
-        let (rows, finish) = export_table(source, &mut sink, table, job.options)?;
+        let (rows, finish) = export_table(source, &mut sink, table, job)?;
         sink.run_all(&finish)?;
         sink.finish()?;
         Ok(rows)

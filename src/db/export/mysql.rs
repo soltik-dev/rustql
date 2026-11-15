@@ -7,11 +7,11 @@ use mysql::PooledConn;
 use mysql::prelude::Queryable;
 
 use super::{
-    ExportDestination, ExportOptions, Job, SAME_TARGET_ERROR, Sink, Source, TableData, TableScript,
-    Totals, export_into, export_to_file, export_to_folder,
+    ExportDestination, ExportEvent, ExportOptions, Job, RowBatch, SAME_TARGET_ERROR, Sink, Source,
+    TableData, TableScript, Totals, export_into, export_to_file, export_to_folder,
 };
-use crate::db::mysql::{MysqlBackend, literal, qualified, quote_ident};
-use crate::db::{ConnectionParams, DbBackend, DbResult, Engine, QueryResult};
+use crate::db::mysql::{MysqlBackend, literal, qualified, quote_ident, sql_literal};
+use crate::db::{ConnectionParams, DbBackend, DbResult, Engine};
 
 pub(super) fn run(
     params: &ConnectionParams,
@@ -140,8 +140,35 @@ impl Source for MysqlSource<'_> {
         Ok(script)
     }
 
-    fn rows(&self, select: &str) -> DbResult<QueryResult> {
-        self.backend.execute_query(None, select)
+    fn read_rows(&self, select: &str, batch: usize, each: &mut RowBatch<'_>) -> DbResult<()> {
+        // En su propia conexión, ocupada mientras dure la lectura: el crate
+        // va leyendo las filas del servidor según se le piden
+        let mut conn = self.backend.conn()?;
+        let mut set = conn
+            .query_iter(select)
+            .map_err(|e| format!("SELECT: {e}"))?;
+        let columns: Vec<String> = set
+            .columns()
+            .as_ref()
+            .iter()
+            .map(|c| c.name_str().into_owned())
+            .collect();
+        let mut rows = Vec::with_capacity(batch);
+        for row in set.by_ref() {
+            let mut row = row.map_err(|e| format!("SELECT: {e}"))?;
+            rows.push(
+                (0..row.len())
+                    .map(|i| sql_literal(row.take(i).unwrap_or(mysql::Value::NULL)))
+                    .collect(),
+            );
+            if rows.len() == batch {
+                each(&columns, std::mem::take(&mut rows))?;
+            }
+        }
+        if !rows.is_empty() {
+            each(&columns, rows)?;
+        }
+        Ok(())
     }
 }
 
@@ -231,6 +258,7 @@ fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbRes
         }
         conn.query_drop(format!("INSERT INTO {dst} SELECT * FROM {src}"))
             .map_err(|e| format!("INSERT INTO ... SELECT: {e}"))?;
+        job.send(ExportEvent::RowsCopied(conn.affected_rows()));
         Ok(conn.affected_rows())
     }))
 }
@@ -252,7 +280,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use super::super::{ExportEvent, spawn_export};
+    use super::super::spawn_export;
     use super::*;
     use crate::db::test_server;
 
@@ -516,5 +544,89 @@ mod tests {
         );
         assert_eq!(within_kind.unwrap().rows, [text(&["VIEW"])]);
         assert_eq!(next.unwrap(), [text(&["3"])]);
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn una_tabla_grande_por_bloques_y_los_binarios_intactos() {
+        let (db, copy) = ("rustql_test_chunks", "rustql_test_chunks2");
+        let b = test_server::backend();
+        // 4096 filas; el binario no es texto válido en ninguna
+        let rows: Vec<String> = (1..=4096)
+            .map(|n| format!("({n}, 'fila {n}', UNHEX(CONCAT('00FF80', HEX({n}))))"))
+            .collect();
+        let insert = format!(
+            "INSERT INTO rustql_test_chunks.grande VALUES {}",
+            rows.join(", ")
+        );
+        for sql in [
+            "DROP DATABASE IF EXISTS rustql_test_chunks",
+            "DROP DATABASE IF EXISTS rustql_test_chunks2",
+            "CREATE DATABASE rustql_test_chunks",
+            "CREATE TABLE rustql_test_chunks.grande (id INT PRIMARY KEY, v TEXT, bin BLOB)",
+            insert.as_str(),
+            "INSERT INTO rustql_test_chunks.grande VALUES \
+             (5000, 'it''s \\\\ \\n', ''), (5001, NULL, NULL)",
+        ] {
+            b.execute_write(None, sql).unwrap();
+        }
+        // A otro servidor: las filas pasan por aquí, bloque a bloque
+        let rx = spawn_export(
+            test_server::params(),
+            db.into(),
+            vec!["grande".into()],
+            ExportDestination::RemoteServer {
+                params: test_server::params(),
+                target_db: copy.into(),
+            },
+            ExportOptions {
+                batch_size: 500,
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let events: Vec<ExportEvent> = rx.iter().collect();
+        let fingerprint = |db: &str| {
+            let sql = format!(
+                "SELECT COUNT(*), SUM(CRC32(CONCAT_WS('|', id, IFNULL(v, 'NULL'), \
+                 IFNULL(HEX(bin), 'NULL')))) FROM {db}.grande"
+            );
+            b.execute_query(None, &sql).map(|r| r.rows)
+        };
+        let (original, copied) = (fingerprint(db), fingerprint(copy));
+        b.execute_write(None, "DROP DATABASE rustql_test_chunks")
+            .unwrap();
+        b.execute_write(None, "DROP DATABASE rustql_test_chunks2")
+            .unwrap();
+
+        let batches: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                ExportEvent::RowsCopied(rows) => Some(*rows),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(batches, [500, 500, 500, 500, 500, 500, 500, 500, 98]);
+        assert!(
+            matches!(
+                events.last(),
+                Some(ExportEvent::Finished {
+                    total_rows: 4098,
+                    ..
+                })
+            ),
+            "{:?}",
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    ExportEvent::Failed(e) | ExportEvent::TableError { error: e, .. } =>
+                        Some(e.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+        let original = original.unwrap();
+        assert_eq!(original[0][0], Some("4098".to_string()));
+        assert_eq!(copied.unwrap(), original);
     }
 }

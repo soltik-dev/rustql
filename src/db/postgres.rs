@@ -245,6 +245,10 @@ impl Drop for Pooled {
     }
 }
 
+/// Lo que recibe cada bloque de un resultado leído por partes: los nombres
+/// de las columnas y las filas, en texto.
+pub(super) type TextBatch<'a> = dyn FnMut(&[String], Vec<Vec<Option<String>>>) -> DbResult<()> + 'a;
+
 /// Conexión propia a una BBDD, fuera del pool: lo que se ajuste en ella
 /// (`search_path`…) no llega a las demás. La usa la exportación.
 pub(super) struct Dedicated<'a> {
@@ -263,6 +267,58 @@ impl Dedicated<'_> {
 
     pub(super) fn execute(&self, sql: &str) -> DbResult<()> {
         self.query(sql).map(drop)
+    }
+
+    /// Lee el resultado de `sql` sin traerlo entero a memoria: entrega a
+    /// `each` las columnas y las filas en bloques de hasta `batch`. Si
+    /// `each` falla, la consulta se cancela en el servidor.
+    pub(super) fn read_batches(
+        &self,
+        sql: &str,
+        batch: usize,
+        each: &mut TextBatch<'_>,
+    ) -> DbResult<()> {
+        let rt = &self.backend.rt;
+        let stream = rt
+            .block_on(self.client.simple_query_raw(sql))
+            .map_err(|e| describe(&e))?;
+        let mut stream = Box::pin(stream.fuse());
+        let mut columns: Vec<String> = Vec::new();
+        loop {
+            // `each` se llama fuera del runtime: puede usarlo él también
+            // (el destino de una copia es otra conexión de este backend)
+            let rows = rt.block_on(async {
+                let mut rows = Vec::with_capacity(batch);
+                while rows.len() < batch {
+                    match stream.next().await {
+                        Some(Ok(SimpleQueryMessage::RowDescription(description))) => {
+                            columns = description.iter().map(|c| c.name().to_string()).collect();
+                        }
+                        Some(Ok(SimpleQueryMessage::Row(row))) => rows.push(
+                            (0..row.len())
+                                .map(|i| row.get(i).map(str::to_string))
+                                .collect(),
+                        ),
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => return Err(describe(&e)),
+                        None => break,
+                    }
+                }
+                Ok(rows)
+            })?;
+            if rows.is_empty() {
+                return Ok(());
+            }
+            if let Err(error) = each(&columns, rows) {
+                // Que el servidor no siga enviando una tabla que ya no se
+                // quiere; se lee hasta el final para que la cancelación la
+                // reciba esta consulta y no la siguiente
+                let cancel = self.client.cancel_token();
+                let _ = rt.block_on(cancel.cancel_query(self.backend.tls.clone()));
+                rt.block_on(async { while stream.next().await.is_some() {} });
+                return Err(error);
+            }
+        }
     }
 }
 
