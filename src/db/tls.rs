@@ -50,8 +50,8 @@ impl TlsMode {
             }
             TlsMode::Verify => {
                 "No conecta sin TLS, y comprueba que el certificado es de ese\n\
-                 servidor y lo firma una autoridad pública o la del fichero\n\
-                 de CA que indiques."
+                 servidor y lo firma una autoridad en la que confía el sistema\n\
+                 o la del fichero de CA que indiques."
             }
         }
     }
@@ -59,6 +59,54 @@ impl TlsMode {
     /// Si el certificado del servidor se da por bueno sin mirarlo.
     pub fn accepts_any_certificate(self) -> bool {
         self != TlsMode::Verify
+    }
+}
+
+/// Cómo viaja de verdad una conexión abierta, para enseñarlo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Security {
+    /// Cifrada con TLS.
+    Encrypted,
+    /// Sin cifrar, pero no sale de este equipo (socket o dirección local).
+    Local,
+    /// Sin cifrar y por la red.
+    Plain,
+}
+
+impl Security {
+    /// `encrypted`: lo que dice el servidor de la conexión. `host`: a dónde
+    /// se conectó.
+    pub fn of(encrypted: bool, host: &str) -> Self {
+        let host = host.trim();
+        let local = host.starts_with('/')
+            || host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        match (encrypted, local) {
+            (true, _) => Security::Encrypted,
+            (false, true) => Security::Local,
+            (false, false) => Security::Plain,
+        }
+    }
+
+    /// Explicación para quien pasa el ratón por el candado.
+    pub fn description(self, mode: TlsMode) -> &'static str {
+        match (self, mode) {
+            (Security::Encrypted, TlsMode::Verify) => {
+                "Conexión cifrada (TLS), con el certificado del servidor verificado."
+            }
+            (Security::Encrypted, _) => {
+                "Conexión cifrada (TLS). El certificado del servidor no se verifica:\n\
+                 para hacerlo, elige «Verificar el servidor» en la conexión."
+            }
+            (Security::Local, _) => "Conexión sin cifrar, pero no sale de este equipo.",
+            (Security::Plain, _) => {
+                "Conexión SIN cifrar: lo que se envía y se recibe, contraseña incluida,\n\
+                 puede leerse en la red. El servidor no ofrece TLS."
+            }
+        }
     }
 }
 
@@ -143,8 +191,83 @@ impl ServerCertVerifier for AnyCertificate {
     }
 }
 
+/// Autoridades en las que se confía al verificar, además de las públicas:
+/// las instaladas en el sistema y, si se indica, las del fichero PEM
+/// `ca_file`. Solo las que rustls sabe leer (un almacén del sistema puede
+/// traer alguna que no).
+pub fn trusted_authorities(ca_file: Option<&str>) -> DbResult<Vec<CertificateDer<'static>>> {
+    // Si el sistema no tiene almacén o no se puede leer, quedan las públicas
+    let mut authorities = rustls_native_certs::load_native_certs().certs;
+    if let Some(path) = ca_file {
+        let unreadable =
+            |e: &dyn std::fmt::Display| format!("No se pudo leer el fichero de CA «{path}»: {e}");
+        let before = authorities.len();
+        for cert in CertificateDer::pem_file_iter(path).map_err(|e| unreadable(&e))? {
+            let cert = cert.map_err(|e| unreadable(&e))?;
+            rustls::RootCertStore::empty()
+                .add(cert.clone())
+                .map_err(|e| unreadable(&e))?;
+            authorities.push(cert);
+        }
+        if authorities.len() == before {
+            return Err(unreadable(&"no contiene ningún certificado en formato PEM"));
+        }
+    }
+    authorities.retain(|cert| rustls::RootCertStore::empty().add(cert.clone()).is_ok());
+    Ok(authorities)
+}
+
+/// Las autoridades de `trusted_authorities` en un fichero PEM temporal, para
+/// los drivers que solo admiten un fichero. Se borra al soltarlo.
+pub struct AuthorityBundle(std::path::PathBuf);
+
+impl AuthorityBundle {
+    /// `None` si no hay ninguna autoridad que añadir a las públicas.
+    pub fn create(ca_file: Option<&str>) -> DbResult<Option<Self>> {
+        use base64::Engine as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let authorities = trusted_authorities(ca_file)?;
+        if authorities.is_empty() {
+            return Ok(None);
+        }
+        let mut pem = String::new();
+        for cert in &authorities {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(cert);
+            pem.push_str("-----BEGIN CERTIFICATE-----\n");
+            for line in encoded.as_bytes().chunks(64) {
+                pem.push_str(&String::from_utf8_lossy(line));
+                pem.push('\n');
+            }
+            pem.push_str("-----END CERTIFICATE-----\n");
+        }
+        // Un fichero por conexión: cada una puede llevar su propia CA
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "rustql-ca-{}-{}.pem",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, pem)
+            .map_err(|e| format!("No se pudo preparar la verificación del certificado: {e}"))?;
+        Ok(Some(Self(path)))
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for AuthorityBundle {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Configuración de rustls para `mode`. Al verificar se confía en las
-/// autoridades públicas y, si se indica, en las del fichero PEM `ca_file`.
+/// autoridades públicas, en las del sistema y, si se indica, en las del
+/// fichero PEM `ca_file`.
 pub fn client_config(mode: TlsMode, ca_file: Option<&str>) -> DbResult<rustls::ClientConfig> {
     let provider = provider();
     let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
@@ -158,21 +281,7 @@ pub fn client_config(mode: TlsMode, ca_file: Option<&str>) -> DbResult<rustls::C
     }
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(path) = ca_file {
-        let unreadable =
-            |e: &dyn std::fmt::Display| format!("No se pudo leer el fichero de CA «{path}»: {e}");
-        let certs = CertificateDer::pem_file_iter(path).map_err(|e| unreadable(&e))?;
-        let mut added = 0;
-        for cert in certs {
-            roots
-                .add(cert.map_err(|e| unreadable(&e))?)
-                .map_err(|e| unreadable(&e))?;
-            added += 1;
-        }
-        if added == 0 {
-            return Err(unreadable(&"no contiene ningún certificado en formato PEM"));
-        }
-    }
+    roots.add_parsable_certificates(trusted_authorities(ca_file)?);
     Ok(builder.with_root_certificates(roots).with_no_client_auth())
 }
 
@@ -195,6 +304,39 @@ mod tests {
         // Sin verificar, el fichero ni se mira
         client_config(TlsMode::Require, Some("/no/existe/ca.pem")).unwrap();
         client_config(TlsMode::Verify, None).unwrap();
+    }
+
+    #[test]
+    fn las_autoridades_del_sistema_van_en_un_fichero_que_se_borra() {
+        // Haya o no almacén en el sistema, no es un error
+        let Some(bundle) = AuthorityBundle::create(None).unwrap() else {
+            return;
+        };
+        let path = bundle.path().to_path_buf();
+        // Lo que se escribe se vuelve a leer como certificados
+        let read = CertificateDer::pem_file_iter(&path).unwrap().count();
+        assert_eq!(read, trusted_authorities(None).unwrap().len());
+        assert!(read > 0);
+        drop(bundle);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn sin_cifrar_solo_preocupa_si_sale_del_equipo() {
+        assert_eq!(Security::of(true, "db.example.com"), Security::Encrypted);
+        assert_eq!(Security::of(true, "127.0.0.1"), Security::Encrypted);
+        for local in [
+            "127.0.0.1",
+            " localhost ",
+            "::1",
+            "[::1]",
+            "/var/run/postgresql",
+        ] {
+            assert_eq!(Security::of(false, local), Security::Local, "{local}");
+        }
+        for remote in ["db.example.com", "192.168.1.20", "10.0.0.5"] {
+            assert_eq!(Security::of(false, remote), Security::Plain, "{remote}");
+        }
     }
 
     #[test]

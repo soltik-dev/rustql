@@ -1,5 +1,8 @@
 use eframe::egui;
 
+use crate::db::Security;
+use crate::session::ConnectionStatus;
+use crate::ui::icons::{LOCK, UNLOCK};
 use crate::ui::theme;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -10,8 +13,7 @@ pub fn show(
     show_sidebar: &mut bool,
     show_log: &mut bool,
     show_settings: &mut bool,
-    host: Option<&str>,    // Some("host:port") si hay conexión, None si no
-    db_name: Option<&str>, // BD activa si la hay
+    status: &ConnectionStatus,
 ) {
     let p = theme::get(ui);
     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -26,14 +28,24 @@ pub fn show(
             ui.label(egui::RichText::new(format!("v{APP_VERSION}")).color(p.text_disabled));
             ui.separator();
             // Estado de conexión (texto primero: en RTL queda a la derecha del punto)
-            match host {
+            match &status.host {
                 Some(h) => {
-                    let label = if let Some(db) = db_name {
+                    let label = if let Some(db) = &status.database {
                         format!("{h}  /  {db}")
                     } else {
-                        h.to_owned()
+                        h.clone()
                     };
                     ui.label(egui::RichText::new(label).color(p.text_muted));
+                    // Candado: cerrado si la conexión va cifrada
+                    if let Some((security, mode)) = status.security {
+                        let (icon, color) = match security {
+                            Security::Encrypted => (LOCK, p.success),
+                            Security::Local => (UNLOCK, p.text_disabled),
+                            Security::Plain => (UNLOCK, p.warning),
+                        };
+                        ui.label(egui::RichText::new(icon).color(color))
+                            .on_hover_text(security.description(mode));
+                    }
                     status_dot(ui, p.success);
                 }
                 None => {

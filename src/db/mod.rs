@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 pub use dialect::{Engine, ParamList};
 pub use export::{ExportDestination, ExportEvent, ExportOptions};
-pub use tls::TlsMode;
+pub use tls::{Security, TlsMode};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {
@@ -172,6 +172,9 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
 /// ella, en la BBDD con la que se abrió la conexión.
 pub trait DbBackend: Send + Sync {
     fn engine(&self) -> Engine;
+
+    /// Si la conexión va cifrada, según el servidor al conectar.
+    fn security(&self) -> Security;
 
     // ── Lectura (no modifican el estado del backend) ───────────────────────────
 

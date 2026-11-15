@@ -15,7 +15,7 @@ use self::jobs::{JobResult, Jobs};
 pub use self::schema::SchemaCache;
 use crate::db::{
     CancelFlag, ConnectEvent, ConnectionParams, DbBackend, DbResult, Engine, ExportDestination,
-    ExportEvent, ExportOptions, ParamList, QueryResult, Statement,
+    ExportEvent, ExportOptions, ParamList, QueryResult, Security, Statement, TlsMode,
 };
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
@@ -125,6 +125,15 @@ impl FrameKeys {
             }
         })
     }
+}
+
+/// Lo que la barra de estado enseña de la conexión de una sesión.
+pub struct ConnectionStatus {
+    /// «host:puerto», o que se está conectando; `None` sin conexión.
+    pub host: Option<String>,
+    pub database: Option<String>,
+    /// Cómo viaja la conexión y qué nivel de seguridad se pidió.
+    pub security: Option<(Security, TlsMode)>,
 }
 
 /// Lista de BBDD del servidor del formulario de conexión, para elegir una.
@@ -246,14 +255,22 @@ impl Session {
         matches!(self.state, ConnState::Connected(_))
     }
 
-    /// Host y BBDD activa para la barra de estado.
-    pub fn status(&self) -> (Option<String>, Option<String>) {
-        let host = match &self.state {
-            ConnState::Connected(_) => Some(format!("{}:{}", self.params.host, self.params.port)),
-            ConnState::Connecting { host, .. } => Some(format!("Conectando a {}…", host)),
-            ConnState::Disconnected => None,
+    /// Servidor, BBDD activa y seguridad de la conexión, para la barra de
+    /// estado.
+    pub fn status(&self) -> ConnectionStatus {
+        let (host, security) = match &self.state {
+            ConnState::Connected(backend) => (
+                Some(format!("{}:{}", self.params.host, self.params.port)),
+                Some((backend.security(), self.params.tls)),
+            ),
+            ConnState::Connecting { host, .. } => (Some(format!("Conectando a {}…", host)), None),
+            ConnState::Disconnected => (None, None),
         };
-        (host, self.selected_db().map(str::to_string))
+        ConnectionStatus {
+            host,
+            database: self.selected_db().map(str::to_string),
+            security,
+        }
     }
 
     /// Antes de cerrar la pestaña: cancela la exportación en marcha, si la hay.

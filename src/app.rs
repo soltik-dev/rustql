@@ -298,7 +298,7 @@ impl eframe::App for RustqlApp {
         // Borde inferior del marco de color: encima del log, o de la barra
         // de estado si el log está oculto.
         let mut frame_bottom = {
-            let (sb_host, sb_db) = self.sessions[self.active].status();
+            let status = self.sessions[self.active].status();
             let statusbar_frame =
                 egui::Frame::side_top_panel(ui.style()).fill(theme::get(ui).bg_sunken);
             egui::Panel::bottom("statusbar")
@@ -310,8 +310,7 @@ impl eframe::App for RustqlApp {
                         &mut self.ui.show_sidebar,
                         &mut self.ui.show_log,
                         &mut self.ui.show_settings,
-                        sb_host.as_deref(),
-                        sb_db.as_deref(),
+                        &status,
                     );
                 })
                 .response

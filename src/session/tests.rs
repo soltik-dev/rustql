@@ -15,6 +15,9 @@ impl DbBackend for FakeBackend {
     fn engine(&self) -> Engine {
         Engine::Mysql
     }
+    fn security(&self) -> crate::db::Security {
+        crate::db::Security::Local
+    }
     fn list_databases(&self) -> DbResult<Vec<String>> {
         Ok(Vec::new())
     }

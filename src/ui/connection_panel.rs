@@ -242,11 +242,11 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
                         params.tls_ca = path.to_string_lossy().to_string();
                     }
                     let edit = egui::TextEdit::singleline(&mut params.tls_ca)
-                        .hint_text("Autoridades públicas")
+                        .hint_text("Las del sistema")
                         .desired_width(ui.available_width());
                     let resp = ui.add(edit).on_hover_text(
                         "Certificado (PEM) de la autoridad que firma el del servidor.\n\
-                         Vacío, solo se confía en las autoridades públicas.",
+                         Vacío, se confía en las autoridades instaladas en el sistema.",
                     );
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         connect = true;

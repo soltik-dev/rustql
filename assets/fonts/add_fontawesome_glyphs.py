@@ -23,6 +23,9 @@ GLYPHS = {
     0xF084: "key",  # KEY
     0xF017: "clock",  # CLOCK
     0xF0E2: "undo",  # UNDO
+    0xF023: "lock",  # LOCK
+    0xF09C: "unlock",  # UNLOCK
+    0xF06E: "eye",  # VIEW
 }
 
 FONT = Path(__file__).with_name("rustql.ttf")

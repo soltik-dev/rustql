@@ -17,3 +17,5 @@ pub const SEARCH: &str = "\u{F002}"; // filtrar / buscar
 pub const KEY: &str = "\u{F084}"; // clave primaria
 pub const CLOCK: &str = "\u{F017}"; // fecha/hora actual
 pub const UNDO: &str = "\u{F0E2}"; // deshacer
+pub const LOCK: &str = "\u{F023}"; // conexión cifrada
+pub const UNLOCK: &str = "\u{F09C}"; // conexión sin cifrar

@@ -9,7 +9,7 @@ use mysql::{
 
 use super::{
     CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
-    QUERY_CANCELLED, QueryResult, Statement, TableInfo, TlsMode, tls, validate_charset,
+    QUERY_CANCELLED, QueryResult, Security, Statement, TableInfo, TlsMode, tls, validate_charset,
 };
 
 // El dialecto de este backend, para él y para la exportación
@@ -101,6 +101,9 @@ fn col(row: &[Option<String>], i: usize) -> String {
 pub struct MysqlBackend {
     pool: Pool,
     opts: Opts,
+    security: Security,
+    /// Fichero con las autoridades con las que se verifica al servidor.
+    _authorities: Option<tls::AuthorityBundle>,
     /// La conexión se limita a esta BBDD: es la única que se lista.
     only_database: Option<String>,
     /// Conexión propia del editor SQL, fuera del pool: el pool resetea cada
@@ -129,6 +132,13 @@ impl MysqlBackend {
         on_status("Estableciendo conexión TCP...");
         tls::install_provider();
         let strict = params.tls != TlsMode::Prefer;
+        // Al verificar: las autoridades del sistema y la del fichero de CA,
+        // juntas en un fichero (el crate solo admite uno, y ya confía en las
+        // públicas). Vive lo que la conexión: se lee en cada conexión nueva
+        let authorities = match params.tls {
+            TlsMode::Verify => tls::AuthorityBundle::create(params.ca_file())?,
+            _ => None,
+        };
         let build = |with_tls: bool| -> Opts {
             // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
             // max:4 deja que los trabajos en segundo plano (datos, metadatos,
@@ -136,10 +146,7 @@ impl MysqlBackend {
             let pool_constraints = PoolConstraints::new(0, 4).unwrap();
             let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
             let any_certificate = params.tls.accepts_any_certificate();
-            let ca_file = params
-                .ca_file()
-                .filter(|_| !any_certificate)
-                .map(std::path::PathBuf::from);
+            let ca_file = authorities.as_ref().map(|a| a.path().to_path_buf());
             let ssl = SslOpts::default()
                 .with_danger_accept_invalid_certs(any_certificate)
                 .with_danger_skip_domain_validation(any_certificate)
@@ -187,10 +194,20 @@ impl MysqlBackend {
             )
         })?;
 
+        // Lo que dice el servidor de la conexión que se acaba de abrir (en
+        // local el crate puede haberla cambiado por el socket, sin TLS)
+        let cipher: Option<(String, String)> = pool
+            .get_conn()
+            .and_then(|mut conn| conn.query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'"))
+            .unwrap_or_default();
+        let encrypted = cipher.is_some_and(|(_, cipher)| !cipher.is_empty());
+
         on_status("Conexión establecida.");
         Ok(Self {
             pool,
             opts,
+            security: Security::of(encrypted, &params.host),
+            _authorities: authorities,
             only_database: params.only_database().map(str::to_string),
             session: Arc::default(),
             session_running: Mutex::default(),
@@ -220,6 +237,10 @@ impl MysqlBackend {
 impl DbBackend for MysqlBackend {
     fn engine(&self) -> Engine {
         Engine::Mysql
+    }
+
+    fn security(&self) -> Security {
+        self.security
     }
 
     fn list_databases(&self) -> DbResult<Vec<String>> {
@@ -582,11 +603,14 @@ mod tests {
             status.unwrap().rows[0][1].clone().unwrap_or_default()
         };
 
-        // Por defecto: entra, cifre o no (en local el crate pasa al socket)
-        connect(TlsMode::Prefer, false).unwrap();
+        // Por defecto: entra, cifre o no (en local el crate pasa al socket,
+        // que no va cifrado pero tampoco sale del equipo)
+        let preferred = connect(TlsMode::Prefer, false).unwrap();
+        assert_ne!(preferred.security(), Security::Plain);
         // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
         let required = connect(TlsMode::Require, false).unwrap();
         assert_ne!(cipher(&required), "", "la conexión va por TLS");
+        assert_eq!(required.security(), Security::Encrypted);
         // Verificar sin decir qué autoridad lo firma: no se conoce
         let unknown = connect(TlsMode::Verify, false)
             .err()

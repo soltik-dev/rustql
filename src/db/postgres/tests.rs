@@ -643,7 +643,9 @@ fn niveles_de_seguridad_de_la_conexion() {
     };
 
     // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
-    assert!(encrypted(&connect(TlsMode::Require, false).unwrap()));
+    let required = connect(TlsMode::Require, false).unwrap();
+    assert!(encrypted(&required));
+    assert_eq!(required.security(), Security::Encrypted);
     // Verificar sin decir qué autoridad lo firma: no se conoce
     let unknown = connect(TlsMode::Verify, false)
         .err()

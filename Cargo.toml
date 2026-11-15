@@ -13,9 +13,13 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-# Autoridades públicas para verificar el certificado del servidor (las mismas
-# que usa el crate de MySQL): no dependen de lo instalado en cada sistema.
+# Autoridades para verificar el certificado del servidor: las instaladas en
+# el sistema (donde estará la de una empresa) y, por si el sistema no trae
+# ninguna, las públicas de Mozilla (las mismas que usa el crate de MySQL).
+rustls-native-certs = "0.8"
 webpki-roots = "1"
+# Para pasarle al crate de MySQL las del sistema, que solo admite un fichero PEM
+base64 = "0.22"
 # `std` explícito: en Linux lo activa de rebote el llavero, pero en Windows y
 # macOS nadie, y sin él no existen los streams con concurrencia (`buffered`).
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

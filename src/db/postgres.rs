@@ -28,7 +28,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::dialect::{pg_split_table, pg_table_name};
 use super::{
     CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
-    QUERY_CANCELLED, QueryResult, Statement, TableInfo, TlsMode, tls,
+    QUERY_CANCELLED, QueryResult, Security, Statement, TableInfo, TlsMode, tls,
 };
 
 const SQL: Engine = Engine::Postgres;
@@ -280,6 +280,8 @@ pub struct PostgresBackend {
     /// BBDD desde la que se pregunta por el servidor (la lista de BBDD,
     /// crearlas, borrarlas) y en la que se ejecuta lo que no nombra ninguna.
     home: String,
+    /// Si la conexión va cifrada, según el servidor al conectar.
+    security: Security,
     pools: Pools,
     sessions: Mutex<HashMap<String, EditorSession>>,
     /// Ejecuciones del editor que están ahora mismo en el servidor, con lo
@@ -322,6 +324,7 @@ impl PostgresBackend {
             tls: MakeRustlsConnect::new(tls::client_config(params.tls, params.ca_file())?),
             only_database: params.only_database().map(str::to_string),
             home: String::new(),
+            security: Security::Plain,
             pools: Pools::default(),
             sessions: Mutex::default(),
             running: Mutex::default(),
@@ -344,6 +347,15 @@ impl PostgresBackend {
         while let Some(db) = next {
             match backend.rt.block_on(backend.open(db)) {
                 Ok(client) => {
+                    let encrypted = backend
+                        .rt
+                        .block_on(read_results(
+                            &client,
+                            "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                            1,
+                        ))
+                        .is_ok_and(|(result, _)| result.rows == [[Some("t".to_string())]]);
+                    backend.security = Security::of(encrypted, &params.host);
                     backend.home = db.to_string();
                     lock(&backend.pool(db).idle).push((Instant::now(), client));
                     on_status("Conexión establecida.");
@@ -524,6 +536,10 @@ fn flag(row: &[Option<String>], i: usize) -> bool {
 impl DbBackend for PostgresBackend {
     fn engine(&self) -> Engine {
         SQL
+    }
+
+    fn security(&self) -> Security {
+        self.security
     }
 
     fn list_databases(&self) -> DbResult<Vec<String>> {
