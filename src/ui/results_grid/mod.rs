@@ -24,9 +24,9 @@ pub use self::state::{
     CellRef, EditingCell, GridAction, GridSelection, InsertValue, PendingEdit, PendingInsert,
     RowRef, SortDir, SortSpec, TableViewState,
 };
-use crate::db::{ColumnInfo, Engine, QueryResult};
+use crate::db::{ColumnInfo, Engine, QueryResult, TableKind};
 use crate::settings::CopyFormat;
-use crate::ui::icons::PLUS;
+use crate::ui::icons::{PLUS, VIEW};
 use crate::ui::{CMD, theme};
 
 // ── Lo que el grid dibuja ────────────────────────────────────────────────────
@@ -217,6 +217,7 @@ pub fn show(
     view: &mut TableViewState,
     column_info: &[ColumnInfo],
     engine: Engine,
+    kind: TableKind,
     busy: bool,
 ) -> GridAction {
     let Some((db, table)) = selected_table else {
@@ -258,6 +259,7 @@ pub fn show(
         busy,
         pager,
         keyed,
+        kind,
     };
     let bar_action = info_bar(ui, &bar);
     ui.separator();
@@ -275,7 +277,8 @@ pub fn show(
         pending_edits: &view.pending_edits,
         pending_deletes: &view.pending_deletes,
         pending_inserts: &view.pending_inserts,
-        editable: !busy,
+        // Una vista se ve, se ordena y se filtra, pero no se edita aquí
+        editable: !busy && !kind.is_view(),
         keyed,
         queryable: true,
         engine,
@@ -394,6 +397,7 @@ struct InfoBar<'a> {
     busy: bool,
     pager: Pager,
     keyed: bool,
+    kind: TableKind,
 }
 
 /// Nombre de la tabla, número de filas, botón de fila nueva y la ordenación
@@ -456,6 +460,16 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             ui.separator();
             ui.spinner();
             ui.label("Cargando…");
+        } else if bar.kind.is_view() {
+            // Sin datos propios: ni filas nuevas ni el aviso de la clave
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!("{VIEW} Vista · solo lectura")).color(p.text_muted),
+            )
+            .on_hover_text(
+                "Los datos de una vista son los de sus tablas: se editan en ellas.\n\
+                     Su definición se abre desde el menú de la vista en el árbol.",
+            );
         } else if !data.columns.is_empty()
             && ui
                 .small_button(format!("{PLUS} Fila"))
@@ -465,7 +479,7 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             // A la vista aunque no haya filas sobre las que abrir el menú
             action = GridAction::InsertRow;
         }
-        if !bar.keyed {
+        if !bar.keyed && !bar.kind.is_view() {
             // Antes de que alguien edite para descubrirlo al guardar
             ui.separator();
             ui.label(egui::RichText::new("⚠ Sin clave primaria").color(p.warning))

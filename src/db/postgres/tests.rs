@@ -2,7 +2,7 @@
 //! cargo test -- --ignored`. Cada test crea y borra su BBDD `rustql_test_*`.
 
 use super::*;
-use crate::db::test_server::{pg_backend, pg_params};
+use crate::db::test_server::{names, pg_backend, pg_params};
 
 /// Backend con la BBDD `db` recién creada y vacía.
 fn fresh(db: &str) -> PostgresBackend {
@@ -70,8 +70,25 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
         "\"es.quema\".t",
         "ventas.pedidos",
     ];
-    assert_eq!(tables.unwrap(), expected);
-    let all = all.unwrap();
+    let tables = tables.unwrap();
+    // La vista se distingue de las tablas
+    let kinds: Vec<TableKind> = tables.iter().map(|t| t.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            TableKind::Table,
+            TableKind::Table,
+            TableKind::View,
+            TableKind::Table,
+            TableKind::Table
+        ]
+    );
+    assert_eq!(names(tables), expected);
+    let all: Vec<(String, String)> = all
+        .unwrap()
+        .into_iter()
+        .map(|(db, table)| (db, table.name))
+        .collect();
     for table in expected {
         assert!(
             all.contains(&(db.to_string(), table.to_string())),
@@ -351,7 +368,7 @@ fn sentencias_del_dialecto_que_cambian_de_un_motor_a_otro() {
     // Vaciar y borrar
     b.truncate_table(db, "copia").unwrap();
     let truncated = rows(&b, db, "SELECT count(*) FROM copia");
-    b.drop_table(db, "copia").unwrap();
+    b.drop_table(db, "copia", TableKind::Table).unwrap();
     let tables = b.list_tables(db);
     b.drop_database(db).unwrap();
 
@@ -363,7 +380,7 @@ fn sentencias_del_dialecto_que_cambian_de_un_motor_a_otro() {
     assert_eq!(by_number, [text(&["2"])]);
     assert_eq!(by_text, [text(&["1"])]);
     assert_eq!(truncated, [text(&["0"])]);
-    assert_eq!(tables.unwrap(), ["origen"]);
+    assert_eq!(names(tables.unwrap()), ["origen"]);
 }
 
 #[test]
@@ -538,7 +555,7 @@ fn la_conexion_limitada_a_una_bbdd_solo_ensena_esa() {
     all.drop_database(db).unwrap();
 
     assert_eq!(databases.unwrap(), [db]);
-    assert_eq!(tables.unwrap(), [(db.to_string(), "t".to_string())]);
+    assert_eq!(tables.unwrap(), [(db.to_string(), "t".into())]);
     let info = info.unwrap();
     assert_eq!(info.len(), 1);
     assert_eq!((info[0].name.as_str(), info[0].table_count), (db, Some(1)));
@@ -662,4 +679,56 @@ fn niveles_de_seguridad_de_la_conexion() {
         .execute_in_session(None, "SELECT 1", 1, &cancel)
         .unwrap();
     verified.cancel_in_session(&cancel).unwrap();
+}
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_POSTGRES"]
+fn vistas_y_vistas_materializadas() {
+    let db = "rustql_test_views_backend";
+    let b = fresh(db);
+    b.execute_write(
+        Some(db),
+        "CREATE TABLE t (id int PRIMARY KEY, v text);
+         INSERT INTO t VALUES (1, 'a'), (2, 'b');
+         CREATE SCHEMA informes;
+         CREATE VIEW informes.pares AS SELECT id, v FROM t WHERE id % 2 = 0;
+         CREATE MATERIALIZED VIEW guardada AS SELECT count(*) AS n FROM t",
+    )
+    .unwrap();
+    let tables = b.list_tables(db).unwrap();
+    let view = b.view_definition(db, "informes.pares");
+    let materialized = b.view_definition(db, "guardada");
+    let not_a_view = b.view_definition(db, "t");
+    // Lo que devuelve se puede ejecutar tal cual para cambiar la vista
+    let replaced = view
+        .clone()
+        .and_then(|sql| b.execute_write(Some(db), &sql.replace("= 0", "= 1")));
+    let after = b.execute_query(Some(db), "SELECT id FROM informes.pares");
+    // Cada una se elimina con su sentencia
+    let as_table = b.drop_table(db, "guardada", TableKind::Table);
+    b.drop_table(db, "guardada", TableKind::MaterializedView)
+        .unwrap();
+    b.drop_table(db, "informes.pares", TableKind::View).unwrap();
+    let left = b.list_tables(db);
+    b.drop_database(db).unwrap();
+
+    let kind = |name: &str| tables.iter().find(|t| t.name == name).map(|t| t.kind);
+    assert_eq!(kind("t"), Some(TableKind::Table));
+    assert_eq!(kind("informes.pares"), Some(TableKind::View));
+    assert_eq!(kind("guardada"), Some(TableKind::MaterializedView));
+    let view = view.unwrap();
+    assert!(
+        view.starts_with("CREATE OR REPLACE VIEW \"informes\".\"pares\" AS\n"),
+        "{view}"
+    );
+    let materialized = materialized.unwrap();
+    assert!(
+        materialized.contains("\nCREATE MATERIALIZED VIEW \"public\".\"guardada\" AS\n"),
+        "{materialized}"
+    );
+    assert!(not_a_view.is_err());
+    replaced.unwrap();
+    assert_eq!(after.unwrap().rows, [text(&["1"])]);
+    assert!(as_table.is_err(), "DROP TABLE no elimina una vista");
+    assert_eq!(names(left.unwrap()), ["t"]);
 }

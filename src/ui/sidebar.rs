@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 
+use crate::db::TableKind;
 use crate::loadable::Loadable;
 use crate::table_state::table_key;
 use crate::ui::icons::*;
@@ -68,6 +69,11 @@ pub enum SidebarAction {
         db: String,
         table: String,
     },
+    /// Abrir la definición de una vista en el editor SQL.
+    ViewDefinition {
+        db: String,
+        table: String,
+    },
 }
 
 /// Lo que el sidebar pide a la sesión: la acción del usuario y los datos
@@ -94,6 +100,8 @@ pub struct SidebarView<'a> {
     pub databases: &'a Loadable<Vec<String>>,
     /// Tablas de cada BBDD, según se van pidiendo.
     pub tables: &'a HashMap<String, Loadable<Vec<String>>>,
+    /// De cada BBDD, las que son vistas.
+    pub kinds: &'a HashMap<String, HashMap<String, TableKind>>,
     pub selected_db: Option<&'a str>,
     pub selected_table: Option<&'a str>,
     /// Claves «bd/tabla» de las tablas favoritas.
@@ -399,6 +407,12 @@ impl Tree<'_> {
         let view = self.view;
         let is_selected = view.selected_db == Some(db) && view.selected_table == Some(table);
         let is_fav = self.is_fav(db, table);
+        let kind = view
+            .kinds
+            .get(db)
+            .and_then(|kinds| kinds.get(table))
+            .copied()
+            .unwrap_or_default();
         // Las acciones se llevan sus nombres
         let names = || (db.to_string(), table.to_string());
 
@@ -458,12 +472,26 @@ impl Tree<'_> {
         } else {
             ui.visuals().text_color()
         };
+        // Una vista lleva su icono delante del nombre
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let mut job = egui::text::LayoutJob::default();
+        if kind.is_view() {
+            let icon_color = if is_selected {
+                text_color
+            } else {
+                p.text_muted
+            };
+            job.append(
+                VIEW,
+                0.0,
+                egui::TextFormat::simple(font.clone(), icon_color),
+            );
+            job.append(table, 5.0, egui::TextFormat::simple(font, text_color));
+        } else {
+            job.append(table, 0.0, egui::TextFormat::simple(font, text_color));
+        }
         // Recortado al ancho del panel, no a un número fijo de caracteres
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            table.to_string(),
-            egui::TextStyle::Body.resolve(ui.style()),
-            text_color,
-        );
+        job.break_on_newline = false;
         job.wrap = egui::text::TextWrapping::truncate_at_width(label_rect.width() - 4.0);
         let galley = ui.painter().layout_job(job);
         let name_cut = galley.elided;
@@ -517,6 +545,22 @@ impl Tree<'_> {
             item(ui, format!("{COPY} Copiar nombre"), |_, table| {
                 SidebarAction::CopyTableName(table)
             });
+            // Una vista no tiene datos propios: ni se clona ni se vacía, y
+            // lo suyo es su definición
+            if kind.is_view() {
+                item(ui, format!("{VIEW} Ver definición"), |db, table| {
+                    SidebarAction::ViewDefinition { db, table }
+                });
+                item(ui, format!("{EXPORT} Exportar vista"), |db, table| {
+                    SidebarAction::ExportTable { db, table }
+                });
+                ui.separator();
+                if danger_item(ui, format!("{TRASH} Eliminar vista")) {
+                    let (db, table) = names();
+                    out.action = SidebarAction::DropTable { db, table };
+                }
+                return;
+            }
             item(ui, format!("{CLONE} Clonar tabla"), |db, table| {
                 SidebarAction::CloneTable { db, table }
             });
@@ -552,6 +596,7 @@ mod tests {
         ctx: egui::Context,
         databases: Loadable<Vec<String>>,
         tables: HashMap<String, Loadable<Vec<String>>>,
+        kinds: HashMap<String, HashMap<String, TableKind>>,
         favorites: HashSet<String>,
         search: String,
         only_fav: bool,
@@ -565,6 +610,7 @@ mod tests {
                 ctx: egui::Context::default(),
                 databases: Loadable::Ready(vec!["tienda".into(), "otra".into()]),
                 tables: [("tienda".to_string(), Loadable::Ready(tables))].into(),
+                kinds: HashMap::new(),
                 favorites: HashSet::new(),
                 search: String::new(),
                 only_fav: false,
@@ -587,6 +633,7 @@ mod tests {
                         let view = SidebarView {
                             databases: &self.databases,
                             tables: &self.tables,
+                            kinds: &self.kinds,
                             selected_db: None,
                             selected_table: None,
                             favorites: &self.favorites,
@@ -657,6 +704,7 @@ mod tests {
             let view = SidebarView {
                 databases: &f.databases,
                 tables: &f.tables,
+                kinds: &f.kinds,
                 selected_db: None,
                 selected_table: None,
                 favorites: &f.favorites,

@@ -13,6 +13,8 @@ struct Fixture {
     column_info: Vec<ColumnInfo>,
     /// Cargando o guardando: el grid no deja editar.
     busy: bool,
+    /// Lo que se muestra: una tabla o una vista.
+    kind: TableKind,
     /// Alto de la ventana.
     height: f32,
 }
@@ -59,6 +61,7 @@ impl Fixture {
             view,
             column_info,
             busy: false,
+            kind: TableKind::Table,
             height: 300.0,
         }
     }
@@ -85,6 +88,7 @@ impl Fixture {
                         &mut self.view,
                         &self.column_info,
                         Engine::Mysql,
+                        self.kind,
                         self.busy,
                     );
                 });
@@ -407,6 +411,20 @@ fn ctrl_ins_inserta_sin_cursor_y_en_una_tabla_sin_filas() {
     f.focus();
     let action = f.press_with(egui::Modifiers::COMMAND, egui::Key::Insert);
     assert!(matches!(action, GridAction::InsertRow), "{action:?}");
+}
+
+#[test]
+fn una_vista_ni_se_edita_ni_admite_filas_nuevas() {
+    let mut f = Fixture::new(2);
+    f.kind = TableKind::View;
+    f.focus();
+    let action = f.press_with(egui::Modifiers::COMMAND, egui::Key::Insert);
+    assert!(matches!(action, GridAction::None), "{action:?}");
+    f.put_cursor(RowRef::Existing(0), 1);
+    f.press(egui::Key::Enter);
+    assert!(f.view.editing_cell.is_none());
+    f.type_text("x");
+    assert!(f.view.editing_cell.is_none());
 }
 
 #[test]

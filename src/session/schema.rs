@@ -7,7 +7,7 @@ use eframe::egui;
 
 use super::jobs::JobResult;
 use super::{SelectedNode, Session};
-use crate::db::{ColumnInfo, DatabaseInfo, DbBackend, DbResult, TableInfo};
+use crate::db::{ColumnInfo, DatabaseInfo, DbBackend, DbResult, TableEntry, TableInfo, TableKind};
 use crate::loadable::Loadable;
 use crate::ui::tab_bar::ActiveTab;
 use crate::ui::theme;
@@ -21,12 +21,12 @@ pub enum SchemaResult {
     Tables {
         ticket: u64,
         db: String,
-        result: DbResult<Vec<String>>,
+        result: DbResult<Vec<TableEntry>>,
     },
     /// Pares (BBDD, tabla) de todo el servidor.
     AllTables {
         ticket: u64,
-        result: DbResult<Vec<(String, String)>>,
+        result: DbResult<Vec<(String, TableEntry)>>,
     },
     DatabasesInfo {
         ticket: u64,
@@ -50,6 +50,9 @@ pub enum SchemaResult {
 pub struct SchemaCache {
     pub databases: Loadable<Vec<String>>,
     pub tables_cache: HashMap<String, Loadable<Vec<String>>>,
+    /// De cada BBDD, las que no son tablas (vistas) y qué son. Se rellena
+    /// con `tables_cache`.
+    pub kinds: HashMap<String, HashMap<String, TableKind>>,
     pub table_search: String,
     pub selected_node: Option<SelectedNode>,
     pub databases_info: Loadable<Vec<DatabaseInfo>>,
@@ -69,6 +72,27 @@ impl SchemaCache {
         self.columns_info
             .get(&(db.to_string(), table.to_string()))
             .and_then(Loadable::ready)
+    }
+
+    /// Si `db.table` es una tabla o una vista. Lo que no se conoce (su BBDD
+    /// aún no se ha leído) se trata como tabla.
+    pub fn kind(&self, db: &str, table: &str) -> TableKind {
+        self.kinds
+            .get(db)
+            .and_then(|kinds| kinds.get(table))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Guarda las tablas de `db` recién leídas y devuelve sus nombres.
+    fn store_kinds(&mut self, db: &str, entries: Vec<TableEntry>) -> Vec<String> {
+        let views = entries
+            .iter()
+            .filter(|entry| entry.kind.is_view())
+            .map(|entry| (entry.name.clone(), entry.kind))
+            .collect();
+        self.kinds.insert(db.to_string(), views);
+        entries.into_iter().map(|entry| entry.name).collect()
     }
 
     /// BBDD seleccionada (directamente o a través de una de sus tablas).
@@ -91,6 +115,7 @@ impl SchemaCache {
     pub fn clear(&mut self) {
         self.databases = Loadable::NotLoaded;
         self.tables_cache.clear();
+        self.kinds.clear();
         self.databases_info = Loadable::NotLoaded;
         self.tables_info.clear();
         self.columns_info.clear();
@@ -294,23 +319,39 @@ impl Session {
         match result {
             SchemaResult::Databases { ticket, result } => schema.databases.settle(ticket, result),
             SchemaResult::Tables { ticket, db, result } => {
-                if let Some(slot) = schema.tables_cache.get_mut(&db) {
-                    slot.settle(ticket, result);
+                // Solo si la respuesta sigue siendo la que se espera
+                let current = matches!(
+                    schema.tables_cache.get(&db),
+                    Some(Loadable::Loading(t)) if *t == ticket
+                );
+                if current {
+                    let names = result.map(|entries| schema.store_kinds(&db, entries));
+                    if let Some(slot) = schema.tables_cache.get_mut(&db) {
+                        slot.settle(ticket, names);
+                    }
                 }
                 self.fill_export_tables(&db);
             }
             SchemaResult::AllTables { ticket, result } => {
-                let mut by_db: HashMap<String, Vec<String>> = HashMap::new();
+                let mut by_db: HashMap<String, Vec<TableEntry>> = HashMap::new();
                 let result = result.map(|pairs| {
                     for (db, table) in pairs {
                         by_db.entry(db).or_default().push(table);
                     }
                 });
-                for (db, slot) in &mut schema.tables_cache {
-                    let tables = result
+                let waiting: Vec<String> = schema
+                    .tables_cache
+                    .iter()
+                    .filter(|(_, slot)| matches!(slot, Loadable::Loading(t) if *t == ticket))
+                    .map(|(db, _)| db.clone())
+                    .collect();
+                for db in waiting {
+                    let names = result
                         .clone()
-                        .map(|()| by_db.remove(db).unwrap_or_default());
-                    slot.settle(ticket, tables);
+                        .map(|()| schema.store_kinds(&db, by_db.remove(&db).unwrap_or_default()));
+                    if let Some(slot) = schema.tables_cache.get_mut(&db) {
+                        slot.settle(ticket, names);
+                    }
                 }
             }
             SchemaResult::DatabasesInfo { ticket, result } => {

@@ -28,7 +28,8 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::dialect::{pg_split_table, pg_table_name};
 use super::{
     CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
-    QUERY_CANCELLED, QueryResult, Security, Statement, TableInfo, TlsMode, tls,
+    QUERY_CANCELLED, QueryResult, Security, Statement, TableEntry, TableInfo, TableKind, TlsMode,
+    tls,
 };
 
 const SQL: Engine = Engine::Postgres;
@@ -465,9 +466,9 @@ impl PostgresBackend {
 
     /// Tablas de `db` con el nombre que llevan en el árbol: las del esquema
     /// por defecto primero y sin prefijo.
-    async fn tables(&self, db: &str) -> DbResult<Vec<String>> {
+    async fn tables(&self, db: &str) -> DbResult<Vec<TableEntry>> {
         let sql = format!(
-            "SELECT n.nspname, c.relname \
+            "SELECT n.nspname, c.relname, c.relkind \
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE {USER_RELATIONS} \
              ORDER BY n.nspname <> 'public', n.nspname, c.relname"
@@ -476,7 +477,14 @@ impl PostgresBackend {
         Ok(result
             .rows
             .iter()
-            .map(|row| pg_table_name(&col(row, 0), &col(row, 1)))
+            .map(|row| TableEntry {
+                name: pg_table_name(&col(row, 0), &col(row, 1)),
+                kind: match col(row, 2).as_str() {
+                    "v" => TableKind::View,
+                    "m" => TableKind::MaterializedView,
+                    _ => TableKind::Table,
+                },
+            })
             .collect())
     }
 
@@ -549,11 +557,39 @@ impl DbBackend for PostgresBackend {
         }
     }
 
-    fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
+    fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>> {
         self.rt.block_on(self.tables(database))
     }
 
-    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
+    fn view_definition(&self, db: &str, view: &str) -> DbResult<String> {
+        let (schema, name) = pg_split_table(view);
+        let sql = format!(
+            "SELECT c.relkind, pg_get_viewdef(c.oid, true) \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {} AND c.relname = {} AND c.relkind IN ('v', 'm')",
+            SQL.literal(&schema),
+            SQL.literal(name)
+        );
+        let result = self.rt.block_on(self.query(Some(db), &sql))?;
+        let row = result
+            .rows
+            .first()
+            .ok_or_else(|| format!("No se encuentra la definición de la vista «{view}»."))?;
+        let definition = col(row, 1);
+        let definition = definition.trim().trim_end_matches(';');
+        let reference = SQL.qualified(db, view);
+        Ok(if col(row, 0) == "m" {
+            format!(
+                "-- Una vista materializada no se puede reemplazar: para cambiarla hay\n\
+                 -- que eliminarla y volver a crearla.\n\
+                 CREATE MATERIALIZED VIEW {reference} AS\n{definition}"
+            )
+        } else {
+            format!("CREATE OR REPLACE VIEW {reference} AS\n{definition}")
+        })
+    }
+
+    fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>> {
         // No hay consulta que vea las tablas de otra BBDD: se pregunta en
         // cada una. Las que no dejen entrar se quedan sin tablas.
         let databases = self.list_databases()?;
@@ -777,8 +813,8 @@ impl DbBackend for PostgresBackend {
         })
     }
 
-    fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!("DROP TABLE {}", SQL.qualified(db, table));
+    fn drop_table(&self, db: &str, table: &str, kind: TableKind) -> DbResult<()> {
+        let sql = SQL.drop_table(db, table, kind);
         self.execute_write(Some(db), &sql).map(drop)
     }
 

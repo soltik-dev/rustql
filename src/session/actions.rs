@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use eframe::egui;
 
+use super::jobs::JobResult;
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
@@ -313,7 +314,7 @@ impl Session {
     }
 
     /// Devuelve true si el usuario pidió desconectar.
-    fn handle_sidebar_action(
+    pub(super) fn handle_sidebar_action(
         &mut self,
         ctx: &egui::Context,
         sh: &mut Shared,
@@ -359,16 +360,19 @@ impl Session {
                 };
             }
             SidebarAction::DropTable { db, table } => {
+                let kind = self.schema.kind(&db, &table);
                 self.modal = ModalState::ConfirmDrop {
-                    target: DbObject::Table { db, table },
+                    target: DbObject::Table { db, table, kind },
                     typed: String::new(),
                 };
             }
             SidebarAction::TruncateTable { db, table } => {
+                let kind = self.schema.kind(&db, &table);
                 self.modal = ModalState::ConfirmTruncate {
-                    target: DbObject::Table { db, table },
+                    target: DbObject::Table { db, table, kind },
                 };
             }
+            SidebarAction::ViewDefinition { db, table } => self.open_view_definition(db, table),
             SidebarAction::CopyTableName(name) => {
                 sh.toasts.info(format!("«{name}» copiado al portapapeles"));
                 ctx.copy_text(name);
@@ -715,6 +719,16 @@ impl Session {
                 false
             }
         }
+    }
+
+    /// Lee la definición de una vista y la abre en una pestaña SQL, lista
+    /// para verla o cambiarla.
+    fn open_view_definition(&mut self, db: String, view: String) {
+        self.spawn_job(move |b| JobResult::ViewDefinition {
+            result: b.view_definition(&db, &view),
+            db,
+            view,
+        });
     }
 
     /// Lee en segundo plano las BBDD del servidor del formulario, con sus

@@ -121,6 +121,60 @@ pub struct DatabaseInfo {
     pub size_bytes: u64,
 }
 
+/// Qué es lo que el árbol enseña como una tabla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableKind {
+    #[default]
+    Table,
+    View,
+    /// Vista con sus datos guardados (PostgreSQL).
+    MaterializedView,
+}
+
+impl TableKind {
+    /// Una vista no tiene datos propios: no se vacía, no se clona ni se
+    /// editan sus filas.
+    pub fn is_view(self) -> bool {
+        self != TableKind::Table
+    }
+
+    /// Cómo se llama, con su artículo: «la tabla», «la vista».
+    pub fn label(self) -> &'static str {
+        match self {
+            TableKind::Table => "la tabla",
+            TableKind::View => "la vista",
+            TableKind::MaterializedView => "la vista materializada",
+        }
+    }
+
+    /// Palabra con la que SQL la nombra en `DROP …`.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            TableKind::Table => "TABLE",
+            TableKind::View => "VIEW",
+            TableKind::MaterializedView => "MATERIALIZED VIEW",
+        }
+    }
+}
+
+/// Una tabla (o vista) de una BBDD.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableEntry {
+    pub name: String,
+    pub kind: TableKind,
+}
+
+/// En los tests, una tabla (no una vista) con ese nombre.
+#[cfg(test)]
+impl From<&str> for TableEntry {
+    fn from(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            kind: TableKind::Table,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TableInfo {
     pub name: String,
@@ -179,9 +233,13 @@ pub trait DbBackend: Send + Sync {
     // ── Lectura (no modifican el estado del backend) ───────────────────────────
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
-    fn list_tables(&self, database: &str) -> DbResult<Vec<String>>;
-    /// Pares (BBDD, tabla) de todo el servidor, en una sola consulta.
-    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>>;
+    /// Tablas y vistas de una BBDD.
+    fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>>;
+    /// Pares (BBDD, tabla) de todo el servidor.
+    fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>>;
+    /// Sentencia que vuelve a crear la vista `view` con su definición
+    /// actual, para verla o cambiarla.
+    fn view_definition(&self, db: &str, view: &str) -> DbResult<String>;
 
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
     fn execute_query(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
@@ -217,7 +275,9 @@ pub trait DbBackend: Send + Sync {
 
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()>;
     fn drop_database(&self, name: &str) -> DbResult<()>;
-    fn drop_table(&self, db: &str, table: &str) -> DbResult<()>;
+    /// Elimina una tabla o una vista (`kind` dice cuál: se eliminan con
+    /// sentencias distintas).
+    fn drop_table(&self, db: &str, table: &str, kind: TableKind) -> DbResult<()>;
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
@@ -327,6 +387,11 @@ pub mod test_server {
             },
             ..base
         }
+    }
+
+    /// Nombres de unas tablas, para compararlos sin su tipo.
+    pub fn names(tables: Vec<super::TableEntry>) -> Vec<String> {
+        tables.into_iter().map(|table| table.name).collect()
     }
 
     pub fn pg_params() -> ConnectionParams {

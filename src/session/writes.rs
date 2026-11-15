@@ -136,14 +136,14 @@ impl Session {
         });
     }
 
+    /// Elimina una tabla o una vista, con la sentencia de lo que sea.
     pub(super) fn drop_table(&mut self, db: String, table: String) {
+        let kind = self.schema.kind(&db, &table);
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(
-                &mut log,
-                format!("DROP TABLE {}", b.engine().qualified(&db, &table)),
-                || b.drop_table(&db, &table).map(|()| 0),
-            );
+            let result = logged(&mut log, b.engine().drop_table(&db, &table, kind), || {
+                b.drop_table(&db, &table, kind).map(|()| 0)
+            });
             WriteResult {
                 write: Write::DropTable { db, table },
                 log,
@@ -153,14 +153,19 @@ impl Session {
     }
 
     /// Vacía `tables` de `db`; sin `tables`, todas las de la BBDD (se piden
-    /// al servidor: el árbol puede no haberlas cargado).
+    /// al servidor: el árbol puede no haberlas cargado). Las vistas no: no
+    /// tienen datos propios.
     pub(super) fn truncate(&mut self, db: String, tables: Option<Vec<String>>) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
             let tables = match tables {
                 Some(tables) => tables,
                 None => match b.list_tables(&db) {
-                    Ok(tables) => tables,
+                    Ok(tables) => tables
+                        .into_iter()
+                        .filter(|table| !table.kind.is_view())
+                        .map(|table| table.name)
+                        .collect(),
                     Err(e) => {
                         return WriteResult {
                             write: Write::Truncate {
@@ -312,7 +317,7 @@ impl Session {
             }
             (Write::DropTable { db, table }, Ok(())) => {
                 self.on_dropped(&db, Some(&table));
-                sh.toasts.success(format!("Tabla «{db}.{table}» eliminada"));
+                sh.toasts.success(format!("«{db}.{table}» eliminada"));
             }
             (Write::DropDatabase { db }, Err(message)) => {
                 self.show_error(format!("No se pudo eliminar «{db}»"), message);

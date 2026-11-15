@@ -9,7 +9,8 @@ use mysql::{
 
 use super::{
     CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
-    QUERY_CANCELLED, QueryResult, Security, Statement, TableInfo, TlsMode, tls, validate_charset,
+    QUERY_CANCELLED, QueryResult, Security, Statement, TableEntry, TableInfo, TableKind, TlsMode,
+    tls, validate_charset,
 };
 
 // El dialecto de este backend, para él y para la exportación
@@ -30,6 +31,17 @@ const ER_QUERY_INTERRUPTED: u16 = 1317;
 
 fn is_interrupted(e: &mysql::Error) -> bool {
     matches!(e, mysql::Error::MySqlError(e) if e.code == ER_QUERY_INTERRUPTED)
+}
+
+/// Tabla del árbol a partir de su TABLE_TYPE: «VIEW» y «SYSTEM VIEW» son
+/// vistas; lo demás (tablas, secuencias de MariaDB) se trata como tabla.
+fn table_entry(name: String, table_type: &str) -> TableEntry {
+    let kind = if table_type.contains("VIEW") {
+        TableKind::View
+    } else {
+        TableKind::Table
+    };
+    TableEntry { name, kind }
 }
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -252,23 +264,49 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("Error en query: {e}"))
     }
 
-    fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
-        let query = format!("SHOW TABLES FROM {}", quote_ident(database));
-        self.conn()?
+    fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>> {
+        // Con su tipo: «BASE TABLE», «VIEW»…
+        let query = format!("SHOW FULL TABLES FROM {}", quote_ident(database));
+        let rows: Vec<(String, String)> = self
+            .conn()?
             .query(query)
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| format!("Error en query: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, table_type)| table_entry(name, &table_type))
+            .collect())
     }
 
-    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
+    fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>> {
         // Sin BBDD a la que limitarse, el filtro no descarta ninguna
-        self.conn()?
+        let rows: Vec<(String, String, String)> = self
+            .conn()?
             .exec(
-                "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES \
                  WHERE ? IS NULL OR TABLE_SCHEMA = ? \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME",
                 (&self.only_database, &self.only_database),
             )
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| format!("Error en query: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(db, name, table_type)| (db, table_entry(name, &table_type)))
+            .collect())
+    }
+
+    fn view_definition(&self, db: &str, view: &str) -> DbResult<String> {
+        let sql = "SELECT VIEW_DEFINITION FROM information_schema.VIEWS \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?";
+        let result = self.query_with(sql, vec![Some(db.into()), Some(view.into())])?;
+        let definition = result
+            .rows
+            .first()
+            .and_then(|row| row[0].clone())
+            .ok_or_else(|| format!("No se encuentra la definición de la vista «{view}»."))?;
+        Ok(format!(
+            "CREATE OR REPLACE VIEW {} AS\n{definition}",
+            qualified(db, view)
+        ))
     }
 
     fn execute_query(&self, _db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
@@ -449,8 +487,8 @@ impl DbBackend for MysqlBackend {
         self.execute_write(None, &sql).map(|_| ())
     }
 
-    fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!("DROP TABLE {}", qualified(db, table));
+    fn drop_table(&self, db: &str, table: &str, kind: TableKind) -> DbResult<()> {
+        let sql = Engine::Mysql.drop_table(db, table, kind);
         self.execute_write(None, &sql).map(|_| ())
     }
 
@@ -534,7 +572,7 @@ mod tests {
         assert!(columns[0].is_auto && !columns[1].is_auto);
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
         assert!(columns[0].is_primary() && !columns[1].is_primary());
-        assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
+        assert!(all.unwrap().contains(&(db.to_string(), "t".into())));
     }
 
     #[test]
@@ -573,7 +611,7 @@ mod tests {
         assert_eq!(databases.unwrap(), ["rustql_test_only"]);
         assert_eq!(
             tables.unwrap(),
-            [("rustql_test_only".to_string(), "t".to_string())]
+            [("rustql_test_only".to_string(), "t".into())]
         );
         let info = info.unwrap();
         assert_eq!(info.len(), 1);

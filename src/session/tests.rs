@@ -2,10 +2,15 @@ use super::schema::SchemaResult;
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::*;
-use crate::db::{CancelFlag, ColumnInfo, DatabaseInfo, DbResult, QUERY_CANCELLED, TableInfo};
+use crate::db::{
+    CancelFlag, ColumnInfo, DatabaseInfo, DbResult, QUERY_CANCELLED, TableEntry, TableInfo,
+    TableKind,
+};
 use crate::ui::connection_panel::SaveProfile;
+use crate::ui::modals::DbObject;
 use crate::ui::modals::NewColumnDef;
 use crate::ui::results_grid::{GridAction, SortSpec};
+use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::SqlEditorAction;
 
 /// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
@@ -21,8 +26,11 @@ impl DbBackend for FakeBackend {
     fn list_databases(&self) -> DbResult<Vec<String>> {
         Ok(Vec::new())
     }
-    fn list_tables(&self, _: &str) -> DbResult<Vec<String>> {
+    fn list_tables(&self, _: &str) -> DbResult<Vec<TableEntry>> {
         Ok(Vec::new())
+    }
+    fn view_definition(&self, _: &str, view: &str) -> DbResult<String> {
+        Ok(format!("CREATE OR REPLACE VIEW {view} AS SELECT 1"))
     }
     fn execute_query(&self, _: Option<&str>, _: &str) -> DbResult<QueryResult> {
         Ok(QueryResult {
@@ -62,7 +70,7 @@ impl DbBackend for FakeBackend {
     fn get_columns_info(&self, _: &str, _: &str) -> DbResult<Vec<ColumnInfo>> {
         Ok(Vec::new())
     }
-    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
+    fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>> {
         Ok(Vec::new())
     }
     fn execute_write(&self, _: Option<&str>, _: &str) -> DbResult<u64> {
@@ -74,7 +82,7 @@ impl DbBackend for FakeBackend {
     fn drop_database(&self, _: &str) -> DbResult<()> {
         Ok(())
     }
-    fn drop_table(&self, _: &str, _: &str) -> DbResult<()> {
+    fn drop_table(&self, _: &str, _: &str, _: TableKind) -> DbResult<()> {
         Ok(())
     }
     fn truncate_table(&self, _: &str, _: &str) -> DbResult<()> {
@@ -513,6 +521,7 @@ fn vaciar_todas_sin_haber_desplegado_el_arbol() {
         "CREATE TABLE rustql_test_truncate.hija (id INT, \
          FOREIGN KEY (id) REFERENCES rustql_test_truncate.padre (id))",
         "CREATE TABLE rustql_test_truncate.suelta (id INT)",
+        "CREATE VIEW rustql_test_truncate.vista AS SELECT * FROM rustql_test_truncate.suelta",
         "INSERT INTO rustql_test_truncate.padre VALUES (1)",
         "INSERT INTO rustql_test_truncate.hija VALUES (1)",
         "INSERT INTO rustql_test_truncate.suelta VALUES (1), (2)",
@@ -549,11 +558,142 @@ fn vaciar_todas_sin_haber_desplegado_el_arbol() {
     assert_eq!(hija, Some("0".into()));
     // La referenciada por una clave foránea no se puede truncar: se avisa
     assert_eq!(padre, Some("1".into()));
+    // …y solo de ella: una vista no tiene datos que vaciar, ni se intenta
     assert!(
-        matches!(&s.modal, ModalState::Error { message, .. } if message.starts_with("padre:")),
+        matches!(&s.modal, ModalState::Error { message, .. }
+            if message.starts_with("padre:") && !message.contains("vista")),
         "{:?}",
         s.modal
     );
+}
+
+/// Una vista en el árbol: se sabe que lo es, su definición se abre en el
+/// editor y se elimina como vista. En los dos motores.
+fn views_through_the_session(mut s: Session, db: &str, definition_starts: &str) {
+    let mut sh = shared();
+    s.request_tables(db);
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(tables(&s, db).unwrap(), &["t", "vista"]);
+    assert_eq!(s.schema.kind(db, "t"), TableKind::Table);
+    assert_eq!(s.schema.kind(db, "vista"), TableKind::View);
+    // Lo que no se ha leído se trata como tabla
+    assert_eq!(s.schema.kind("otra", "vista"), TableKind::Table);
+
+    // Su definición, en una pestaña SQL nueva sobre su BBDD
+    let tabs = s.sql_tabs.len();
+    let ctx = egui::Context::default();
+    s.handle_sidebar_action(
+        &ctx,
+        &mut sh,
+        SidebarAction::ViewDefinition {
+            db: db.into(),
+            table: "vista".into(),
+        },
+    );
+    finish_jobs(&mut s, &mut sh);
+    assert_eq!(s.sql_tabs.len(), tabs + 1, "{:?}", sh.toasts.texts());
+    let tab = s.sql_tabs.last().unwrap();
+    assert_eq!(tab.db_context, db);
+    assert!(
+        tab.sql_text.starts_with(definition_starts),
+        "{}",
+        tab.sql_text
+    );
+    assert!(
+        tab.sql_text.to_lowercase().contains("select"),
+        "{}",
+        tab.sql_text
+    );
+
+    // Eliminarla pide confirmación como vista y usa DROP VIEW
+    s.handle_sidebar_action(
+        &ctx,
+        &mut sh,
+        SidebarAction::DropTable {
+            db: db.into(),
+            table: "vista".into(),
+        },
+    );
+    assert!(matches!(
+        &s.modal,
+        ModalState::ConfirmDrop {
+            target: DbObject::Table {
+                kind: TableKind::View,
+                ..
+            },
+            ..
+        }
+    ));
+    s.handle_modal_action(
+        ModalAction::DropTable {
+            db: db.into(),
+            table: "vista".into(),
+        },
+        &mut sh,
+    );
+    finish_jobs(&mut s, &mut sh);
+    assert!(!sh.toasts.has_error(), "{:?}", s.modal);
+    assert!(matches!(s.modal, ModalState::None), "{:?}", s.modal);
+    assert!(
+        s.query_log
+            .iter()
+            .any(|e| e.query.starts_with("DROP VIEW ")),
+        "en el log, la sentencia que se ejecutó"
+    );
+    let ConnState::Connected(b) = &s.state else {
+        unreachable!()
+    };
+    assert_eq!(
+        crate::db::test_server::names(b.list_tables(db).unwrap()),
+        ["t"]
+    );
+}
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_MYSQL"]
+fn una_vista_de_mysql_en_el_arbol() {
+    let db = "rustql_test_views";
+    let b = crate::db::test_server::backend();
+    for sql in [
+        "DROP DATABASE IF EXISTS rustql_test_views",
+        "CREATE DATABASE rustql_test_views",
+        "CREATE TABLE rustql_test_views.t (id INT PRIMARY KEY, v TEXT)",
+        "CREATE VIEW rustql_test_views.vista AS SELECT id FROM rustql_test_views.t WHERE id > 0",
+    ] {
+        b.execute_write(None, sql).unwrap();
+    }
+    let mut s = Session::new(0);
+    s.state = ConnState::Connected(Arc::new(b));
+    views_through_the_session(
+        s,
+        db,
+        "CREATE OR REPLACE VIEW `rustql_test_views`.`vista` AS\n",
+    );
+    crate::db::test_server::backend()
+        .execute_write(None, "DROP DATABASE rustql_test_views")
+        .unwrap();
+}
+
+#[test]
+#[ignore = "necesita RUSTQL_TEST_POSTGRES"]
+fn una_vista_de_postgres_en_el_arbol() {
+    let db = "rustql_test_views_pg";
+    let b = crate::db::test_server::pg_backend();
+    b.drop_database(db).ok();
+    b.create_database(db, "").unwrap();
+    b.execute_write(
+        Some(db),
+        "CREATE TABLE t (id int PRIMARY KEY, v text);
+         CREATE VIEW vista AS SELECT id FROM t WHERE id > 0",
+    )
+    .unwrap();
+    let mut s = Session::new(0);
+    s.params = crate::db::test_server::pg_params();
+    s.state = ConnState::Connected(Arc::new(b));
+    views_through_the_session(s, db, "CREATE OR REPLACE VIEW \"public\".\"vista\" AS\n");
+    crate::db::test_server::pg_backend()
+        .drop_database(db)
+        .unwrap();
 }
 
 /// `db.t` con columnas id (AUTO_INCREMENT), v y n.
@@ -1226,7 +1366,10 @@ fn una_tabla_de_postgres_de_principio_a_fin() {
             row(&[Some("5"), None, Some("nuevo")]),
         ]
     );
-    assert_eq!(tables.unwrap(), ["ventas.copia", "ventas.t"]);
+    assert_eq!(
+        crate::db::test_server::names(tables.unwrap()),
+        ["ventas.copia", "ventas.t"]
+    );
 }
 
 #[test]

@@ -7,8 +7,8 @@ use eframe::egui;
 use self::export::show_export_data;
 pub use self::export::{ExportPhase, ExportRunning, TableExportEntry, TableExportState};
 
-use crate::db::Engine;
 use crate::db::export::{ExportDestination, ExportOptions};
+use crate::db::{Engine, TableKind};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
 use crate::ui::results_grid::SortSpec;
@@ -69,7 +69,12 @@ impl FilterOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DbObject {
     Database(String),
-    Table { db: String, table: String },
+    /// Una tabla o una vista.
+    Table {
+        db: String,
+        table: String,
+        kind: TableKind,
+    },
 }
 
 /// Recarga de la tabla abierta. Con cambios pendientes espera a que el
@@ -627,7 +632,14 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
 
     let (title, what, name) = match target {
         DbObject::Database(db) => ("Eliminar base de datos", "la base de datos", db.clone()),
-        DbObject::Table { db, table } => ("Eliminar tabla", "la tabla", format!("{db}.{table}")),
+        DbObject::Table { db, table, kind } => {
+            let title = if kind.is_view() {
+                "Eliminar vista"
+            } else {
+                "Eliminar tabla"
+            };
+            (title, kind.label(), format!("{db}.{table}"))
+        }
     };
 
     dialog(ctx, title, 300.0, Some(&mut open), |ui| {
@@ -657,7 +669,7 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
             if delete {
                 action = match target.clone() {
                     DbObject::Database(db) => ModalAction::DropDatabase(db),
-                    DbObject::Table { db, table } => ModalAction::DropTable { db, table },
+                    DbObject::Table { db, table, .. } => ModalAction::DropTable { db, table },
                 };
             }
             if ui.button("Cancelar").clicked() {
@@ -681,7 +693,7 @@ fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction 
 
     let (what, name) = match target {
         DbObject::Database(db) => ("todas las tablas de", db.clone()),
-        DbObject::Table { db, table } => ("la tabla", format!("{db}.{table}")),
+        DbObject::Table { db, table, .. } => ("la tabla", format!("{db}.{table}")),
     };
 
     dialog(ctx, "Vaciar datos", 280.0, Some(&mut open), |ui| {
@@ -698,7 +710,7 @@ fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction 
             if red_btn(ui, "Vaciar") {
                 action = match target.clone() {
                     DbObject::Database(db) => ModalAction::TruncateAllTables(db),
-                    DbObject::Table { db, table } => ModalAction::TruncateTable { db, table },
+                    DbObject::Table { db, table, .. } => ModalAction::TruncateTable { db, table },
                 };
             }
             if ui.button("Cancelar").clicked() {

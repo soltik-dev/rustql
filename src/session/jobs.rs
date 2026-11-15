@@ -33,6 +33,12 @@ pub enum JobResult {
         elapsed_ms: u64,
         result: DbResult<QueryResult>,
     },
+    /// Definición de una vista, para abrirla en una pestaña SQL.
+    ViewDefinition {
+        db: String,
+        view: String,
+        result: DbResult<String>,
+    },
     /// Se pidió al servidor cancelar una ejecución del editor. Si lo
     /// consigue, quien termina (con error) es su `Editor`.
     EditorCancel(DbResult<()>),

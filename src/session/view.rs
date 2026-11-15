@@ -189,6 +189,7 @@ impl Session {
                         let view = sidebar::SidebarView {
                             databases: &self.schema.databases,
                             tables: &self.schema.tables_cache,
+                            kinds: &self.schema.kinds,
                             selected_db: sel_db,
                             selected_table: sel_table,
                             favorites: &sh.settings.fav_tables,
@@ -302,6 +303,9 @@ impl Session {
                         &mut self.table_view,
                         col_info_slice,
                         self.params.engine,
+                        selected_table
+                            .map(|(db, table)| self.schema.kind(db, table))
+                            .unwrap_or_default(),
                         // Con query en curso: spinner en el grid
                         running,
                     );

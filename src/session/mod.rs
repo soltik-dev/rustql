@@ -961,6 +961,19 @@ impl Session {
                 elapsed_ms,
                 result,
             } => self.apply_editor_result(token, sql, elapsed_ms, result),
+            JobResult::ViewDefinition {
+                db,
+                result: Ok(sql),
+                ..
+            } => self.open_sql_tab(sh, Some(db), sql),
+            JobResult::ViewDefinition {
+                view,
+                result: Err(e),
+                ..
+            } => {
+                sh.toasts
+                    .error(format!("No se pudo leer la definición de «{view}»: {e}"));
+            }
             JobResult::EditorCancel(Ok(())) => {}
             // La consulta sigue en marcha: que conste por qué
             JobResult::EditorCancel(Err(e)) => {

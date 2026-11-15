@@ -7,6 +7,8 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
+use super::TableKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
@@ -246,6 +248,11 @@ impl Engine {
             columns.join(", "),
             placeholders.join(", ")
         )
+    }
+
+    /// Elimina la tabla o vista `table` de `db`.
+    pub fn drop_table(self, db: &str, table: &str, kind: TableKind) -> String {
+        format!("DROP {} {}", kind.keyword(), self.qualified(db, table))
     }
 
     /// Crea la tabla `target` con la estructura de `source` (columnas,
