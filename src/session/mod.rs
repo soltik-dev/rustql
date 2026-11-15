@@ -1026,7 +1026,7 @@ impl Session {
                     }
                     Ok(ExportEvent::TableError { table, error }) => {
                         log_entries.push(LogEntry::err(
-                            format!("Export `{table}`"),
+                            format!("Exportar «{table}»"),
                             0,
                             error.as_str(),
                         ));
@@ -1090,9 +1090,6 @@ impl Session {
     /// marcada. Si las tablas aún no están cargadas, se piden y la lista se
     /// rellena al llegar.
     fn open_export(&mut self, sh: &Shared, db: String, table: Option<String>) {
-        if !self.engine().supports_export() {
-            return;
-        }
         // Los servidores de destino son los del mismo motor
         let profiles = sh
             .profiles

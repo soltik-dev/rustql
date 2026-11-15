@@ -396,6 +396,7 @@ pub fn show(
             phase,
         } => show_export_data(
             ctx,
+            engine,
             source_db,
             source_table,
             tables,

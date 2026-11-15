@@ -104,8 +104,6 @@ pub struct SidebarView<'a> {
     /// La conexión se limita a una BBDD: sale desplegada, y ni se crean
     /// otras ni se elimina esa (el árbol no podría enseñar el resultado).
     pub single_database: bool,
-    /// El motor de la conexión permite exportar BBDD y tablas.
-    pub can_export: bool,
 }
 
 /// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
@@ -379,7 +377,7 @@ impl Tree<'_> {
             if menu_item(ui, format!("{PLUS} Crear tabla")) {
                 out.action = SidebarAction::CreateTable { db: db() };
             }
-            if self.view.can_export && menu_item(ui, format!("{EXPORT} Exportar base de datos")) {
+            if menu_item(ui, format!("{EXPORT} Exportar base de datos")) {
                 out.action = SidebarAction::ExportDatabase(db());
             }
             ui.separator();
@@ -522,11 +520,9 @@ impl Tree<'_> {
             item(ui, format!("{CLONE} Clonar tabla"), |db, table| {
                 SidebarAction::CloneTable { db, table }
             });
-            if view.can_export {
-                item(ui, format!("{EXPORT} Exportar tabla"), |db, table| {
-                    SidebarAction::ExportTable { db, table }
-                });
-            }
+            item(ui, format!("{EXPORT} Exportar tabla"), |db, table| {
+                SidebarAction::ExportTable { db, table }
+            });
             ui.separator();
             item(ui, format!("{TRASH} Vaciar tabla"), |db, table| {
                 SidebarAction::TruncateTable { db, table }
@@ -597,7 +593,6 @@ mod tests {
                             server_name: "srv",
                             conn_color: None,
                             single_database: false,
-                            can_export: true,
                         };
                         out = show(ui, &view, &mut self.search, &mut self.only_fav);
                     });
@@ -668,7 +663,6 @@ mod tests {
                 server_name: "srv",
                 conn_color: None,
                 single_database: false,
-                can_export: true,
             };
             let tree = Tree {
                 view: &view,

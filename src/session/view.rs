@@ -195,7 +195,6 @@ impl Session {
                             server_name: &self.title,
                             conn_color,
                             single_database: self.params.only_database().is_some(),
-                            can_export: self.params.engine.supports_export(),
                         };
                         sidebar::show(
                             ui,

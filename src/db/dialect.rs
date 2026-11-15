@@ -148,12 +148,6 @@ impl Engine {
         }
     }
 
-    /// Si se pueden exportar BBDD y tablas. La exportación reconstruye las
-    /// tablas con `SHOW CREATE TABLE`, que solo existe en MySQL.
-    pub fn supports_export(self) -> bool {
-        self == Engine::Mysql
-    }
-
     /// Identificador entre las comillas del motor: `` `nombre` `` o `"nombre"`.
     pub fn quote_ident(self, s: &str) -> String {
         match self {

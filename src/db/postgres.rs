@@ -244,6 +244,27 @@ impl Drop for Pooled {
     }
 }
 
+/// Conexión propia a una BBDD, fuera del pool: lo que se ajuste en ella
+/// (`search_path`…) no llega a las demás. La usa la exportación.
+pub(super) struct Dedicated<'a> {
+    backend: &'a PostgresBackend,
+    client: Client,
+}
+
+impl Dedicated<'_> {
+    pub(super) fn query(&self, sql: &str) -> DbResult<QueryResult> {
+        self.backend
+            .rt
+            .block_on(read_results(&self.client, sql, usize::MAX))
+            .map(|(result, _)| result)
+            .map_err(|e| describe(&e))
+    }
+
+    pub(super) fn execute(&self, sql: &str) -> DbResult<()> {
+        self.query(sql).map(drop)
+    }
+}
+
 /// Conexión del editor SQL a una BBDD: se mantiene entre ejecuciones para
 /// que transacciones, ajustes de sesión y tablas temporales sigan vivos.
 type EditorSession = Arc<Mutex<Option<Client>>>;
@@ -445,6 +466,31 @@ impl PostgresBackend {
             .iter()
             .map(|row| pg_table_name(&col(row, 0), &col(row, 1)))
             .collect())
+    }
+
+    /// Abre una conexión propia a `db`.
+    pub(super) fn dedicated(&self, db: &str) -> DbResult<Dedicated<'_>> {
+        let client = self
+            .rt
+            .block_on(self.open(db))
+            .map_err(|e| format!("Sin conexión con «{db}»: {}", describe(&e)))?;
+        Ok(Dedicated {
+            backend: self,
+            client,
+        })
+    }
+
+    /// Crea la BBDD `name` si no existe (no hay `CREATE DATABASE IF NOT
+    /// EXISTS`).
+    pub(super) fn ensure_database(&self, name: &str) -> DbResult<()> {
+        let sql = format!(
+            "SELECT 1 FROM pg_database WHERE datname = {}",
+            SQL.literal(name)
+        );
+        if self.execute_query(None, &sql)?.rows.is_empty() {
+            self.create_database(name, "")?;
+        }
+        Ok(())
     }
 
     /// Todas las BBDD del servidor en las que el usuario puede entrar, aunque
