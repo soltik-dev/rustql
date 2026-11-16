@@ -51,6 +51,8 @@ pub struct Palette {
     pub grid_insert_fg: Color32,
     pub grid_delete_bg: Color32,
     pub grid_delete_fg: Color32,
+    /// Celdas con el mismo valor que la del cursor.
+    pub grid_match_bg: Color32,
     pub null_text: Color32,
     // Tokens SQL
     pub sql_keyword: Color32,
@@ -94,6 +96,7 @@ pub const DARK: Palette = Palette {
     grid_insert_fg: Color32::from_rgb(126, 226, 168),
     grid_delete_bg: Color32::from_rgb(62, 28, 30),
     grid_delete_fg: Color32::from_rgb(200, 120, 116),
+    grid_match_bg: Color32::from_rgb(60, 44, 96),
     null_text: Color32::from_rgb(95, 107, 130),
     sql_keyword: Color32::from_rgb(86, 156, 214),
     sql_string: Color32::from_rgb(206, 145, 120),
@@ -143,6 +146,7 @@ pub const LIGHT: Palette = Palette {
     grid_insert_fg: Color32::from_rgb(15, 90, 40),
     grid_delete_bg: Color32::from_rgb(250, 222, 222),
     grid_delete_fg: Color32::from_rgb(160, 50, 50),
+    grid_match_bg: Color32::from_rgb(234, 222, 252),
     null_text: Color32::from_rgb(160, 168, 182),
     sql_keyword: Color32::from_rgb(7, 87, 186),
     sql_string: Color32::from_rgb(154, 54, 23),

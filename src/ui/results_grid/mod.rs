@@ -148,6 +148,16 @@ impl<'a> Grid<'a> {
         }
     }
 
+    /// Valor que se resalta en las demás celdas que lo muestran: el de la
+    /// celda del cursor, salvo que esté vacía, sea NULL o sea el DEFAULT o
+    /// AUTO de una fila nueva (no son un valor que buscar).
+    fn highlighted_value(&self, cursor: Option<CellRef>) -> Option<&'a str> {
+        match self.shown(cursor?) {
+            Shown::Value(v) if !v.is_empty() => Some(v),
+            _ => None,
+        }
+    }
+
     /// Texto con el que arranca el editor de la celda: NULL y DEFAULT se
     /// editan como texto vacío.
     fn edit_text(&self, cell: CellRef) -> String {

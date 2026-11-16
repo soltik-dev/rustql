@@ -571,6 +571,55 @@ fn la_celda_muestra_el_cambio_pendiente() {
     assert_eq!(grid.edit_text(cell(1, 1)), "", "NULL se edita como vacío");
 }
 
+#[test]
+fn se_resalta_el_valor_que_muestra_el_cursor() {
+    let mut f = Fixture::new(2);
+    let data = f.view.table_data.as_mut().unwrap();
+    data.rows[0][2] = Some(String::new());
+    data.rows[0][3] = None;
+    f.view.pending_edits.push(PendingEdit {
+        row_idx: 1,
+        col_idx: 1,
+        new_value: "nuevo".into(),
+        is_null: false,
+    });
+    f.view.pending_inserts.push(PendingInsert {
+        values: vec![InsertValue::Default; COLS],
+        auto_cols: vec![false; COLS],
+    });
+    let data = f.view.table_data.as_ref().unwrap();
+    let grid = Grid {
+        id: egui::Id::unique("test"),
+        data,
+        column_info: &f.column_info,
+        sorts: &[],
+        pending_edits: &f.view.pending_edits,
+        pending_deletes: &f.view.pending_deletes,
+        pending_inserts: &f.view.pending_inserts,
+        editable: true,
+        keyed: true,
+        queryable: true,
+        engine: Engine::Mysql,
+        pager: None,
+    };
+    let at = |row, col| Some(CellRef { row, col });
+    let existing = RowRef::Existing;
+    assert_eq!(grid.highlighted_value(None), None);
+    assert_eq!(grid.highlighted_value(at(existing(0), 1)), Some("r0c1"));
+    assert_eq!(
+        grid.highlighted_value(at(existing(1), 1)),
+        Some("nuevo"),
+        "lo que se ve, con el cambio pendiente"
+    );
+    assert_eq!(grid.highlighted_value(at(existing(0), 2)), None, "vacío");
+    assert_eq!(grid.highlighted_value(at(existing(0), 3)), None, "NULL");
+    assert_eq!(
+        grid.highlighted_value(at(RowRef::Insert(0), 1)),
+        None,
+        "DEFAULT de una fila nueva"
+    );
+}
+
 impl Fixture {
     /// Clic con el botón principal en `pos`.
     fn click(&mut self, pos: egui::Pos2) {
