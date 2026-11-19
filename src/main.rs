@@ -15,9 +15,12 @@ mod ui;
 use app::RustqlApp;
 use eframe::egui;
 
-/// Identificador de la aplicación para el escritorio: en Wayland asocia la
-/// ventana a su `.desktop` (icono y nombre en el panel) y en X11 es su clase.
-const APP_ID: &str = "rustql";
+/// Desktop application ID: on Wayland it ties the window to its `.desktop`
+/// file (icon and name in the panel) and on X11 it is the window class.
+/// It must match packaging/linux/com.rustql.RustQL.desktop and the Flathub
+/// ID. The config folder and the keyring service keep the "rustql" name so
+/// nothing already saved is lost.
+const APP_ID: &str = "com.rustql.RustQL";
 
 /// Icono de la ventana (lo genera assets/icon/make_icon.py).
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon/icon.png");

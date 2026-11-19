@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Alberto López -->
+<component type="desktop-application">
+  <id>com.rustql.RustQL</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>RustQL</name>
+  <summary>Fast, native client for MySQL, MariaDB and PostgreSQL</summary>
+  <developer id="com.rustql">
+    <name>Alberto López</name>
+  </developer>
+
+  <description>
+    <p>
+      RustQL is a desktop client for MySQL, MariaDB and PostgreSQL written in
+      Rust. It starts instantly, stays responsive with large tables and keeps
+      your passwords in the system keyring.
+    </p>
+    <ul>
+      <li>Several connections open at once, each in its own colour-coded tab</li>
+      <li>Browse databases, tables and views and edit rows directly in the grid</li>
+      <li>SQL editor with syntax highlighting, run selection and query cancellation</li>
+      <li>Export databases or tables to SQL files or straight to another server</li>
+      <li>Encrypted connections with certificate verification</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">com.rustql.RustQL.desktop</launchable>
+  <provides>
+    <binary>rustql</binary>
+  </provides>
+
+  <url type="homepage">https://rustql.com</url>
+  <url type="bugtracker">https://github.com/soltik-dev/rustql/issues</url>
+  <url type="vcs-browser">https://github.com/soltik-dev/rustql</url>
+
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <!-- Filled in by the version script when preparing each release. -->
+  <releases>
+  </releases>
+</component>
