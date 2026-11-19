@@ -1,5 +1,5 @@
-//! Escrituras contra la BD en segundo plano (DDL, TRUNCATE y los cambios del
-//! grid) y lo que hay que hacer en la sesión cuando terminan.
+//! Database writes in the background (DDL, TRUNCATE and the grid's
+//! changes) and what the session has to do when they finish.
 
 use std::time::Instant;
 
@@ -11,7 +11,7 @@ use crate::log::LogEntry;
 use crate::ui::modals::{ModalState, Reload};
 use crate::ui::tab_bar::ActiveTab;
 
-/// Qué se escribió, con lo necesario para aplicar el resultado.
+/// What was written, with what is needed to apply the result.
 pub enum Write {
     CreateDatabase {
         name: String,
@@ -27,8 +27,8 @@ pub enum Write {
         db: String,
         table: String,
     },
-    /// Vaciar tablas de `db`: las que se intentaron y las que fallaron
-    /// («tabla: error»).
+    /// Empty tables of `db`: those attempted and those that failed
+    /// ("table: error").
     Truncate {
         db: String,
         tables: Vec<String>,
@@ -38,8 +38,7 @@ pub enum Write {
         db: String,
         name: String,
     },
-    /// Guardar los `count` cambios pendientes de `db.table` y después hacer
-    /// `then`.
+    /// Save the `count` pending changes of `db.table` and then do `then`.
     Commit {
         db: String,
         table: String,
@@ -48,12 +47,12 @@ pub enum Write {
     },
 }
 
-/// Lo que espera a que se guarden los cambios pendientes.
+/// What waits for the pending changes to be saved.
 pub enum AfterCommit {
-    /// Volver a leer los datos (Guardar).
+    /// Read the data again (Save).
     ReloadData,
     Reload(Reload),
-    /// Abrir otra tabla en la pestaña Datos.
+    /// Open another table in the Data tab.
     Switch {
         db: String,
         table: String,
@@ -62,12 +61,12 @@ pub enum AfterCommit {
 
 pub struct WriteResult {
     pub write: Write,
-    /// Entradas para el log de consultas.
+    /// Entries for the query log.
     pub log: Vec<LogEntry>,
     pub result: Result<(), String>,
 }
 
-/// Ejecuta `run` y deja constancia en `log` con su duración.
+/// Runs `run` and records it in `log` with its duration.
 fn logged(
     log: &mut Vec<LogEntry>,
     label: String,
@@ -83,7 +82,7 @@ fn logged(
     result
 }
 
-// ── Lanzar escrituras ────────────────────────────────────────────────────────
+// ── Start writes ─────────────────────────────────────────────────────────────
 
 impl Session {
     fn spawn_write(&mut self, job: impl FnOnce(&dyn DbBackend) -> WriteResult + Send + 'static) {
@@ -136,7 +135,7 @@ impl Session {
         });
     }
 
-    /// Elimina una tabla o una vista, con la sentencia de lo que sea.
+    /// Drops a table or a view, with the statement for whichever it is.
     pub(super) fn drop_table(&mut self, db: String, table: String) {
         let kind = self.schema.kind(&db, &table);
         self.spawn_write(move |b| {
@@ -152,9 +151,9 @@ impl Session {
         });
     }
 
-    /// Vacía `tables` de `db`; sin `tables`, todas las de la BBDD (se piden
-    /// al servidor: el árbol puede no haberlas cargado). Las vistas no: no
-    /// tienen datos propios.
+    /// Empties `tables` of `db`; without `tables`, all of the database's
+    /// (asked from the server: the tree may not have loaded them). Not views:
+    /// they have no data of their own.
     pub(super) fn truncate(&mut self, db: String, tables: Option<Vec<String>>) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
@@ -217,8 +216,8 @@ impl Session {
         });
     }
 
-    /// Guarda los cambios pendientes en una transacción y después hace
-    /// `then`. Mientras tanto el grid no admite más cambios.
+    /// Saves the pending changes in a transaction and then does `then`.
+    /// Meanwhile the grid accepts no more changes.
     pub(super) fn commit_pending_changes(&mut self, sh: &mut Shared, then: AfterCommit) {
         if self.pending_count() == 0 {
             self.after_commit(sh, then);
@@ -281,7 +280,7 @@ impl Session {
         }
     }
 
-    // ── Aplicar el resultado ─────────────────────────────────────────────────
+    // ── Apply the result ─────────────────────────────────────────────────────
 
     pub(super) fn apply_write(&mut self, sh: &mut Shared, done: WriteResult) {
         self.writes_in_flight = self.writes_in_flight.saturating_sub(1);
@@ -361,7 +360,7 @@ impl Session {
                             1 => format!("1 cambio guardado en «{table}»"),
                             n => format!("{n} cambios guardados en «{table}»"),
                         });
-                        // Si entretanto se abrió otra tabla, lo que esperaba ya no aplica
+                        // If another table was opened meanwhile, what was waiting no longer applies
                         let still_open = matches!(
                             &self.schema.selected_node,
                             Some(SelectedNode::Table { db: d, table: t }) if *d == db && *t == table
@@ -376,15 +375,15 @@ impl Session {
         }
     }
 
-    /// Cierra el formulario si sigue abierto (el usuario puede haberlo
-    /// cerrado mientras se ejecutaba).
+    /// Closes the form if it is still open (the user may have closed it
+    /// while it ran).
     fn close_form(&mut self, is_form: impl Fn(&ModalState) -> bool) {
         if is_form(&self.modal) {
             self.modal = ModalState::None;
         }
     }
 
-    /// Error de un formulario: se muestra en él si sigue abierto.
+    /// Error of a form: shown in it if it is still open.
     fn show_form_error(&mut self, message: String) {
         match &mut self.modal {
             ModalState::CreateDatabase { error, .. }

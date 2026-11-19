@@ -33,7 +33,7 @@ use crate::ui::sql_editor::SqlTab;
 use crate::ui::tab_bar::{ActiveTab, TabRename};
 use crate::ui::toasts::Toasts;
 
-// ── Estados de la conexión ───────────────────────────────────────────────────
+// ── Connection states ────────────────────────────────────────────────────────
 
 pub enum ConnState {
     Disconnected,
@@ -43,7 +43,7 @@ pub enum ConnState {
         status: String,
         start: Instant,
     },
-    /// Compartido con los hilos de trabajo.
+    /// Shared with the worker threads.
     Connected(Arc<dyn DbBackend>),
 }
 
@@ -55,7 +55,7 @@ pub enum SelectedNode {
 }
 
 impl SelectedNode {
-    /// BBDD del nodo: ella misma o la de la tabla.
+    /// Database of the node: itself or the table's.
     pub fn db(&self) -> Option<&str> {
         match self {
             Self::Database(db) | Self::Table { db, .. } => Some(db),
@@ -63,7 +63,7 @@ impl SelectedNode {
         }
     }
 
-    /// Si es una tabla, (BBDD, tabla).
+    /// If it is a table, (database, table).
     pub fn table(&self) -> Option<(&str, &str)> {
         match self {
             Self::Table { db, table } => Some((db, table)),
@@ -72,31 +72,31 @@ impl SelectedNode {
     }
 }
 
-// ── Sub-structs de estado ─────────────────────────────────────────────────────
+// ── State sub-structs ─────────────────────────────────────────────────────────
 
-// ── Estado compartido entre sesiones ─────────────────────────────────────────
+// ── State shared between sessions ────────────────────────────────────────────
 
-/// Lo que comparten todas las pestañas de conexión: ajustes (favoritos,
-/// pestañas SQL guardadas…), perfiles y estado persistido por tabla.
+/// What every connection tab shares: settings (favourites, saved SQL
+/// tabs…), profiles and per-table persisted state.
 pub struct Shared {
     pub settings: AppSettings,
     pub profiles: Vec<ConnectionProfile>,
-    /// Estado persistido por tabla (sort, filtro, historial)
+    /// Per-table persisted state (sort, filter, history)
     pub table_states: TableStates,
-    /// Avisos no modales: los lanza cualquier sesión y los dibuja la app.
+    /// Non-modal notifications: any session raises them and the app draws them.
     pub toasts: Toasts,
 }
 
-/// Teclas globales del frame: solo las recibe la sesión activa.
+/// Global keys of the frame: only the active session receives them.
 #[derive(Clone, Copy, Default)]
 pub struct FrameKeys {
     pub f5: bool,
     pub f9: bool,
     pub ctrl_enter: bool,
     pub ctrl_t: bool,
-    /// Cerrar la pestaña SQL activa.
+    /// Close the active SQL tab.
     pub ctrl_w: bool,
-    /// Ctrl+Tab y Ctrl+Mayús+Tab: pestaña siguiente (true) o anterior.
+    /// Ctrl+Tab and Ctrl+Shift+Tab: next (true) or previous tab.
     pub cycle_tab: Option<bool>,
 }
 
@@ -104,10 +104,10 @@ impl FrameKeys {
     pub fn read(ctx: &egui::Context) -> Self {
         use egui::{Key, Modifiers};
         ctx.input_mut(|i| {
-            // Estas se consumen: en un campo de texto, Ctrl+W borraría la
-            // palabra anterior y Ctrl+Tab escribiría un tabulador
+            // These are consumed: in a text field, Ctrl+W would delete the
+            // previous word and Ctrl+Tab would type a tab
             let ctrl_w = i.consume_key(Modifiers::COMMAND, Key::W);
-            // Primero la combinación con Mayús: la otra también la acepta
+            // The Shift combination first: the other one accepts it too
             let cycle_tab = if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
                 Some(false)
             } else if i.consume_key(Modifiers::CTRL, Key::Tab) {
@@ -127,45 +127,45 @@ impl FrameKeys {
     }
 }
 
-/// Lo que la barra de estado enseña de la conexión de una sesión.
+/// What the status bar shows about a session's connection.
 pub struct ConnectionStatus {
-    /// «host:puerto», o que se está conectando; `None` sin conexión.
+    /// "host:port", or that it is connecting; `None` without a connection.
     pub host: Option<String>,
     pub database: Option<String>,
-    /// Cómo viaja la conexión y qué nivel de seguridad se pidió.
+    /// How the connection travels and which security level was requested.
     pub security: Option<(Security, TlsMode)>,
 }
 
-/// Lista de BBDD del servidor del formulario de conexión, para elegir una.
+/// List of databases of the connection form's server, to pick one.
 #[derive(Default)]
 pub struct DbPicker {
     pub list: Loadable<Vec<String>>,
-    /// Hilo que la está leyendo.
+    /// Thread reading it.
     receiver: Option<Receiver<DbResult<Vec<String>>>>,
 }
 
-/// Peticiones de la sesión que solo puede resolver la app.
+/// Session requests that only the app can resolve.
 #[derive(Default)]
 pub struct SessionOutcome {
-    /// El usuario confirmó cerrar esta pestaña pese a los cambios pendientes.
+    /// The user confirmed closing this tab despite the pending changes.
     pub close: bool,
-    /// Se eliminó el perfil con este índice: las demás sesiones deben
-    /// reajustar su selected_profile_idx.
+    /// The profile with this index was deleted: the other sessions must
+    /// adjust their selected_profile_idx.
     pub profile_removed: Option<usize>,
 }
 
-// ── Sesión ───────────────────────────────────────────────────────────────────
+// ── Session ──────────────────────────────────────────────────────────────────
 
-/// Una pestaña de conexión: el formulario o un servidor conectado con su
-/// árbol, tabla abierta, pestañas SQL, log y modal propios.
+/// A connection tab: the form or a connected server with its own tree,
+/// open table, SQL tabs, log and modal.
 pub struct Session {
-    /// Identificador único: separa el estado de los widgets egui entre sesiones.
+    /// Unique identifier: keeps egui widget state apart between sessions.
     pub id: u64,
     pub state: ConnState,
     pub params: ConnectionParams,
     pub port_str: String,
     pub error_message: Option<String>,
-    /// Nombre de la pestaña y de la raíz del árbol (perfil u host), fijado al conectar.
+    /// Name of the tab and of the tree root (profile or host), set when connecting.
     pub title: String,
     pub color: Option<ConnColor>,
 
@@ -175,24 +175,24 @@ pub struct Session {
     pub query_log: std::collections::VecDeque<LogEntry>,
     pub show_only_fav: bool,
 
-    // Pestañas
+    // Tabs
     pub active_tab: ActiveTab,
     pub sql_tabs: Vec<SqlTab>,
-    /// Pestaña SQL que se está renombrando en la barra, si hay alguna.
+    /// SQL tab being renamed in the bar, if any.
     pub sql_tab_rename: Option<TabRename>,
 
-    // Formulario de conexión / perfiles
+    // Connection form / profiles
     pub selected_profile_idx: Option<usize>,
     pub profile_name: String,
     pub save_password: bool,
     pub db_picker: DbPicker,
-    /// Trabajos contra la BD en segundo plano.
+    /// Database jobs in the background.
     jobs: Jobs,
-    /// Escrituras lanzadas y aún sin resultado.
+    /// Writes started and still without a result.
     writes_in_flight: usize,
-    /// Ejecuciones del editor SQL lanzadas: identifican su pestaña.
+    /// SQL editor runs started: they identify their tab.
     editor_runs: u64,
-    /// Contraseñas que un hilo terminó de guardar en el llavero: (id del perfil, resultado).
+    /// Passwords a thread finished saving in the keyring: (profile id, result).
     keyring_tx: mpsc::Sender<(String, Result<(), String>)>,
     keyring_rx: Receiver<(String, Result<(), String>)>,
 }
@@ -230,7 +230,7 @@ impl Session {
         }
     }
 
-    /// Texto de la pestaña de conexión.
+    /// Text of the connection tab.
     pub fn tab_title(&self) -> &str {
         match self.state {
             ConnState::Disconnected => "Nueva conexión",
@@ -238,15 +238,15 @@ impl Session {
         }
     }
 
-    /// Conectando o cargando la tabla.
+    /// Connecting or loading the table.
     pub fn is_busy(&self) -> bool {
         matches!(self.state, ConnState::Connecting { .. })
             || self.table_view.query_loading
             || self.writes_in_flight > 0
     }
 
-    /// Motor de la conexión (o del formulario): en su dialecto se escribe
-    /// el SQL que compone la sesión.
+    /// Engine of the connection (or of the form): the SQL the session builds
+    /// is written in its dialect.
     pub fn engine(&self) -> Engine {
         self.params.engine
     }
@@ -255,8 +255,8 @@ impl Session {
         matches!(self.state, ConnState::Connected(_))
     }
 
-    /// Servidor, BBDD activa y seguridad de la conexión, para la barra de
-    /// estado.
+    /// Server, active database and connection security, for the status
+    /// bar.
     pub fn status(&self) -> ConnectionStatus {
         let (host, security) = match &self.state {
             ConnState::Connected(backend) => (
@@ -273,7 +273,7 @@ impl Session {
         }
     }
 
-    /// Antes de cerrar la pestaña: cancela la exportación en marcha, si la hay.
+    /// Before closing the tab: cancels the running export, if any.
     pub fn shutdown(&self) {
         if let ModalState::ExportData {
             phase: ExportPhase::Running(running),
@@ -284,9 +284,9 @@ impl Session {
         }
     }
 
-    /// Vuelve al formulario. La query en curso, si la hay, se descarta: su
-    /// resultado ya no corresponde a nada que se esté mostrando. Las del
-    /// editor se cancelan también en el servidor, que si no las terminaría.
+    /// Goes back to the form. The running query, if any, is discarded: its
+    /// result no longer matches anything being shown. Editor ones are also
+    /// cancelled on the server, which would otherwise finish them.
     fn disconnect(&mut self) {
         for idx in 0..self.sql_tabs.len() {
             self.cancel_editor(idx);
@@ -301,10 +301,10 @@ impl Session {
     }
 }
 
-// ── Métodos auxiliares ────────────────────────────────────────────────────────
+// ── Helper methods ────────────────────────────────────────────────────────────
 
 impl Session {
-    /// Lanza un trabajo en segundo plano; false si no hay conexión.
+    /// Runs a job in the background; false if there is no connection.
     fn spawn_job(
         &mut self,
         job: impl FnOnce(&dyn DbBackend) -> JobResult + Send + 'static,
@@ -316,8 +316,8 @@ impl Session {
         true
     }
 
-    /// Ejecuta SQL del editor en segundo plano; el resultado irá a la pestaña
-    /// `tab_idx` (aunque cambie de posición entretanto).
+    /// Runs editor SQL in the background; the result will go to tab
+    /// `tab_idx` (even if its position changes meanwhile).
     fn run_editor(&mut self, tab_idx: usize, sql: String, db_context: String, max_rows: usize) {
         self.editor_runs += 1;
         let token = self.editor_runs;
@@ -340,13 +340,13 @@ impl Session {
         }
     }
 
-    /// Cancela la consulta que está ejecutando la pestaña `tab_idx`, si hay
-    /// alguna. Su resultado llegará como error `QUERY_CANCELLED`.
+    /// Cancels the query tab `tab_idx` is running, if any. Its result will
+    /// arrive as a `QUERY_CANCELLED` error.
     fn cancel_editor(&mut self, tab_idx: usize) {
         let Some(cancel) = self.sql_tabs.get(tab_idx).and_then(|t| t.cancel.clone()) else {
             return;
         };
-        // Ya pedido: una vez basta
+        // Already requested: once is enough
         if cancel.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -364,20 +364,20 @@ impl Session {
             Ok(data) => self.push_log(LogEntry::ok(sql, elapsed_ms, data.rows.len())),
             Err(e) => self.push_log(LogEntry::err(sql, elapsed_ms, e.as_str())),
         }
-        // La pestaña puede haberse cerrado mientras tanto
+        // The tab may have been closed meanwhile
         if let Some(tab) = self.sql_tabs.iter_mut().find(|t| t.running == Some(token)) {
             tab.running = None;
             tab.cancel = None;
             tab.result = Some(result);
             tab.result_run = token;
             tab.elapsed_ms = Some(elapsed_ms);
-            // El cursor y la selección eran del resultado anterior
+            // The cursor and the selection belonged to the previous result
             tab.selection = Default::default();
         }
     }
 
-    /// Carga los datos de una tabla de `db` en segundo plano. Sustituye a la
-    /// consulta en curso, si la hay.
+    /// Loads the data of a table of `db` in the background. Replaces the
+    /// running query, if any.
     fn run_query_async(&mut self, db: &str, sql: String) {
         if !self.is_connected() {
             return;
@@ -428,8 +428,8 @@ impl Session {
             format!(" ORDER BY {}", parts.join(", "))
         };
 
-        // Una fila de más: si llega, es que hay otra página (apply_table_data
-        // la quita antes de mostrar los datos)
+        // One extra row: if it arrives, there is another page (apply_table_data
+        // removes it before showing the data)
         let tv = &self.table_view;
         let mut limit = format!(" LIMIT {}", tv.page_size + 1);
         if tv.page > 0 {
@@ -443,9 +443,9 @@ impl Session {
         }
     }
 
-    /// Pide al servidor la página actual de la tabla, con su filtro y su
-    /// ordenación. El tamaño de página es el límite de los ajustes; si ha
-    /// cambiado, las páginas ya no son las mismas y se vuelve a la primera.
+    /// Asks the server for the current page of the table, with its filter and
+    /// sorting. The page size is the settings limit; if it has changed, the
+    /// pages are no longer the same and it goes back to the first one.
     fn load_table(&mut self, sh: &Shared, db: &str, table: &str) {
         let page_size = sh.settings.query_limit.max(1);
         if self.table_view.page_size != page_size {
@@ -456,18 +456,18 @@ impl Session {
         self.run_query_async(db, sql);
     }
 
-    /// Tras escribir en `db` (crear, clonar, vaciar…): descarta sus cachés de
-    /// esquema para que se vuelvan a leer. No toca la tabla abierta.
+    /// After writing to `db` (create, clone, empty…): discards its schema
+    /// caches so they are read again. Does not touch the open table.
     fn invalidate_schema(&mut self, db: &str) {
         self.schema.databases_info = Loadable::NotLoaded;
-        // Recargar lista de bases de datos del sidebar
+        // Reload the sidebar's database list
         self.schema.databases = Loadable::NotLoaded;
         self.schema.tables_cache.remove(db);
         self.schema.tables_info.remove(db);
     }
 
-    /// Tras borrar `db` o, con `table`, solo esa tabla: además de invalidar
-    /// las cachés, cierra lo borrado si estaba abierto.
+    /// After dropping `db` or, with `table`, only that table: besides
+    /// invalidating the caches, closes what was dropped if it was open.
     fn on_dropped(&mut self, db: &str, table: Option<&str>) {
         self.invalidate_schema(db);
         let (open_db, open_table) = match &self.schema.selected_node {
@@ -487,7 +487,7 @@ impl Session {
         if !closes_view {
             return;
         }
-        // Las pestañas SQL no dependen de la selección: se quedan donde están.
+        // SQL tabs do not depend on the selection: they stay where they are.
         if table.is_some() {
             self.schema.selected_node = Some(SelectedNode::Database(db.to_string()));
             if matches!(self.active_tab, ActiveTab::Datos | ActiveTab::Tabla) {
@@ -502,8 +502,8 @@ impl Session {
         self.table_view.reset();
     }
 
-    /// Tras vaciar tablas de `db`: si la abierta es una de ellas, sus cambios
-    /// pendientes ya no tienen filas a las que aplicarse; se recarga vacía.
+    /// After emptying tables of `db`: if the open one is among them, its
+    /// pending changes no longer have rows to apply to; it is reloaded empty.
     fn after_truncate(&mut self, sh: &mut Shared, db: &str, tables: &[String]) {
         self.invalidate_schema(db);
         if let Some(SelectedNode::Table { db: d, table: t }) = &self.schema.selected_node
@@ -515,9 +515,9 @@ impl Session {
         }
     }
 
-    /// Sentencias de los cambios pendientes: DELETE, UPDATE (uno por fila,
-    /// con todas sus celdas editadas) e INSERT, con los valores como
-    /// parámetros. Las filas existentes se identifican por su clave primaria.
+    /// Statements for the pending changes: DELETE, UPDATE (one per row, with
+    /// all its edited cells) and INSERT, with the values as parameters.
+    /// Existing rows are identified by their primary key.
     fn pending_statements(&self) -> Result<Vec<Statement>, String> {
         let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node else {
             return Err("No hay ninguna tabla abierta.".into());
@@ -537,7 +537,7 @@ impl Session {
                 "La tabla no tiene clave primaria: no se pueden editar ni eliminar filas.".into(),
             );
         }
-        // Condición que identifica la fila, con su clave como parámetros
+        // Condition identifying the row, with its key as parameters
         let row_key = |row_idx: usize, params: &mut ParamList| {
             pk_condition(data, &tv.primary_keys, row_idx, engine, params)
                 .ok_or_else(|| format!("No se encuentra la clave primaria de la fila {row_idx}."))
@@ -554,8 +554,8 @@ impl Session {
             });
         }
 
-        // Un UPDATE por fila: si se edita la clave primaria, el WHERE (que ve
-        // la fila original) sigue encontrando la fila para el resto de celdas.
+        // One UPDATE per row: if the primary key is edited, the WHERE (which
+        // sees the original row) still finds the row for the rest of the cells.
         let mut edits_by_row: std::collections::BTreeMap<usize, Vec<&PendingEdit>> =
             Default::default();
         for edit in &tv.pending_edits {
@@ -580,8 +580,8 @@ impl Session {
             });
         }
 
-        // Las columnas en DEFAULT se omiten para que el servidor ponga su
-        // valor por defecto; si son todas, la fila entera va por defecto.
+        // Columns set to DEFAULT are left out so the server sets its default
+        // value; if they all are, the whole row goes as default.
         for ins in &tv.pending_inserts {
             let (cols, params): (Vec<String>, Vec<Option<String>>) = data
                 .columns
@@ -605,9 +605,9 @@ impl Session {
         Ok(stmts)
     }
 
-    /// Fila nueva para el grid: vacía (todo DEFAULT, que el servidor
-    /// completa) o copia de `source_row`. Las columnas a las que el servidor
-    /// da valor (AUTO_INCREMENT, serial…), siempre DEFAULT.
+    /// New row for the grid: empty (all DEFAULT, which the server fills in)
+    /// or a copy of `source_row`. Columns the server gives a value to
+    /// (AUTO_INCREMENT, serial…) are always DEFAULT.
     fn new_insert_row(&self, source_row: Option<usize>) -> Option<PendingInsert> {
         let data = self.table_view.table_data.as_ref()?;
         if data.columns.is_empty() {
@@ -633,8 +633,8 @@ impl Session {
         Some(PendingInsert { values, auto_cols })
     }
 
-    /// Registra el valor nuevo de una celda (`None` = NULL). En una fila
-    /// existente, volver al valor original quita el cambio pendiente.
+    /// Records the new value of a cell (`None` = NULL). In an existing row,
+    /// going back to the original value removes the pending change.
     fn record_edit(&mut self, row: RowRef, col_idx: usize, value: Option<String>) {
         let tv = &mut self.table_view;
         match row {
@@ -669,7 +669,7 @@ impl Session {
         }
     }
 
-    /// Persiste el sort+filtro+historial de la tabla actualmente seleccionada.
+    /// Persists the sort+filter+history of the currently selected table.
     fn save_table_state(&mut self, sh: &mut Shared) {
         if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node.clone() {
             let mut ts = table_state::get(&sh.table_states, db, table);
@@ -681,7 +681,7 @@ impl Session {
         }
     }
 
-    /// Total de cambios pendientes (edits + deletes + inserts) en la tabla actual.
+    /// Total pending changes (edits + deletes + inserts) in the current table.
     pub fn pending_count(&self) -> usize {
         self.table_view.pending_edits.len()
             + self.table_view.pending_deletes.len()
@@ -695,14 +695,14 @@ impl Session {
         self.table_view.editing_cell = None;
     }
 
-    /// Recarga la tabla abierta. Si hay cambios pendientes pregunta antes qué
-    /// hacer con ellos: van por posición de fila y con los datos nuevos
-    /// apuntarían a otras filas.
+    /// Reloads the open table. If there are pending changes, first asks what
+    /// to do with them: they go by row position and with the new data they
+    /// would point to other rows.
     fn request_reload(&mut self, sh: &mut Shared, reload: Reload) {
         let Some(SelectedNode::Table { table, .. }) = &self.schema.selected_node else {
             return;
         };
-        // Al terminar de guardar ya se recarga
+        // Once saving finishes it already reloads
         if self.table_view.saving {
             return;
         }
@@ -722,11 +722,11 @@ impl Session {
         let Some(SelectedNode::Table { db, table }) = self.schema.selected_node.clone() else {
             return;
         };
-        // La celda en edición también va por posición.
+        // The cell being edited also goes by position.
         self.table_view.editing_cell = None;
         match reload {
-            // Con otra ordenación u otro filtro las páginas son otras: se
-            // vuelve a la primera
+            // With another sort order or filter the pages are different: it
+            // goes back to the first
             Reload::Sort(specs) => {
                 self.table_view.sort_specs = specs;
                 self.table_view.page = 0;
@@ -750,8 +750,8 @@ impl Session {
                 self.save_table_state(sh);
             }
             Reload::Refresh => {
-                // Releer también la estructura: el grid la usa para las
-                // claves, los NULL y el AUTO_INCREMENT de las filas nuevas.
+                // Read the structure again too: the grid uses it for the keys,
+                // the NULLs and the AUTO_INCREMENT of new rows.
                 self.schema
                     .columns_info
                     .remove(&(db.clone(), table.clone()));
@@ -765,10 +765,10 @@ impl Session {
         self.table_view.selection.clear();
     }
 
-    /// Abre una tabla en la pestaña indicada. Si hay cambios pendientes en la
-    /// tabla actual, pide confirmación antes de cambiar.
+    /// Opens a table in the given tab. If the current table has pending
+    /// changes, asks for confirmation before switching.
     fn switch_to_table(&mut self, sh: &mut Shared, db: String, table: String, tab: ActiveTab) {
-        // Los cambios que se están guardando son de la tabla abierta
+        // The changes being saved belong to the open table
         if self.table_view.saving {
             return;
         }
@@ -795,41 +795,41 @@ impl Session {
         }
     }
 
-    /// Cambia la tabla seleccionada: guarda el estado actual, restaura el
-    /// de la nueva tabla, ejecuta la query con el filtro guardado y reaplica
-    /// la ordenación guardada.
+    /// Changes the selected table: saves the current state, restores that of
+    /// the new table, runs the query with the saved filter and reapplies the
+    /// saved sort order.
     fn on_table_selected(&mut self, sh: &mut Shared, db: String, table: String) {
-        // 1. Guardar estado de la tabla anterior (sort, filtro, historial) y
-        //    vaciar la vista: hasta que lleguen los datos nuevos no se ven los
-        //    de la anterior
+        // 1. Save the previous table's state (sort, filter, history) and
+        //    empty the view: until the new data arrives, the old data is
+        //    not shown
         self.save_table_state(sh);
         self.table_view.reset();
 
-        // 2. Cargar estado de la nueva tabla
+        // 2. Load the new table's state
         let ts = table_state::get(&sh.table_states, &db, &table);
         self.table_view.filter_text = ts.filter_text.clone();
         self.table_view.filter_history = ts.filter_history.clone();
 
-        // 3. Actualizar selección
+        // 3. Update the selection
         self.schema.selected_node = Some(SelectedNode::Table {
             db: db.clone(),
             table: table.clone(),
         });
 
-        // 4. Restaurar sort ANTES de build_sql para que el ORDER BY quede en la query
+        // 4. Restore the sort BEFORE build_sql so the ORDER BY ends up in the query
         self.table_view.sort_specs = ts.sort_specs.clone();
 
-        // 5. Estructura (columnas y claves primarias): de la caché o del servidor
+        // 5. Structure (columns and primary keys): from the cache or the server
         self.request_structure(&db, &table);
         self.sync_primary_keys();
 
-        // 6. Ejecutar query (server-side sort + filter restaurados)
+        // 6. Run the query (server-side sort + filter restored)
         self.load_table(sh, &db, &table);
     }
 
-    /// Guarda el texto de las pestañas SQL de esta conexión. Sin conexión no
-    /// hace nada: las pestañas se guardan bajo la clave de la conexión, y en
-    /// el formulario esa clave es la de unos parámetros a medio escribir.
+    /// Saves the text of this connection's SQL tabs. Without a connection it
+    /// does nothing: tabs are saved under the connection's key, and in the
+    /// form that key belongs to half-typed parameters.
     pub fn save_tabs_state(&self, sh: &mut Shared) {
         if !self.is_connected() {
             return;
@@ -847,8 +847,8 @@ impl Session {
         self.active_tab = ActiveTab::default();
         self.table_view.reset();
         self.modal = ModalState::None;
-        // Restaurar las pestañas SQL de esta conexión. Las guardadas antes de
-        // haber conexiones múltiples las hereda la primera que no tenga propias.
+        // Restore this connection's SQL tabs. Those saved before multiple
+        // connections existed are inherited by the first one without its own.
         let key = self.params.key();
         let (saved, migrated) = match sh.settings.sql_tabs_by_conn.get(&key) {
             Some(tabs) => (tabs.clone(), false),
@@ -870,9 +870,9 @@ impl Session {
     }
 }
 
-/// Condición `WHERE` que identifica la fila `row_idx` por su clave primaria;
-/// sus valores se añaden a `params`. `None` si falta la fila o alguna columna
-/// de la clave: una condición parcial podría afectar a varias filas.
+/// `WHERE` condition identifying row `row_idx` by its primary key; its
+/// values are added to `params`. `None` if the row or a key column is
+/// missing: a partial condition could affect several rows.
 fn pk_condition(
     data: &QueryResult,
     primary_keys: &[String],
@@ -881,7 +881,7 @@ fn pk_condition(
     params: &mut ParamList,
 ) -> Option<String> {
     let row = data.rows.get(row_idx)?;
-    // Antes de añadir ningún parámetro: con la clave a medias no se añade
+    // Before adding any parameter: with half a key, nothing is added
     let mut key = Vec::new();
     for pk in primary_keys {
         let col_idx = data.columns.iter().position(|c| c == pk)?;
@@ -894,10 +894,10 @@ fn pk_condition(
     Some(parts.join(" AND "))
 }
 
-// ── Loop principal ────────────────────────────────────────────────────────────
+// ── Main loop ─────────────────────────────────────────────────────────────────
 
 impl Session {
-    /// Sondea el canal del hilo de conexión y actualiza el estado si terminó.
+    /// Polls the connection thread's channel and updates the state if it finished.
     fn poll_connection(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         let mut connect_result: Option<Result<Arc<dyn DbBackend>, String>> = None;
         if let ConnState::Connecting {
@@ -937,8 +937,7 @@ impl Session {
         }
     }
 
-    /// Aplica los resultados de los trabajos en segundo plano que hayan
-    /// terminado.
+    /// Applies the results of the background jobs that have finished.
     fn poll_jobs(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         while let Some(result) = self.jobs.try_recv(ctx) {
             self.apply_job(sh, result);
@@ -975,7 +974,7 @@ impl Session {
                     .error(format!("No se pudo leer la definición de «{view}»: {e}"));
             }
             JobResult::EditorCancel(Ok(())) => {}
-            // La consulta sigue en marcha: que conste por qué
+            // The query is still running: record why
             JobResult::EditorCancel(Err(e)) => {
                 sh.toasts
                     .error(format!("No se pudo cancelar la consulta: {e}"));
@@ -991,23 +990,23 @@ impl Session {
         elapsed_ms: u64,
         result: DbResult<QueryResult>,
     ) {
-        // Otra consulta posterior ya la ha sustituido
+        // A later query has already replaced it
         if generation != self.table_view.data_generation {
             return;
         }
         self.table_view.query_loading = false;
         match result {
             Ok(mut data) => {
-                // La fila de más solo dice que hay otra página
+                // The extra row only says there is another page
                 let page_size = self.table_view.page_size;
                 self.table_view.has_more = page_size > 0 && data.rows.len() > page_size;
                 if self.table_view.has_more {
                     data.rows.truncate(page_size);
                 }
-                // Toda recarga pasa por request_reload, que antes resuelve
-                // los cambios pendientes. Si alguna se lo salta, mejor
-                // perderlos que aplicarlos a las filas que ahora ocupan
-                // esas posiciones.
+                // Every reload goes through request_reload, which resolves
+                // the pending changes first. If one skips it, better to lose
+                // them than to apply them to the rows now in those
+                // positions.
                 if self.pending_count() > 0 {
                     log::warn!("Datos recargados con cambios pendientes: se descartan");
                     self.discard_pending();
@@ -1025,9 +1024,9 @@ impl Session {
         }
     }
 
-    /// Consume eventos del hilo de exportación y actualiza el estado del modal.
-    /// Los errores también se registran en el log de consultas para que quede
-    /// constancia después de cerrar el modal.
+    /// Consumes events from the export thread and updates the modal's state.
+    /// Errors are also recorded in the query log so there is a trace after
+    /// the modal is closed.
     fn poll_export_progress(&mut self, ctx: &egui::Context) {
         let mut new_phase: Option<ExportPhase> = None;
         let mut log_entries: Vec<LogEntry> = Vec::new();
@@ -1053,7 +1052,7 @@ impl Session {
                         }
                         running.done_count += 1;
                     }
-                    // Las filas se van contando según llegan sus bloques
+                    // Rows are counted as their batches arrive
                     Ok(ExportEvent::RowsCopied(rows)) => running.rows_done += rows,
                     Ok(ExportEvent::TableError { table, error }) => {
                         log_entries.push(LogEntry::err(
@@ -1117,11 +1116,11 @@ impl Session {
         }
     }
 
-    /// Abre el diálogo de exportación de `db`; con `table`, solo esa sale
-    /// marcada. Si las tablas aún no están cargadas, se piden y la lista se
-    /// rellena al llegar.
+    /// Opens the export dialog for `db`; with `table`, only that one comes
+    /// checked. If the tables are not loaded yet, they are requested and the
+    /// list is filled in when they arrive.
     fn open_export(&mut self, sh: &Shared, db: String, table: Option<String>) {
-        // Los servidores de destino son los del mismo motor
+        // The destination servers are those of the same engine
         let profiles = sh
             .profiles
             .iter()
@@ -1146,8 +1145,8 @@ impl Session {
         self.fill_export_tables(&db);
     }
 
-    /// Rellena la lista de tablas del diálogo de exportación de `db`, si está
-    /// abierto y esperándolas.
+    /// Fills in the table list of the export dialog for `db`, if it is open
+    /// and waiting for them.
     pub(super) fn fill_export_tables(&mut self, db: &str) {
         let ModalState::ExportData {
             source_db,
@@ -1183,11 +1182,11 @@ impl Session {
     }
 }
 
-// ── Frame de la sesión ────────────────────────────────────────────────────────
+// ── Session frame ─────────────────────────────────────────────────────────────
 
 impl Session {
-    /// Sondea los hilos de fondo (conexión, query, exportación). La app lo
-    /// llama en todas las sesiones, no solo en la visible.
+    /// Polls the background threads (connection, query, export). The app
+    /// calls it on every session, not just the visible one.
     pub fn poll(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         self.poll_connection(ctx, sh);
         self.poll_jobs(ctx, sh);
@@ -1196,7 +1195,7 @@ impl Session {
         self.poll_db_picker();
     }
 
-    /// Recoge la lista de BBDD pedida desde el formulario de conexión.
+    /// Collects the database list requested from the connection form.
     fn poll_db_picker(&mut self) {
         let Some(rx) = &self.db_picker.receiver else {
             return;
@@ -1215,7 +1214,7 @@ impl Session {
         };
     }
 
-    /// Marca los perfiles cuya contraseña ya está guardada en el llavero.
+    /// Flags the profiles whose password is already saved in the keyring.
     fn poll_keyring(&mut self, sh: &mut Shared) {
         while let Ok((id, result)) = self.keyring_rx.try_recv() {
             match result {
@@ -1227,7 +1226,7 @@ impl Session {
                     }
                 }
                 Err(e) => {
-                    // En el formulario y, por si ya no se está en él, en un aviso
+                    // In the form and, in case it is no longer open, in a notification
                     let message = format!("No se guardó la contraseña en el llavero: {e}");
                     sh.toasts.error(message.clone());
                     self.error_message = Some(message);
@@ -1236,9 +1235,9 @@ impl Session {
         }
     }
 
-    /// Dibuja la sesión y aplica las acciones del frame. Los paneles globales
-    /// (pestañas de conexión, barra de estado, log y ajustes) ya los ha
-    /// colocado la app.
+    /// Draws the session and applies the frame's actions. The global panels
+    /// (connection tabs, status bar, log and settings) have already been
+    /// laid out by the app.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -1250,8 +1249,8 @@ impl Session {
         if self.is_connected() {
             self.request_tab_data();
         }
-        // Con un diálogo abierto, el ratón no llega a lo de detrás (lo
-        // bloquea el propio diálogo), pero el teclado sí: se ignora.
+        // With a dialog open, the mouse does not reach what is behind it (the
+        // dialog blocks it), but the keyboard does: it is ignored.
         let dialog_open = !matches!(self.modal, ModalState::None);
         let keys = if dialog_open {
             FrameKeys::default()
@@ -1262,7 +1261,7 @@ impl Session {
         if dialog_open {
             signals = signals.data_requests_only();
         }
-        // ── Modal (sobre todo) ────────────────────────────────────────────
+        // ── Modal (on top of everything) ──────────────────────────────────
         let modal_action = modals_ui::show(
             ctx,
             &mut self.modal,
@@ -1280,7 +1279,7 @@ impl Session {
         let close = matches!(modal_action, ModalAction::CloseSession);
         let delete_confirmed = matches!(modal_action, ModalAction::DeleteProfile);
         self.handle_modal_action(modal_action, sh);
-        // Eliminar un favorito pide confirmación antes
+        // Deleting a favourite asks for confirmation first
         if delete && let Some(profile) = self.selected_profile_idx.and_then(|i| sh.profiles.get(i))
         {
             self.modal = ModalState::ConfirmDeleteProfile {

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{ConnectionParams, Engine, TlsMode};
 
-/// Color identificativo de una conexión: tiñe su pestaña y su árbol del sidebar.
-/// Los presets se resuelven en theme.rs con variante clara/oscura.
+/// Identifying colour of a connection: tints its tab and its sidebar tree.
+/// The presets are resolved in theme.rs with light/dark variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnColor {
     Blue,
@@ -14,7 +14,7 @@ pub enum ConnColor {
     Red,
     Pink,
     Purple,
-    /// sRGB elegido con el selector libre (igual en ambos temas).
+    /// sRGB picked with the free picker (the same in both themes).
     Custom([u8; 3]),
 }
 
@@ -47,34 +47,34 @@ impl ConnColor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionProfile {
-    /// Identificador estable: clave de la contraseña en el llavero (el nombre
-    /// puede cambiar). Los perfiles de versiones anteriores lo reciben al cargar.
+    /// Stable identifier: key of the password in the keyring (the name may
+    /// change). Profiles from earlier versions get one when loaded.
     #[serde(default)]
     pub id: String,
     pub name: String,
-    /// Motor del servidor. Los perfiles anteriores a PostgreSQL son de MySQL.
+    /// Server engine. Profiles from before PostgreSQL are MySQL ones.
     #[serde(default)]
     pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub user: String,
-    /// Base de datos a la que se limita la conexión; vacía = todas.
+    /// Database the connection is limited to; empty = all of them.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub database: String,
-    /// Seguridad de la conexión; por defecto, cifrar si se puede.
+    /// Connection security; by default, encrypt if possible.
     #[serde(default, skip_serializing_if = "is_default")]
     pub tls: TlsMode,
-    /// Fichero de CA para verificar al servidor; vacío = autoridades públicas.
+    /// CA file to verify the server with; empty = public authorities.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tls_ca: String,
-    /// La contraseña está en el llavero del sistema, bajo `id`.
+    /// The password is in the system keyring, under `id`.
     #[serde(default)]
     pub password_in_keyring: bool,
-    /// Contraseña en claro de versiones anteriores. Al arrancar se pasa al
-    /// llavero; solo se conserva si no hay llavero disponible.
+    /// Plain-text password from earlier versions. On startup it is moved to
+    /// the keyring; it is only kept if no keyring is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// None = sin color (pestaña y sidebar neutros)
+    /// None = no colour (neutral tab and sidebar)
     #[serde(default)]
     pub color: Option<ConnColor>,
 }
@@ -98,7 +98,7 @@ impl ConnectionProfile {
         }
     }
 
-    /// A dónde conecta, en una línea: «PostgreSQL · app@db:5432 · tienda».
+    /// Where it connects to, in one line: "PostgreSQL · app@db:5432 · shop".
     pub fn summary(&self) -> String {
         let mut text = format!(
             "{} · {}@{}:{}",
@@ -118,18 +118,18 @@ impl ConnectionProfile {
         text
     }
 
-    /// Tiene contraseña guardada, en el llavero o (heredada) en claro.
+    /// Has a saved password, in the keyring or (inherited) in plain text.
     pub fn has_password(&self) -> bool {
         self.password_in_keyring || self.password.is_some()
     }
 
-    /// Nombre de su entrada en el llavero (el que muestran Seahorse o KWallet).
+    /// Name of its keyring entry (the one Seahorse or KWallet shows).
     pub fn keyring_label(&self) -> String {
         format!("RustQL — {}", self.name)
     }
 }
 
-/// Identificador nuevo para un perfil (aleatorio).
+/// New identifier for a profile (random).
 pub fn new_id() -> String {
     use std::hash::{BuildHasher, RandomState};
     format!(
@@ -138,8 +138,8 @@ pub fn new_id() -> String {
     )
 }
 
-/// Contraseñas en claro de versiones anteriores, para pasarlas al llavero:
-/// (id, etiqueta, contraseña).
+/// Plain-text passwords from earlier versions, to move them to the keyring:
+/// (id, label, password).
 pub fn legacy_passwords(profiles: &[ConnectionProfile]) -> Vec<(String, String, String)> {
     profiles
         .iter()
@@ -160,8 +160,8 @@ pub fn load() -> Vec<ConnectionProfile> {
     profiles
 }
 
-/// Completa los perfiles de versiones anteriores: les da `id` y descarta la
-/// contraseña vacía (equivale a no tenerla). Devuelve si cambió alguno.
+/// Completes profiles from earlier versions: gives them an `id` and drops
+/// an empty password (the same as having none). Returns whether any changed.
 fn normalize(profiles: &mut [ConnectionProfile]) -> bool {
     let mut changed = false;
     for p in profiles {
@@ -177,8 +177,8 @@ fn normalize(profiles: &mut [ConnectionProfile]) -> bool {
     changed
 }
 
-/// Legible solo por el usuario: puede contener contraseñas heredadas en
-/// claro (sin llavero disponible).
+/// Readable only by the user: it may contain inherited plain-text
+/// passwords (when no keyring is available).
 pub fn save(profiles: &[ConnectionProfile]) {
     crate::config_file::save(PROFILES_FILE, &profiles, true);
 }
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn perfil_sin_color_carga_como_none() {
-        // connections.json anterior a los colores de conexión
+        // connections.json from before connection colours
         let json =
             r#"[{"name":"Local","host":"127.0.0.1","port":3306,"user":"root","password":null}]"#;
         let profiles: Vec<ConnectionProfile> = serde_json::from_str(json).unwrap();
@@ -210,7 +210,7 @@ mod tests {
         assert!(profiles.iter().all(|p| p.id.len() == 16));
         assert_ne!(profiles[0].id, profiles[1].id);
         assert_ne!(profiles[1].id, profiles[2].id);
-        // la vacía equivale a no tener contraseña
+        // an empty one is the same as having no password
         assert_eq!(profiles[1].password, None);
         assert!(!profiles[1].has_password());
 
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn la_base_de_datos_del_perfil_es_opcional() {
-        // Los perfiles anteriores no la tienen: ven todo el servidor
+        // Older profiles do not have it: they see the whole server
         let json = r#"[{"name":"Local","host":"127.0.0.1","port":3306,"user":"root"}]"#;
         let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(json).unwrap();
         assert_eq!(profiles[0].to_params().only_database(), None);

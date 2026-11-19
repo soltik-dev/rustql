@@ -7,27 +7,27 @@ use crate::secrets;
 use crate::ui::icons::DATABASE;
 use crate::ui::theme;
 
-/// Cómo guardar el formulario como favorito.
+/// How to save the form as a favourite.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SaveProfile {
-    /// Sobre el favorito seleccionado (o uno nuevo si no hay ninguno).
+    /// Over the selected favourite (or a new one if none is selected).
     Update,
-    /// Como otro favorito, dejando intacto el seleccionado.
+    /// As another favourite, leaving the selected one untouched.
     AsNew,
 }
 
-/// Resultado de la interacción con el formulario de conexión.
+/// Result of the interaction with the connection form.
 #[derive(Default)]
 pub struct FormResult {
     pub connect: bool,
     pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
-    /// Se abrió la lista de BBDD: hay que leerla del servidor.
+    /// The database list was opened: it has to be read from the server.
     pub load_databases: bool,
 }
 
-/// Panel izquierdo: lista de favoritos guardados.
-/// Retorna (índice del perfil seleccionado, true si fue doble-click para conectar).
+/// Left panel: list of saved favourites.
+/// Returns (index of the selected profile, true if it was a double click to connect).
 pub fn show_favorites(
     ui: &mut egui::Ui,
     profiles: &[ConnectionProfile],
@@ -71,7 +71,7 @@ pub fn show_favorites(
     (clicked, connect_now)
 }
 
-/// Punto con el color del perfil; anillo apagado si no tiene color.
+/// Dot in the profile's colour; a dimmed ring if it has none.
 fn color_dot(ui: &mut egui::Ui, color: Option<ConnColor>) {
     let p = theme::get(ui);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
@@ -86,7 +86,7 @@ fn color_dot(ui: &mut egui::Ui, color: Option<ConnColor>) {
     }
 }
 
-/// Lo que enseña y edita el formulario de conexión.
+/// What the connection form shows and edits.
 pub struct FormView<'a> {
     pub params: &'a mut ConnectionParams,
     pub port_str: &'a mut String,
@@ -95,17 +95,17 @@ pub struct FormView<'a> {
     pub save_password: &'a mut bool,
     pub color: &'a mut Option<ConnColor>,
     pub selected_idx: Option<usize>,
-    /// BBDD del servidor, leídas al pulsar el botón de elegir.
+    /// Databases of the server, read when the pick button is pressed.
     pub databases: &'a Loadable<Vec<String>>,
 }
 
-/// Panel derecho: formulario de conexión + botones de gestión.
+/// Right panel: connection form + management buttons.
 pub fn show_form(ui: &mut egui::Ui, view: FormView<'_>) -> FormResult {
     let mut result = FormResult::default();
     let p = theme::get(ui);
 
-    // Con scroll: en una ventana baja, o con el error de conexión a la vista,
-    // el formulario no cabe entero
+    // With scrolling: in a short window, or with the connection error in
+    // view, the form does not fit entirely
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -160,7 +160,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
             });
             ui.end_row();
 
-            // Enter en cualquiera de los campos de la conexión conecta
+            // Enter in any of the connection fields connects
             let mut connect = false;
             let mut field_width = FIELD_WIDTH;
             let mut field = |ui: &mut egui::Ui, edit: egui::TextEdit<'_>| {
@@ -197,7 +197,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
             );
             ui.end_row();
 
-            // El campo y su botón de elegir ocupan lo que los demás campos
+            // The field and its pick button take up what the other fields do
             ui.label("Base de datos:");
             let row = egui::vec2(field_width, ui.spacing().interact_size.y);
             let layout = egui::Layout::right_to_left(egui::Align::Center);
@@ -228,7 +228,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
                 .on_hover_text(params.tls.description());
             ui.end_row();
 
-            // Solo al verificar: la autoridad que firma el certificado
+            // Only when verifying: the authority that signs the certificate
             if params.tls == TlsMode::Verify {
                 ui.label("Fichero de CA:");
                 ui.allocate_ui_with_layout(row, layout, |ui| {
@@ -283,7 +283,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
     ui.separator();
     ui.add_space(8.0);
 
-    // Sección guardar/eliminar favorito
+    // Save/delete favourite section
     egui::Grid::new("profile_form")
         .num_columns(2)
         .spacing([16.0, 8.0])
@@ -342,8 +342,8 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
         })
         .inner;
 
-    // Un error nuevo se lleva a la vista (con el botón): puede haber quedado
-    // por debajo de la ventana. Solo al aparecer, para no retener el scroll
+    // A new error is scrolled into view (with the button): it may have been
+    // left below the window. Only when it appears, so the scroll is not held
     let seen_id = ui.scope_id().with("connection_error_seen");
     let seen: Option<String> = ui.data(|d| d.get_temp(seen_id));
     if seen.as_ref() != error_message.as_ref() {
@@ -359,8 +359,8 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
     }
 }
 
-/// Cambia el motor del formulario. El puerto y el usuario, si eran los
-/// habituales del motor anterior, pasan a ser los del nuevo.
+/// Changes the form's engine. The port and the user, if they were the
+/// previous engine's usual ones, become the new one's.
 fn switch_engine(params: &mut ConnectionParams, port_str: &mut String, engine: Engine) {
     let previous = params.engine;
     if port_str.trim() == previous.default_port().to_string() {
@@ -372,11 +372,11 @@ fn switch_engine(params: &mut ConnectionParams, port_str: &mut String, engine: E
     params.engine = engine;
 }
 
-/// Ancho mínimo de los campos del formulario.
+/// Minimum width of the form fields.
 const FIELD_WIDTH: f32 = 220.0;
 
-/// Botón que despliega las BBDD del servidor para elegir una. Devuelve true
-/// al abrirse: hay que leer la lista (con las credenciales del formulario).
+/// Button that drops down the server's databases to pick one. Returns true
+/// when it opens: the list has to be read (with the form's credentials).
 fn database_picker(
     ui: &mut egui::Ui,
     database: &mut String,
@@ -389,11 +389,11 @@ fn database_picker(
     let popup = egui::Popup::menu(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(FIELD_WIDTH);
-    // El clic aún no se ha aplicado: si estaba cerrado, es que se abre
+    // The click has not been applied yet: if it was closed, it is opening
     let opened = resp.clicked() && !popup.is_open();
-    // El desplegable recuerda su tamaño mientras está abierto: al cambiar lo
-    // que enseña (del «leyendo…» a la lista) hay que volver a medirlo, o la
-    // lista se queda con la altura de una línea
+    // The dropdown remembers its size while open: when what it shows
+    // changes (from "reading…" to the list) it has to be measured again, or
+    // the list keeps the height of one line
     let stage = std::mem::discriminant(databases);
     let stage_id = resp.id.with("stage");
     let changed = ui.data_mut(|d| {
@@ -401,8 +401,8 @@ fn database_picker(
         d.insert_temp(stage_id, stage);
         previous != Some(stage)
     });
-    // Al abrirse, lo que hubiera es de la vez anterior (quizá de otro
-    // servidor): la lista nueva se pide en este mismo frame
+    // On opening, whatever was there is from last time (maybe from another
+    // server): the new list is requested in this same frame
     let loading = Loadable::Loading(0);
     let databases = if opened { &loading } else { databases };
     popup.sizing_pass(changed && !opened).show(|ui| {
@@ -443,8 +443,8 @@ fn database_picker(
     opened
 }
 
-/// Muestras para elegir el color de la conexión: «sin color», los presets de
-/// la paleta y uno personalizado que abre el selector libre.
+/// Swatches to pick the connection colour: "no colour", the palette
+/// presets and a custom one that opens the free picker.
 fn color_swatches(ui: &mut egui::Ui, color: &mut Option<ConnColor>) {
     let p = theme::get(ui);
     ui.horizontal(|ui| {
@@ -472,7 +472,7 @@ fn color_swatches(ui: &mut egui::Ui, color: &mut Option<ConnColor>) {
         egui::Popup::menu(&resp)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                // Parte del color actual para que el selector no arranque en negro
+                // Start from the current colour so the picker does not open on black
                 let mut c = p.conn(color.unwrap_or(ConnColor::Blue));
                 if egui::color_picker::color_picker_color32(
                     ui,
@@ -485,8 +485,8 @@ fn color_swatches(ui: &mut egui::Ui, color: &mut Option<ConnColor>) {
     });
 }
 
-/// Muestra cuadrada clicable. Sin `fill` se dibuja hueca: con `glyph` encima
-/// (personalizado) o con una diagonal («sin color»).
+/// Clickable square swatch. Without `fill` it is drawn hollow: with
+/// `glyph` on top (custom) or with a diagonal ("no colour").
 fn swatch(
     ui: &mut egui::Ui,
     fill: Option<egui::Color32>,
@@ -559,7 +559,7 @@ mod tests {
         assert_eq!((params.engine, port.as_str()), (Engine::Postgres, "5432"));
         assert_eq!(params.user, "postgres");
 
-        // Lo que el usuario ya había escrito no se toca
+        // What the user had already typed is left alone
         port = "6543".into();
         params.user = "app".into();
         switch_engine(&mut params, &mut port, Engine::Mysql);

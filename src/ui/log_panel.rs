@@ -6,22 +6,22 @@ use crate::log::LogEntry;
 use crate::ui::icons::{CODE, COPY};
 use crate::ui::theme;
 
-/// Lo que el usuario pide desde el menú de una entrada del log.
+/// What the user asks for from the menu of a log entry.
 #[derive(Debug, Default, PartialEq)]
 pub enum LogAction {
     #[default]
     None,
-    /// Abrir la consulta en una pestaña SQL nueva.
+    /// Open the query in a new SQL tab.
     OpenInSql(String),
 }
 
-/// La consulta la canceló el usuario: no es un error que explicar.
+/// The user cancelled the query: it is not an error to explain.
 fn cancelled(entry: &LogEntry) -> bool {
     entry.error.as_deref() == Some(crate::db::QUERY_CANCELLED)
 }
 
-/// Log de consultas de la conexión. Cada entrada tiene un menú contextual
-/// para copiar su consulta (o su error) y para reabrirla en el editor.
+/// Query log of the connection. Each entry has a context menu to copy its
+/// query (or its error) and to reopen it in the editor.
 pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
     let mut action = LogAction::None;
     let p = theme::get(ui);
@@ -39,11 +39,11 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
         .show(ui, |ui| {
             for (idx, entry) in log.iter().enumerate() {
                 let row = ui.horizontal(|ui| {
-                    // Hora
+                    // Time
                     ui.monospace(egui::RichText::new(&entry.time).color(p.text_muted));
                     ui.separator();
 
-                    // Estado
+                    // Status
                     if cancelled(entry) {
                         theme::badge(ui, "CANCELADA", p.warning);
                     } else if entry.error.is_some() {
@@ -53,18 +53,18 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
                         theme::badge(ui, &format!("{rows} filas"), p.success);
                     }
 
-                    // Duración
+                    // Duration
                     ui.separator();
                     ui.label(
                         egui::RichText::new(format!("{}ms", entry.duration_ms)).color(p.text_muted),
                     );
                     ui.separator();
 
-                    // Query truncada: entera, en el tooltip de la fila
+                    // Truncated query: in full, in the row's tooltip
                     ui.add(egui::Label::new(&entry.query).truncate());
                 });
-                // Toda la fila responde al clic derecho. Queda por encima de
-                // sus etiquetas, así que el tooltip lo pone ella
+                // The whole row responds to right clicks. It sits above its
+                // labels, so it provides the tooltip itself
                 ui.interact(
                     row.response.rect,
                     ui.make_persistent_id(("log_entry", idx)),
@@ -92,7 +92,7 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
                     }
                 });
 
-                // Error expandido
+                // Expanded error
                 if let Some(err) = &entry.error
                     && !cancelled(entry)
                 {

@@ -1,4 +1,4 @@
-//! Dibujo de la tabla: cabecera, celdas, editor de celda y desplazamiento.
+//! Drawing of the table: header, cells, cell editor and scrolling.
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -9,20 +9,20 @@ use crate::db::QueryResult;
 use crate::ui::icons::KEY;
 use crate::ui::theme;
 
-/// Altura de las filas: la del texto de las celdas más un margen, igual para
-/// todas (la celda no cambia de tamaño al empezar a editarla). Sigue al
-/// tamaño de fuente de los ajustes; con el de por defecto son 22 puntos.
+/// Row height: that of the cell text plus a margin, the same for every row
+/// (the cell does not change size when editing starts). It follows the
+/// font size from the settings; with the default one it is 22 points.
 fn row_height(ui: &egui::Ui) -> f32 {
     (ui.text_style_height(&egui::TextStyle::Monospace) + 6.0)
         .round()
         .max(22.0)
 }
 
-/// Lo que ha pasado en la tabla en este frame.
+/// What happened in the table this frame.
 #[derive(Default)]
 pub(super) struct TableOut {
     pub action: GridAction,
-    /// Cabecera pulsada (para ordenar por ella).
+    /// Header clicked (to sort by it).
     pub clicked_col: Option<usize>,
 }
 
@@ -34,7 +34,7 @@ pub(super) fn show(
     focused: bool,
 ) -> TableOut {
     let mut out = TableOut::default();
-    // Fila bajo el puntero mientras se arrastra para seleccionar un rango
+    // Row under the pointer while dragging to select a range
     let mut drag_row: Option<usize> = None;
 
     let initial_widths = initial_col_widths(ui, g.data);
@@ -47,10 +47,10 @@ pub(super) fn show(
     let highlight = g.highlighted_value(sel.cell);
 
     let mut col_widths = Vec::new();
-    // Primera y última fila dibujadas: (posición en el grid, y en pantalla)
+    // First and last rows drawn: (position in the grid, and on screen)
     let mut drawn_rows: Option<((usize, f32), (usize, f32))> = None;
-    // Barras siempre a la vista: las flotantes de egui solo aparecen al pasar
-    // el ratón y en un grid de datos hace falta ver por dónde se va
+    // Scroll bars always visible: egui's floating ones only show on hover,
+    // and in a data grid you need to see where you are
     ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
     let mut hscroll = egui::ScrollArea::horizontal()
         .id_salt((g.id, "hscroll"))
@@ -61,7 +61,7 @@ pub(super) fn show(
     let outer = hscroll.show(ui, |ui| {
         ui.set_min_width(total_width);
 
-        // Banda de fondo de la cabecera (se pinta antes de construir la tabla)
+        // Header background band (painted before building the table)
         let header_band = egui::Rect::from_min_size(
             ui.cursor().min,
             egui::vec2(ui.available_width().max(total_width), header_h),
@@ -73,13 +73,13 @@ pub(super) fn show(
             .id_salt((g.id, "table"))
             .striped(true)
             .resizable(true)
-            // Por defecto el cuerpo no baja de 200 de alto aunque haya menos
-            // sitio (ventana pequeña, log grande) y las últimas filas quedan
-            // fuera de la vista
+            // By default the body never gets shorter than 200 even with less
+            // room (small window, big log) and the last rows end up out of
+            // view
             .min_scrolled_height(0.0)
-            // La barra vertical de la tabla queda en el borde derecho del
-            // contenido, fuera de la vista hasta desplazarse del todo a la
-            // derecha: se oculta y se dibuja una propia (vertical_bar)
+            // The table's vertical bar sits on the right edge of the content,
+            // out of view until scrolled all the way to the right: it is
+            // hidden and our own is drawn (vertical_bar)
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if let Some(y) = scroll_y {
@@ -129,8 +129,8 @@ pub(super) fn show(
     });
 
     let body = &outer.inner;
-    // Dónde cae la fila 0 y cuánto hay de una a la siguiente, según lo que
-    // se acaba de dibujar (sin filas dibujadas, lo nominal)
+    // Where row 0 falls and how far it is from one row to the next, from
+    // what was just drawn (with no rows drawn, the nominal values)
     let nominal_pitch = row_h + spacing.y;
     let content_y =
         |screen_y: f32| screen_y - body.inner_rect.top() + body.state.unclamped_offset().y;
@@ -142,8 +142,8 @@ pub(super) fn show(
         Some(((i0, y0), _)) => (nominal_pitch, content_y(y0) - i0 as f32 * nominal_pitch),
         None => (nominal_pitch, 0.0),
     };
-    // Lo que de verdad se ve del cuerpo: su zona puede salirse por abajo de
-    // la del scroll horizontal que la contiene
+    // What is really visible of the body: its area may stick out below
+    // that of the horizontal scroll containing it
     let visible_body = body.inner_rect.intersect(outer.inner_rect);
     let layout = GridLayout {
         offset: egui::vec2(
@@ -161,11 +161,11 @@ pub(super) fn show(
         col_widths,
         col_gap: spacing.x,
     };
-    // El desplazamiento hasta el cursor se calculó con la geometría del frame
-    // anterior. Si en este ha cambiado (una fila nueva alarga el contenido y
-    // hace aparecer la barra de guardar, que acorta el hueco) puede haberse
-    // quedado corto: se comprueba con la de ahora y se repite. Con tope,
-    // por si el destino no fuera alcanzable.
+    // The scroll to the cursor was computed with the previous frame's
+    // geometry. If it changed in this one (a new row makes the content
+    // longer and brings up the save bar, which shrinks the room) it may
+    // fall short: it is checked with the current one and repeated. With a
+    // limit, in case the target cannot be reached.
     if revealing
         && !sel.reveal
         && sel.reveal_tries < 3
@@ -181,9 +181,9 @@ pub(super) fn show(
     vertical_bar(ui, g, visible_body, &layout, sel);
     sel.layout = Some(layout);
 
-    // El grid entero es un widget enfocable: con el foco recibe las teclas.
-    // egui se lo quita con cada clic que no cae sobre él (y los de dentro
-    // caen sobre las celdas), así que se le devuelve si el clic fue dentro.
+    // The whole grid is a focusable widget: with focus it receives the keys.
+    // egui takes it away on every click that does not land on it (and those
+    // inside land on the cells), so it is given back if the click was inside.
     let focus_id = g.focus_id();
     ui.interact(
         outer.inner_rect,
@@ -192,12 +192,12 @@ pub(super) fn show(
     );
     let pointer_inside = ui.rect_contains_pointer(outer.inner_rect)
         && ui.input(|i| i.pointer.any_pressed() || i.pointer.any_click());
-    // Mientras se edita, el foco es del editor de la celda
+    // While editing, the focus belongs to the cell editor
     if pointer_inside && editing.is_none() {
         ui.memory_mut(|m| m.request_focus(focus_id));
     }
 
-    // Arrastrar selecciona el rango de filas entre el inicio y el puntero
+    // Dragging selects the range of rows between the start and the pointer
     if ui.input(|i| i.pointer.is_decidedly_dragging()) {
         if let (Some(start), Some(current)) = (sel.drag_from, drag_row) {
             sel.rows = (start.min(current)..=start.max(current)).collect();
@@ -209,10 +209,10 @@ pub(super) fn show(
     out
 }
 
-/// Desplazamiento que hay que aplicar en este frame, si lo hay: al principio
-/// (datos nuevos) o hasta la celda del cursor si se movió con el teclado.
+/// Scroll to apply this frame, if any: to the top (new data) or to the
+/// cursor's cell if it moved with the keyboard.
 fn pending_scroll(ui: &egui::Ui, g: &Grid, sel: &mut GridSelection) -> (Option<f32>, Option<f32>) {
-    // Volver arriba manda sobre lo que se pidiera con la barra
+    // Going back to the top wins over whatever was asked with the bar
     let bar = sel.scroll_to_y.take();
     let to_top = std::mem::take(&mut sel.scroll_top).then_some(0.0).or(bar);
     if !sel.reveal {
@@ -222,7 +222,7 @@ fn pending_scroll(ui: &egui::Ui, g: &Grid, sel: &mut GridSelection) -> (Option<f
         sel.reveal = false;
         return (None, to_top);
     };
-    // Hace falta la geometría del frame anterior; en el primero se espera
+    // The previous frame's geometry is needed; on the first one it waits
     let Some(layout) = &sel.layout else {
         ui.ctx().request_repaint();
         return (None, to_top);
@@ -232,9 +232,9 @@ fn pending_scroll(ui: &egui::Ui, g: &Grid, sel: &mut GridSelection) -> (Option<f
     (x, y.or(to_top))
 }
 
-/// Barra de desplazamiento vertical en el borde derecho de la zona visible
-/// de las filas. Arrastrarla (o pulsar en su carril) pide el desplazamiento
-/// para el frame siguiente.
+/// Vertical scroll bar on the right edge of the visible rows area.
+/// Dragging it (or clicking its track) requests the scroll for the next
+/// frame.
 fn vertical_bar(
     ui: &mut egui::Ui,
     g: &Grid,
@@ -266,7 +266,7 @@ fn vertical_bar(
         && let Some(pos) = resp.interact_pointer_pos()
         && travel > 0.0
     {
-        // El centro del tirador sigue al puntero
+        // The centre of the thumb follows the pointer
         let t = ((pos.y - handle_h / 2.0 - track.top()) / travel).clamp(0.0, 1.0);
         sel.scroll_to_y = Some(t * max);
         ui.ctx().request_repaint();
@@ -285,10 +285,10 @@ fn vertical_bar(
     ui.painter().rect_filled(handle, 3.0, color);
 }
 
-/// Ancho inicial de cada columna según su cabecera y una muestra del
-/// contenido.
+/// Initial width of each column according to its header and a sample of
+/// the content.
 fn initial_col_widths(ui: &egui::Ui, data: &QueryResult) -> Vec<f32> {
-    // Las celdas se pintan en monospace (JetBrains Mono, avance ~0.6 em)
+    // Cells are painted in monospace (JetBrains Mono, advance ~0.6 em)
     let font_size = egui::TextStyle::Monospace.resolve(ui.style()).size;
     let char_w = font_size * 0.62;
     let sort_reserve = font_size * 1.8;
@@ -318,8 +318,8 @@ fn initial_col_widths(ui: &egui::Ui, data: &QueryResult) -> Vec<f32> {
         .collect()
 }
 
-/// Cabecera de una columna: icono de clave, nombre y posición en la
-/// ordenación. Devuelve true si se ha pulsado para ordenar por ella.
+/// Header of a column: key icon, name and position in the sort order.
+/// Returns true if it was clicked to sort by it.
 fn header_cell(ui: &mut egui::Ui, g: &Grid, col: usize) -> bool {
     let sort_pos = g.sorts.iter().position(|s| s.col_idx == col);
     let icon = match g.column_info.get(col).map(|c| c.column_key.as_str()) {
@@ -367,9 +367,9 @@ fn header_cell(ui: &mut egui::Ui, g: &Grid, col: usize) -> bool {
         .clicked()
 }
 
-/// Una celda: fondo según el estado de su fila, texto, cursor y la
-/// interacción con el ratón. `highlight` es el valor de la celda del cursor:
-/// las demás que lo muestran se resaltan.
+/// A cell: background according to its row's state, text, cursor and the
+/// mouse interaction. `highlight` is the value of the cursor's cell: the
+/// other cells showing it are highlighted.
 #[allow(clippy::too_many_arguments)]
 fn show_cell(
     ui: &mut egui::Ui,
@@ -393,10 +393,10 @@ fn show_cell(
     };
     let is_cursor = sel.cell == Some(cell);
     let shown = g.shown(cell);
-    // Las filas eliminadas no se resaltan: su fondo rojo es lo que avisa
+    // Deleted rows are not highlighted: their red background is the warning
     let same_value = !is_cursor && !deleted && highlight.is_some_and(|v| shown == Shown::Value(v));
 
-    // Fondo de la fila (opaco: no se mezcla con el rayado)
+    // Row background (opaque: it does not blend with the stripes)
     let row_bg = if deleted {
         Some(p.grid_delete_bg)
     } else if inserted {
@@ -416,13 +416,13 @@ fn show_cell(
     }
 
     if edit.is_some() {
-        // Celda con un cambio pendiente: fondo y esquina marcada (esta, sobre
-        // el resaltado)
+        // Cell with a pending change: background and marked corner (this one,
+        // above the highlight)
         ui.painter().rect_filled(rect, 0.0, p.grid_edit_bg);
     } else if let RowRef::Existing(r) = cell.row
         && !deleted
     {
-        // Fondo tenue si la fila tiene cambios en otras celdas
+        // Faint background if the row has changes in other cells
         if g.pending_edits.iter().any(|e| e.row_idx == r) {
             ui.painter()
                 .rect_filled(rect, 0.0, p.grid_edit_bg.gamma_multiply(0.5));
@@ -448,8 +448,8 @@ fn show_cell(
         ));
     }
     if is_cursor {
-        // El borde se ve sobre cualquier fondo; apagado si el grid no
-        // tiene el foco del teclado
+        // The border shows on any background; dimmed if the grid does not
+        // have keyboard focus
         let color = if focused { p.accent } else { p.border_strong };
         ui.painter().rect_stroke(
             rect,
@@ -476,7 +476,7 @@ fn show_cell(
         Shown::Auto => ("(AUTO)", p.null_text),
     };
 
-    // Sin FOCUSABLE: el foco del teclado es del grid, no de cada celda
+    // No FOCUSABLE: keyboard focus belongs to the grid, not to each cell
     let resp = ui.allocate_rect(rect, egui::Sense::CLICK | egui::Sense::DRAG);
     paint_cell_text(ui, rect, text, color);
 
@@ -486,7 +486,7 @@ fn show_cell(
             sel.drag_from = Some(r);
             *drag_row = Some(r);
         }
-        // Durante el arrastre, la fila la da la posición del puntero
+        // While dragging, the row comes from the pointer position
         if ui.input(|i| i.pointer.is_decidedly_dragging())
             && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
             && rect.y_range().contains(pos.y)
@@ -502,8 +502,8 @@ fn show_cell(
             _ => sel.select_cell(cell),
         }
     }
-    // El menú actúa sobre la celda pulsada, salvo dentro de una selección de
-    // filas, que se conserva
+    // The menu acts on the clicked cell, except inside a row selection,
+    // which is kept
     if resp.secondary_clicked() && !row_selected {
         sel.select_cell(cell);
     }
@@ -518,7 +518,7 @@ fn show_cell(
         }
     });
 
-    // × para quitar la fila nueva, en su última columna
+    // × to remove the new row, in its last column
     if let RowRef::Insert(insert_idx) = cell.row
         && cell.col + 1 == g.cols()
         && g.editable
@@ -528,9 +528,9 @@ fn show_cell(
     }
 }
 
-/// Editor de la celda en edición. Enter, Tab o perder el foco confirman
-/// (si el texto ha cambiado); Escape cancela. Tab pasa a editar la celda editable siguiente (Mayús+Tab,
-/// la anterior).
+/// Editor of the cell being edited. Enter, Tab or losing focus confirm
+/// (if the text changed); Escape cancels. Tab moves on to edit the next editable cell (Shift+Tab,
+/// the previous one).
 fn show_editor(
     ui: &mut egui::Ui,
     g: &Grid,
@@ -542,17 +542,17 @@ fn show_editor(
         return;
     };
     let cell = edit.cell;
-    // lock_focus: con Tab, egui no se lleva el foco a otro widget
+    // lock_focus: with Tab, egui does not move the focus to another widget
     let resp = ui.add(
         egui::TextEdit::singleline(&mut edit.buffer)
-            // La misma fuente que las celdas: el texto no cambia al editar
+            // The same font as the cells: the text does not change when editing
             .font(egui::TextStyle::Monospace)
             .desired_width(f32::INFINITY)
             .lock_focus(true),
     );
     if edit.needs_focus {
-        // Primer frame: las teclas de este frame (el Enter que abrió el
-        // editor) no son para él
+        // First frame: this frame's keys (the Enter that opened the editor)
+        // are not meant for it
         resp.request_focus();
         edit.needs_focus = false;
         return;
@@ -597,14 +597,14 @@ fn show_editor(
         sel.move_to(next);
         *editing = Some(EditingCell::new(next, g.edit_text(next)));
     } else if tab.is_some() || escape || enter {
-        // Se terminó con el teclado: el foco vuelve al grid. Si fue por
-        // pulsar en otro sitio, el foco es de lo que se pulsó.
+        // It ended with the keyboard: focus goes back to the grid. If it was
+        // by clicking elsewhere, the focus belongs to whatever was clicked.
         sel.move_to(cell);
         ui.memory_mut(|m| m.request_focus(g.focus_id()));
     }
 }
 
-/// Pinta el texto de una celda en monospace, recortado con «…» si no cabe.
+/// Paints a cell's text in monospace, truncated with "…" if it does not fit.
 fn paint_cell_text(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui::Color32) {
     if !ui.is_rect_visible(rect) {
         return;
@@ -635,7 +635,7 @@ fn paint_cell_text(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui::Col
     painter.galley(pos, galley, color);
 }
 
-/// Botón × al final de la celda. Devuelve true si se ha pulsado.
+/// × button at the end of the cell. Returns true if it was clicked.
 fn remove_button(ui: &mut egui::Ui, cell_rect: egui::Rect) -> bool {
     let p = theme::get(ui);
     let size = egui::vec2(16.0, 16.0);

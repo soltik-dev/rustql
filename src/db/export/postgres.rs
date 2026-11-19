@@ -1,13 +1,13 @@
-//! Exportación desde PostgreSQL. No hay `SHOW CREATE TABLE`: la estructura
-//! de cada tabla se reconstruye del catálogo, con las funciones que dan ya
-//! escritos sus valores por defecto, claves, índices y vistas.
+//! Export from PostgreSQL. There is no `SHOW CREATE TABLE`: the structure of
+//! each table is rebuilt from the catalog, with the functions that already
+//! return its default values, keys, indexes and views written out.
 //!
-//! Se exportan tablas (con sus secuencias, claves, índices y los tipos
-//! enumerados de sus columnas) y vistas. No disparadores, funciones,
-//! permisos, políticas ni particiones: para una copia completa, `pg_dump`.
+//! Tables (with their sequences, keys, indexes and the enum types of their
+//! columns) and views are exported. Not triggers, functions, privileges,
+//! policies or partitions: for a full copy, use `pg_dump`.
 //!
-//! Las claves foráneas se crean al final, con todas las tablas ya
-//! cargadas: no hay forma de desactivar su comprobación como en MySQL.
+//! Foreign keys are created at the end, once every table is loaded: there
+//! is no way to turn their checks off as in MySQL.
 
 use std::collections::HashMap;
 
@@ -37,15 +37,15 @@ pub(super) fn run(
     match destination {
         ExportDestination::SqlFile { path } => export_to_file(&source, path, job),
         ExportDestination::Folder { path } => export_to_folder(&source, path, job),
-        // Otra BBDD es otra conexión, esté o no en el mismo servidor
+        // Another database is another connection, on the same server or not
         ExportDestination::SameServerDb { target_db } => {
             export_into(&source, &mut PgSink::open(&backend, target_db)?, job)
         }
         ExportDestination::RemoteServer { params, target_db } => {
             let target = PostgresBackend::connect_with_progress(params, |_| {})
                 .map_err(|e| format!("Conexión al destino: {e}"))?;
-            // Otro perfil (u otro nombre de host) puede llevar al mismo servidor:
-            // copiar una BBDD sobre sí misma borra (DROP) o duplica sus datos.
+            // Another profile (or another host name) may lead to the same server:
+            // copying a database onto itself drops (DROP) or duplicates its data.
             if target_db == job.source_db
                 && same_server(&backend, &target).map_err(|e| {
                     format!("No se pudo comprobar si el destino es el mismo servidor: {e}")
@@ -58,8 +58,8 @@ pub(super) fn run(
     }
 }
 
-/// Si dos conexiones llegan al mismo servidor, según el identificador que
-/// cada cluster recibe al crearse.
+/// Whether two connections reach the same server, according to the
+/// identifier each cluster gets when it is created.
 fn same_server(a: &PostgresBackend, b: &PostgresBackend) -> DbResult<bool> {
     let identity = |backend: &PostgresBackend| {
         backend
@@ -70,7 +70,7 @@ fn same_server(a: &PostgresBackend, b: &PostgresBackend) -> DbResult<bool> {
     Ok(id_a.is_some() && id_a == id_b)
 }
 
-/// Conexión a la BBDD de destino (que se crea si no existe).
+/// Connection to the destination database (created if it does not exist).
 struct PgSink<'a>(Dedicated<'a>);
 
 impl<'a> PgSink<'a> {
@@ -88,32 +88,32 @@ impl Sink for PgSink<'_> {
     }
 }
 
-/// Una tabla o vista del origen.
+/// A table or view of the source.
 struct Relation {
     oid: String,
-    /// `r` tabla, `p` particionada, `v` vista, `m` vista materializada,
-    /// `f` tabla foránea.
+    /// `r` table, `p` partitioned, `v` view, `m` materialized view,
+    /// `f` foreign table.
     kind: String,
     unlogged: bool,
     schema: String,
-    /// `"esquema"."tabla"`.
+    /// `"schema"."table"`.
     reference: String,
 }
 
-/// Secuencia de una columna: propia de la tabla (`serial`) o interna de una
-/// columna de identidad.
+/// Sequence of a column: owned by the table (`serial`) or internal to an
+/// identity column.
 struct Sequence {
-    /// Con su esquema y entre comillas si las necesita.
+    /// With its schema, and quoted if it needs it.
     name: String,
     data_type: String,
-    /// `START WITH … INCREMENT BY …` y el resto de sus parámetros.
+    /// `START WITH … INCREMENT BY …` and the rest of its parameters.
     options: String,
     owned: bool,
 }
 
 struct PgSource<'a> {
-    /// Con `search_path` vacío: así el catálogo escribe todos los nombres
-    /// con su esquema y las sentencias valen en cualquier sesión.
+    /// With an empty `search_path`: that way the catalog writes every name
+    /// with its schema and the statements work in any session.
     session: Dedicated<'a>,
 }
 
@@ -160,7 +160,7 @@ impl<'a> PgSource<'a> {
         })
     }
 
-    /// Una vista se crea al final: depende de tablas (y de otras vistas).
+    /// A view is created at the end: it depends on tables (and on other views).
     fn view_script(&self, rel: &Relation, options: &ExportOptions) -> DbResult<TableScript> {
         let mut script = TableScript::default();
         if !options.include_create {
@@ -182,7 +182,7 @@ impl<'a> PgSource<'a> {
         Ok(script)
     }
 
-    /// Secuencias de las columnas de la tabla, por columna.
+    /// Sequences of the table's columns, by column.
     fn sequences(&self, rel: &Relation) -> DbResult<HashMap<String, Sequence>> {
         let sql = format!(
             "SELECT a.attname, s.seqrelid::regclass::text, format_type(s.seqtypid, NULL), \
@@ -219,8 +219,8 @@ impl<'a> PgSource<'a> {
             .collect())
     }
 
-    /// Tipos enumerados de las columnas (también en arrays), como sentencias
-    /// que los crean si no existen ya.
+    /// Enum types of the columns (arrays too), as statements that create them
+    /// if they do not exist yet.
     fn enum_types(&self, rel: &Relation) -> DbResult<Vec<String>> {
         let sql = format!(
             "SELECT DISTINCT quote_ident(n.nspname), format_type(e.oid, NULL), \
@@ -239,8 +239,8 @@ impl<'a> PgSource<'a> {
         let mut statements = Vec::new();
         for row in &result.rows {
             statements.push(format!("CREATE SCHEMA IF NOT EXISTS {}", cell(row, 0)));
-            // No hay CREATE TYPE IF NOT EXISTS: varias tablas pueden usar el
-            // mismo tipo, y puede existir ya en el destino
+            // There is no CREATE TYPE IF NOT EXISTS: several tables may use the
+            // same type, and it may already exist at the destination
             statements.push(format!(
                 "DO $rustql$ BEGIN\n  CREATE TYPE {} AS ENUM ({});\n\
                  EXCEPTION WHEN duplicate_object THEN NULL;\nEND $rustql$",
@@ -274,8 +274,8 @@ impl<'a> PgSource<'a> {
         if options.include_create {
             script.create.extend(self.create_schema(rel));
             script.create.extend(self.enum_types(rel)?);
-            // Las secuencias de las columnas serial van antes que la tabla,
-            // que las nombra en sus valores por defecto
+            // The sequences of serial columns go before the table, which names
+            // them in its default values
             for sequence in sequences.values().filter(|s| s.owned) {
                 script.create.push(format!(
                     "CREATE SEQUENCE IF NOT EXISTS {} AS {} {}",
@@ -299,8 +299,8 @@ impl<'a> PgSource<'a> {
                 ));
             }
 
-            // Claves e índices, tras los datos (cargar con ellos es más
-            // lento); las foráneas, cuando estén todas las tablas
+            // Keys and indexes after the data (loading with them is slower);
+            // foreign keys once every table exists
             let sql = format!(
                 "SELECT quote_ident(conname), contype, pg_get_constraintdef(oid) \
                  FROM pg_constraint \
@@ -332,7 +332,7 @@ impl<'a> PgSource<'a> {
             }
         }
 
-        // Las columnas generadas las calcula el destino: no se copian
+        // Generated columns are computed by the destination: not copied
         let copied: Vec<String> = columns
             .iter()
             .filter(|row| cell(row, 5).is_empty())
@@ -342,7 +342,7 @@ impl<'a> PgSource<'a> {
         script.data = (!copied.is_empty()).then(|| TableData {
             select: format!("SELECT {} FROM {table}", copied.join(", ")),
             insert_into: format!("INSERT INTO {table}"),
-            // Sin ello, una identidad GENERATED ALWAYS rechaza sus valores
+            // Without it, a GENERATED ALWAYS identity rejects its values
             values_keyword: if always_identity {
                 "OVERRIDING SYSTEM VALUE VALUES"
             } else {
@@ -350,8 +350,9 @@ impl<'a> PgSource<'a> {
             },
         });
 
-        // Cada secuencia sigue en el destino por donde iba en el origen. Se
-        // busca por su columna: la de una identidad la nombra el destino
+        // Each sequence carries on at the destination where it was at the
+        // source. It is looked up by its column: the destination names an
+        // identity's sequence
         if options.include_data {
             for (column, sequence) in &sequences {
                 let state = self.session.query(&format!(
@@ -374,8 +375,8 @@ impl<'a> PgSource<'a> {
     }
 }
 
-/// Definición de una columna para `CREATE TABLE`, a partir de su fila del
-/// catálogo (ver `table_script`).
+/// Definition of a column for `CREATE TABLE`, from its catalog row (see
+/// `table_script`).
 fn column_definition(row: &[Option<String>], sequence: Option<&Sequence>) -> String {
     let mut definition = format!("{} {}", SQL.quote_ident(cell(row, 0)), cell(row, 1));
     if let Some(collation) = row.get(6).and_then(|c| c.as_deref()) {
@@ -383,7 +384,7 @@ fn column_definition(row: &[Option<String>], sequence: Option<&Sequence>) -> Str
     }
     let default = row.get(3).and_then(|d| d.as_deref());
     match (cell(row, 4), cell(row, 5), default) {
-        // Generada: su «valor por defecto» es la expresión que la calcula
+        // Generated: its "default value" is the expression that computes it
         (_, generated, Some(expression)) if !generated.is_empty() => {
             let storage = if generated == "v" {
                 "VIRTUAL"
@@ -424,8 +425,8 @@ impl Source for PgSource<'_> {
         ]
     }
 
-    /// En una sola sentencia por tipo: así las tablas con claves foráneas
-    /// entre sí se eliminan sin importar el orden. Las vistas, antes.
+    /// In a single statement per kind: that way tables with foreign keys
+    /// between them are dropped regardless of order. Views first.
     fn drop_together(&self, tables: &[String]) -> DbResult<Vec<String>> {
         let mut by_kind: [(&str, &str, Vec<String>); 3] = [
             ("v", "VIEW", Vec::new()),
@@ -433,7 +434,7 @@ impl Source for PgSource<'_> {
             ("", "TABLE", Vec::new()),
         ];
         for table in tables {
-            // La que ya no exista dará su error al exportarla
+            // One that no longer exists will report its error when exported
             let Ok(rel) = self.relation(table) else {
                 continue;
             };

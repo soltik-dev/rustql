@@ -3,15 +3,15 @@ use std::collections::HashMap;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-/// Pestaña SQL guardada (sin resultado, solo texto y contexto de BD).
+/// Saved SQL tab (no result, only text and database context).
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct SavedSqlTab {
-    /// Nombre que le dio el usuario (ver SqlTab::name).
+    /// Name the user gave it (see SqlTab::name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub db_context: String,
     pub sql_text: String,
-    /// Alto que el usuario le dio al editor (ver SqlTab::editor_height).
+    /// Height the user gave the editor (see SqlTab::editor_height).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_height: Option<f32>,
 }
@@ -39,15 +39,15 @@ fn default_query_limit() -> usize {
     500
 }
 
-/// Nombre mostrado para la fuente de UI embebida (Inter).
+/// Name shown for the embedded UI font (Inter).
 pub const EMBEDDED_FONT_NAME: &str = "Inter (integrada)";
 
 fn default_font_family() -> String {
     EMBEDDED_FONT_NAME.to_owned()
 }
 
-/// Los campos que falten en el JSON (ficheros de versiones anteriores) toman
-/// su valor de `AppSettings::default()`.
+/// Fields missing from the JSON (files from earlier versions) take their
+/// value from `AppSettings::default()`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -61,20 +61,20 @@ pub struct AppSettings {
     pub show_log: bool,
     #[serde(default)]
     pub fav_tables: std::collections::HashSet<String>,
-    /// Pestañas SQL de antes de las conexiones múltiples: las hereda la primera
-    /// conexión que se abra y después deja de guardarse.
+    /// SQL tabs from before multiple connections: inherited by the first
+    /// connection opened, and no longer saved afterwards.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sql_tabs: Vec<SavedSqlTab>,
-    /// Pestañas SQL guardadas por conexión (clave: ConnectionParams::key).
+    /// SQL tabs saved per connection (key: ConnectionParams::key).
     #[serde(default)]
     pub sql_tabs_by_conn: HashMap<String, Vec<SavedSqlTab>>,
     #[serde(default)]
     pub copy_format: CopyFormat,
     #[serde(default = "default_query_limit")]
     pub query_limit: usize,
-    /// Tope de filas que lee el editor SQL; el resto se descarta.
+    /// Maximum rows the SQL editor reads; the rest are discarded.
     pub sql_editor_max_rows: usize,
-    /// Tamaño de la ventana (sin maximizar) al salir la última vez.
+    /// Window size (not maximized) on the last exit.
     pub window_size: Option<[f32; 2]>,
     pub window_maximized: bool,
 }
@@ -99,10 +99,10 @@ impl Default for AppSettings {
     }
 }
 
-/// Fuentes TTF/OTF del sistema disponibles para la UI, como (nombre, ruta)
-/// ordenadas por nombre y sin las variantes Bold/Italic/etc. Se buscan una
-/// sola vez: listarlas lanza `fc-list` (o recorre el directorio de fuentes),
-/// y el panel de ajustes las pide en cada frame.
+/// System TTF/OTF fonts available for the UI, as (name, path) sorted by
+/// name and without the Bold/Italic/etc. variants. Looked up only once:
+/// listing them runs `fc-list` (or walks the fonts directory), and the
+/// settings panel asks for them every frame.
 pub fn available_system_fonts() -> &'static [(String, String)] {
     static FONTS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
     FONTS.get_or_init(|| {
@@ -119,7 +119,7 @@ pub fn available_system_fonts() -> &'static [(String, String)] {
 
 #[cfg(not(target_os = "windows"))]
 fn fc_list_fonts() -> Vec<(String, String)> {
-    // fc-list --format "%{family[0]}\t%{file}\n" — una línea por fuente
+    // fc-list --format "%{family[0]}\t%{file}\n" — one line per font
     let output = std::process::Command::new("fc-list")
         .args(["--format", "%{family[0]}\t%{file}\n"])
         .output();
@@ -133,11 +133,11 @@ fn fc_list_fonts() -> Vec<(String, String)> {
             let mut parts = line.splitn(2, '\t');
             let name = parts.next()?.trim().to_string();
             let path = parts.next()?.trim().to_string();
-            // Solo TTF/OTF que egui puede leer (no .ttc compuesto ni Variable Font bracket)
+            // Only TTF/OTF that egui can read (no composite .ttc or Variable Font bracket)
             if !path.ends_with(".ttf") && !path.ends_with(".otf") {
                 return None;
             }
-            // Excluir variantes: Bold, Italic, Oblique, Heavy, Black, Light, Thin, Medium, Condensed
+            // Exclude variants: Bold, Italic, Oblique, Heavy, Black, Light, Thin, Medium, Condensed
             let low = path.to_lowercase();
             for variant in &[
                 "bold",
@@ -158,7 +158,7 @@ fn fc_list_fonts() -> Vec<(String, String)> {
                     return None;
                 }
             }
-            // Excluir fuentes de símbolo/emoji/icon que no son texto
+            // Exclude symbol/emoji/icon fonts that are not text
             for exclude in &[
                 "emoji", "symbol", "awesome", "nerd", "icon", "dingbat", "webdings", "wingding",
             ] {
@@ -170,7 +170,7 @@ fn fc_list_fonts() -> Vec<(String, String)> {
         })
         .collect();
 
-    // Deduplicar por nombre (fc-list puede repetir la misma familia)
+    // Deduplicate by name (fc-list may repeat the same family)
     fonts.sort_by(|a, b| a.0.cmp(&b.0));
     fonts.dedup_by(|a, b| a.0 == b.0);
     fonts
@@ -218,9 +218,9 @@ fn windows_fonts() -> Vec<(String, String)> {
     fonts
 }
 
-/// Carga fuentes: iconos embebidos + Inter/JetBrains Mono embebidas +
-/// fuente del sistema elegida (override) + emoji fallback.
-/// Llamar al inicio y cada vez que el usuario cambie la fuente.
+/// Loads fonts: embedded icons + embedded Inter/JetBrains Mono + the
+/// chosen system font (override) + emoji fallback.
+/// Call at startup and every time the user changes the font.
 pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
     static ICONS_TTF: &[u8] = include_bytes!("../assets/fonts/rustql.ttf");
     static INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.otf");
@@ -239,7 +239,7 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
 
     let mut fonts = egui::FontDefinitions::default();
 
-    // 1. Iconos propios embebidos — primera posición (prioridad en U+E800..)
+    // 1. Own embedded icons — first position (priority in U+E800..)
     fonts.font_data.insert(
         "rustql_icons".to_owned(),
         egui::FontData::from_static(ICONS_TTF).into(),
@@ -250,7 +250,7 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         .unwrap()
         .insert(0, "rustql_icons".to_owned());
 
-    // 2. Inter embebida como fuente de UI base
+    // 2. Embedded Inter as the base UI font
     fonts.font_data.insert(
         "inter_regular".to_owned(),
         egui::FontData::from_static(INTER_REGULAR).into(),
@@ -261,7 +261,7 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         .unwrap()
         .insert(1, "inter_regular".to_owned());
 
-    // 3. Fuente del sistema elegida por el usuario (override, delante de Inter)
+    // 3. System font chosen by the user (override, ahead of Inter)
     if s.font_family != EMBEDDED_FONT_NAME {
         let available = available_system_fonts();
         let chosen_path = available
@@ -284,7 +284,7 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         }
     }
 
-    // 4. JetBrains Mono embebida como monospace principal (SQL, celdas de datos)
+    // 4. Embedded JetBrains Mono as the main monospace (SQL, data cells)
     fonts.font_data.insert(
         "jetbrains_mono".to_owned(),
         egui::FontData::from_static(JETBRAINS_MONO).into(),
@@ -295,7 +295,7 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         .unwrap()
         .insert(0, "jetbrains_mono".to_owned());
 
-    // 5. Familia con peso medio para etiquetas de sección (theme::section_label)
+    // 5. Medium-weight family for section labels (theme::section_label)
     fonts.font_data.insert(
         "inter_medium".to_owned(),
         egui::FontData::from_static(INTER_MEDIUM).into(),
@@ -305,7 +305,7 @@ pub fn setup_fonts(ctx: &egui::Context, s: &AppSettings) {
         vec!["inter_medium".to_owned(), "inter_regular".to_owned()],
     );
 
-    // 6. Emoji/símbolo como último fallback
+    // 6. Emoji/symbol as the last fallback
     for path in emoji_candidates {
         if let Ok(data) = std::fs::read(path) {
             fonts.font_data.insert(
@@ -333,8 +333,8 @@ const SETTINGS_FILE: &str = "settings.json";
 
 pub fn load() -> AppSettings {
     let mut s: AppSettings = crate::config_file::load(SETTINGS_FILE);
-    // "Liberation Sans" era el default auto-inyectado antes de embeber Inter,
-    // no una elección del usuario: migrarlo a la fuente integrada.
+    // "Liberation Sans" was the auto-injected default before Inter was
+    // embedded, not a user choice: migrate it to the built-in font.
     if s.font_family == "Liberation Sans" {
         s.font_family = EMBEDDED_FONT_NAME.to_owned();
     }
@@ -345,9 +345,9 @@ pub fn save(s: &AppSettings) {
     crate::config_file::save(SETTINGS_FILE, s, false);
 }
 
-/// Aplica el tema y el tamaño de fuente al contexto egui.
-/// Registra el estilo de ambos temas (set_visuals solo escribiría el activo)
-/// y luego selecciona cuál usar según los ajustes.
+/// Applies the theme and font size to the egui context.
+/// Registers the style of both themes (set_visuals would only write the
+/// active one) and then selects which to use according to the settings.
 pub fn apply(ctx: &egui::Context, s: &AppSettings) {
     use crate::ui::theme;
 
@@ -365,8 +365,9 @@ pub fn apply(ctx: &egui::Context, s: &AppSettings) {
     ctx.set_theme(pref);
 }
 
-/// Tema del sistema con tope de espera. dark-light 3 consulta el portal por
-/// D-Bus sin timeout; si el portal no responde, no debe congelar la UI.
+/// System theme with a wait limit. dark-light 3 queries the portal over
+/// D-Bus without a timeout; if the portal does not answer, the UI must
+/// not freeze.
 fn detect_system_mode() -> Option<dark_light::Mode> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -383,7 +384,7 @@ mod tests {
 
     #[test]
     fn ajustes_incompletos_toman_los_valores_por_defecto() {
-        // Antes, sin font_size el JSON no se podía leer y se perdía todo
+        // Before, without font_size the JSON could not be read and everything was lost
         let s: AppSettings = serde_json::from_str(r#"{"theme": "Dark"}"#).unwrap();
         assert!(s.theme == Theme::Dark);
         assert_eq!(s.font_size, 13.0);

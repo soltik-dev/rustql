@@ -1,9 +1,9 @@
-/// Entrada en el log de consultas ejecutadas.
+/// Entry in the log of executed queries.
 pub struct LogEntry {
     pub time: String,
     pub query: String,
     pub duration_ms: u64,
-    pub rows: Option<usize>, // None si hubo error
+    pub rows: Option<usize>, // None if there was an error
     pub error: Option<String>,
 }
 
@@ -29,7 +29,7 @@ impl LogEntry {
     }
 }
 
-/// Hora local: la aritmética sobre UNIX_EPOCH daba la hora UTC.
+/// Local time: arithmetic on UNIX_EPOCH gave UTC time.
 fn now_hms() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }

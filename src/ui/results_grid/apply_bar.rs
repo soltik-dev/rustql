@@ -4,7 +4,7 @@ use super::PendingEdit;
 use crate::ui::icons::{PLUS, TRASH};
 use crate::ui::{CMD, theme};
 
-/// Lo que el usuario pulsa en la barra de cambios pendientes.
+/// What the user clicks in the pending changes bar.
 #[derive(Debug, Default, PartialEq)]
 pub enum ApplyBarAction {
     #[default]
@@ -13,8 +13,8 @@ pub enum ApplyBarAction {
     Discard,
 }
 
-/// Barra inferior de cambios pendientes: cuántos hay y los botones de
-/// guardarlos o descartarlos.
+/// Bottom bar of pending changes: how many there are and the buttons to
+/// save or discard them.
 pub fn show_apply_bar(
     ui: &mut egui::Ui,
     pending_edits: &[PendingEdit],

@@ -1,6 +1,6 @@
 use crate::db::Engine;
 
-// ── Filas en el formato de copia ─────────────────────────────────────────────
+// ── Rows in the copy format ──────────────────────────────────────────────────
 
 pub fn format_rows_for_copy(
     columns: &[String],

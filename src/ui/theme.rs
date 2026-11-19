@@ -1,47 +1,47 @@
-//! Tema visual central: paleta semántica con variantes clara/oscura,
-//! construcción del Style de egui y helpers de widgets compartidos.
+//! Central visual theme: semantic palette with light/dark variants,
+//! construction of egui's Style and shared widget helpers.
 
 use eframe::egui::{self, Color32, CornerRadius, Shadow, Stroke};
 
 use crate::profiles::ConnColor;
 
-// Radios de esquina (egui 0.35 usa u8)
+// Corner radii (egui 0.35 uses u8)
 pub const RADIUS_SM: u8 = 4;
 pub const RADIUS_MD: u8 = 6;
 pub const RADIUS_LG: u8 = 8;
 
-/// Grosor del marco con el color de la conexión: línea bajo las pestañas,
-/// borde de la ventana y borde del árbol del sidebar.
+/// Thickness of the frame in the connection's colour: line under the
+/// tabs, window border and border of the sidebar tree.
 pub const CONN_FRAME_WIDTH: f32 = 2.0;
 
-/// Familia registrada en setup_fonts para etiquetas de sección (Inter Medium).
+/// Family registered in setup_fonts for section labels (Inter Medium).
 pub const MEDIUM_FAMILY: &str = "InterMedium";
 
-/// Paleta semántica: cada campo describe un uso, no un color concreto.
+/// Semantic palette: each field describes a use, not a specific colour.
 pub struct Palette {
-    // Fondos (niveles de superficie, de más hundido a más elevado)
+    // Backgrounds (surface levels, from most sunken to most raised)
     pub bg_sunken: Color32,
     pub bg_base: Color32,
     pub bg_surface: Color32,
     pub bg_raised: Color32,
-    // Bordes
+    // Borders
     pub border_subtle: Color32,
     pub border_strong: Color32,
-    // Texto
+    // Text
     pub text_primary: Color32,
     pub text_muted: Color32,
     pub text_disabled: Color32,
-    // Acento (azul)
+    // Accent (blue)
     pub accent: Color32,
     pub accent_hover: Color32,
     pub accent_bg: Color32,
     pub on_accent: Color32,
-    // Semánticos
+    // Semantic
     pub success: Color32,
     pub warning: Color32,
     pub danger: Color32,
     pub danger_hover: Color32,
-    // Grid de resultados (fondos opacos: se pintan sobre stripes)
+    // Results grid (opaque backgrounds: painted over stripes)
     pub grid_stripe: Color32,
     pub grid_header_bg: Color32,
     pub grid_sel_row_bg: Color32,
@@ -51,21 +51,21 @@ pub struct Palette {
     pub grid_insert_fg: Color32,
     pub grid_delete_bg: Color32,
     pub grid_delete_fg: Color32,
-    /// Celdas con el mismo valor que la del cursor.
+    /// Cells with the same value as the cursor's.
     pub grid_match_bg: Color32,
     pub null_text: Color32,
-    // Tokens SQL
+    // SQL tokens
     pub sql_keyword: Color32,
     pub sql_string: Color32,
     pub sql_number: Color32,
     pub sql_comment: Color32,
     pub sql_operator: Color32,
-    // Varios
+    // Misc
     pub fav_star: Color32,
     pub badge_pk: Color32,
     pub badge_uni: Color32,
     pub badge_idx: Color32,
-    // Colores de conexión, en el orden de ConnColor::PRESETS
+    // Connection colours, in the order of ConnColor::PRESETS
     pub conn_presets: [Color32; 8],
 }
 
@@ -108,14 +108,14 @@ pub const DARK: Palette = Palette {
     badge_uni: Color32::from_rgb(100, 200, 100),
     badge_idx: Color32::from_rgb(180, 140, 80),
     conn_presets: [
-        Color32::from_rgb(76, 141, 255),  // azul
-        Color32::from_rgb(45, 186, 186),  // turquesa
-        Color32::from_rgb(63, 185, 104),  // verde
-        Color32::from_rgb(222, 190, 60),  // amarillo
-        Color32::from_rgb(240, 136, 62),  // naranja
-        Color32::from_rgb(229, 83, 75),   // rojo
-        Color32::from_rgb(232, 106, 168), // rosa
-        Color32::from_rgb(163, 113, 247), // morado
+        Color32::from_rgb(76, 141, 255),  // blue
+        Color32::from_rgb(45, 186, 186),  // teal
+        Color32::from_rgb(63, 185, 104),  // green
+        Color32::from_rgb(222, 190, 60),  // yellow
+        Color32::from_rgb(240, 136, 62),  // orange
+        Color32::from_rgb(229, 83, 75),   // red
+        Color32::from_rgb(232, 106, 168), // pink
+        Color32::from_rgb(163, 113, 247), // purple
     ],
 };
 
@@ -158,19 +158,19 @@ pub const LIGHT: Palette = Palette {
     badge_uni: Color32::from_rgb(26, 127, 55),
     badge_idx: Color32::from_rgb(140, 100, 30),
     conn_presets: [
-        Color32::from_rgb(31, 111, 235), // azul
-        Color32::from_rgb(0, 128, 128),  // turquesa
-        Color32::from_rgb(26, 127, 55),  // verde
-        Color32::from_rgb(176, 136, 0),  // amarillo
-        Color32::from_rgb(196, 90, 10),  // naranja
-        Color32::from_rgb(207, 34, 46),  // rojo
-        Color32::from_rgb(191, 57, 137), // rosa
-        Color32::from_rgb(130, 80, 223), // morado
+        Color32::from_rgb(31, 111, 235), // blue
+        Color32::from_rgb(0, 128, 128),  // teal
+        Color32::from_rgb(26, 127, 55),  // green
+        Color32::from_rgb(176, 136, 0),  // yellow
+        Color32::from_rgb(196, 90, 10),  // orange
+        Color32::from_rgb(207, 34, 46),  // red
+        Color32::from_rgb(191, 57, 137), // pink
+        Color32::from_rgb(130, 80, 223), // purple
     ],
 };
 
 impl Palette {
-    /// Color de una conexión resuelto para este tema.
+    /// Colour of a connection resolved for this theme.
     pub fn conn(&self, color: ConnColor) -> Color32 {
         let idx = match color {
             ConnColor::Blue => 0,
@@ -195,7 +195,7 @@ pub fn get(ui: &egui::Ui) -> &'static Palette {
     of(ui.visuals().dark_mode)
 }
 
-/// Construye el Style completo (visuals + spacing + tamaños de texto) de un tema.
+/// Builds the full Style (visuals + spacing + text sizes) of a theme.
 pub fn style(dark: bool, font_size: f32) -> egui::Style {
     let mut style = egui::Style {
         visuals: visuals(dark),
@@ -231,7 +231,7 @@ fn visuals(dark: bool) -> egui::Visuals {
 
     v.panel_fill = p.bg_base;
     v.window_fill = p.bg_raised;
-    v.faint_bg_color = p.grid_stripe; // rayado de TableBuilder
+    v.faint_bg_color = p.grid_stripe; // TableBuilder stripes
     v.extreme_bg_color = p.bg_sunken;
     v.text_edit_bg_color = Some(p.bg_sunken);
     v.code_bg_color = p.bg_surface;
@@ -253,12 +253,12 @@ fn visuals(dark: bool) -> egui::Visuals {
     };
 
     v.selection.bg_fill = p.accent_bg;
-    v.selection.stroke = Stroke::new(1.0, p.accent); // anillo de foco de TextEdit
+    v.selection.stroke = Stroke::new(1.0, p.accent); // TextEdit focus ring
     v.hyperlink_color = p.accent;
     v.warn_fg_color = p.warning;
     v.error_fg_color = p.danger;
 
-    // Los botones leen weak_bg_fill; checkboxes/sliders leen bg_fill: fijar ambos.
+    // Buttons read weak_bg_fill; checkboxes/sliders read bg_fill: set both.
     v.widgets.noninteractive.bg_fill = p.bg_surface;
     v.widgets.noninteractive.weak_bg_fill = p.bg_surface;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border_subtle);
@@ -297,7 +297,7 @@ fn visuals(dark: bool) -> egui::Visuals {
     v
 }
 
-/// Etiqueta de sección: mayúsculas, apagada, con tracking (estilo "TABLAS").
+/// Section label: uppercase, dimmed, with tracking ("TABLES" style).
 pub fn section_label(ui: &mut egui::Ui, text: &str) {
     let p = get(ui);
     let size = egui::TextStyle::Body.resolve(ui.style()).size * 0.85;
@@ -337,13 +337,13 @@ fn tinted_button(
     .inner
 }
 
-/// Botón de acción primaria (fondo de acento).
+/// Primary action button (accent background).
 pub fn primary_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
     let p = get(ui);
     tinted_button(ui, text, true, p.accent, p.accent_hover, p.on_accent)
 }
 
-/// Botón primario con estado enabled explícito (equivale a add_enabled).
+/// Primary button with an explicit enabled state (same as add_enabled).
 pub fn primary_button_enabled(
     ui: &mut egui::Ui,
     enabled: bool,
@@ -353,13 +353,13 @@ pub fn primary_button_enabled(
     tinted_button(ui, text, enabled, p.accent, p.accent_hover, p.on_accent)
 }
 
-/// Botón de acción destructiva (fondo rojo).
+/// Destructive action button (red background).
 pub fn danger_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
     let p = get(ui);
     tinted_button(ui, text, true, p.danger, p.danger_hover, p.on_accent)
 }
 
-/// Botón de advertencia (fondo ámbar): acciones que descartan trabajo.
+/// Warning button (amber background): actions that discard work.
 pub fn warning_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
     let p = get(ui);
     tinted_button(
@@ -372,7 +372,7 @@ pub fn warning_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> e
     )
 }
 
-/// Pill compacta con tinte translúcido del color dado (PK/UNI/IDX, contadores…).
+/// Compact pill with a translucent tint of the given colour (PK/UNI/IDX, counters…).
 pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::NONE
         .fill(color.gamma_multiply(0.18))
@@ -387,12 +387,12 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         });
 }
 
-/// Card de error: fondo rojizo translúcido con borde y texto en danger.
+/// Error card: translucent reddish background with border and text in danger.
 pub fn error_card(ui: &mut egui::Ui, text: &str) {
     error_card_response(ui, text);
 }
 
-/// Como `error_card`, para quien necesita saber dónde ha quedado.
+/// Like `error_card`, for callers that need to know where it ended up.
 pub fn error_card_response(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let p = get(ui);
     egui::Frame::NONE

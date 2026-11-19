@@ -1,5 +1,5 @@
-//! Pruebas del grid con un contexto egui real: se le pasan teclas como
-//! eventos y se mira qué queda en el estado y qué acción devuelve.
+//! Grid tests with a real egui context: keys are fed in as events and
+//! the resulting state and returned action are checked.
 
 use eframe::egui;
 
@@ -11,11 +11,11 @@ struct Fixture {
     ctx: egui::Context,
     view: TableViewState,
     column_info: Vec<ColumnInfo>,
-    /// Cargando o guardando: el grid no deja editar.
+    /// Loading or saving: the grid does not allow editing.
     busy: bool,
-    /// Lo que se muestra: una tabla o una vista.
+    /// What is shown: a table or a view.
     kind: TableKind,
-    /// Alto de la ventana.
+    /// Window height.
     height: f32,
 }
 
@@ -32,9 +32,9 @@ fn column(name: &str, extra: &str, nullable: bool) -> ColumnInfo {
 }
 
 impl Fixture {
-    /// Tabla de `rows` filas × 30 columnas con «r{fila}c{columna}» en cada
-    /// celda. La columna 0 es la clave primaria y no admite NULL; las demás
-    /// sí.
+    /// Table of `rows` rows × 30 columns with "r{row}c{column}" in each cell.
+    /// Column 0 is the primary key and does not allow NULL; the others
+    /// do.
     fn new(rows: usize) -> Self {
         let columns: Vec<String> = (0..COLS).map(|c| format!("col{c}")).collect();
         let column_info = columns
@@ -66,9 +66,9 @@ impl Fixture {
         }
     }
 
-    /// Un frame de 400 de ancho con los eventos indicados.
+    /// A 400-wide frame with the given events.
     fn frame(&mut self, modifiers: egui::Modifiers, mut events: Vec<egui::Event>) -> GridAction {
-        // Los modificadores llegan como evento y se quedan hasta el siguiente
+        // Modifiers arrive as an event and stay until the next one
         events.insert(0, egui::Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -101,7 +101,7 @@ impl Fixture {
         self.frame(egui::Modifiers::NONE, Vec::new())
     }
 
-    /// Da el foco del teclado al grid, como al pulsar dentro de él.
+    /// Gives keyboard focus to the grid, as when clicking inside it.
     fn focus(&mut self) {
         self.idle();
         let id = self.view.selection.focus_id.expect("el grid publica su id");
@@ -145,7 +145,7 @@ impl Fixture {
         });
     }
 
-    /// Lo que se ve del grid: (primera posición, tamaño) en cada eje.
+    /// What is visible of the grid: (first position, size) on each axis.
     fn visible(&self) -> (egui::Vec2, egui::Vec2) {
         let layout = self.view.selection.layout.as_ref().unwrap();
         (layout.offset, layout.size)
@@ -191,7 +191,7 @@ fn el_scroll_vertical_sigue_al_cursor() {
     );
     assert!(!f.row_visible(0));
 
-    // Y de vuelta arriba
+    // And back to the top
     f.press_with(egui::Modifiers::COMMAND, egui::Key::Home);
     f.idle();
     assert_eq!(f.cursor(), Some((RowRef::Existing(0), 0)));
@@ -252,7 +252,7 @@ fn enter_edita_y_enter_confirma() {
         "{action:?}"
     );
     assert!(f.view.editing_cell.is_none());
-    // El foco vuelve al grid: las flechas siguen moviendo el cursor
+    // Focus goes back to the grid: the arrows still move the cursor
     f.press(egui::Key::ArrowDown);
     assert_eq!(f.cursor(), Some((RowRef::Existing(2), 2)));
 }
@@ -299,7 +299,7 @@ fn tab_confirma_y_edita_la_celda_siguiente() {
         matches!(&action, GridAction::CellEdited { row: RowRef::Existing(0), value: Some(v), .. } if v.ends_with('x')),
         "{action:?}"
     );
-    // Última columna: pasa a la primera de la fila siguiente
+    // Last column: moves to the first one of the next row
     let editing = f.view.editing_cell.as_ref().expect("sigue editando");
     assert_eq!(
         editing.cell,
@@ -311,7 +311,7 @@ fn tab_confirma_y_edita_la_celda_siguiente() {
     assert_eq!(editing.buffer, "r1c0");
     assert_eq!(f.cursor(), Some((RowRef::Existing(1), 0)));
 
-    // Y Mayús+Tab vuelve
+    // And Shift+Tab goes back
     f.idle();
     f.press_with(egui::Modifiers::SHIFT, egui::Key::Tab);
     assert_eq!(
@@ -332,7 +332,7 @@ fn tab_salta_las_columnas_auto_de_una_fila_nueva() {
     f.press(egui::Key::F2);
     f.idle();
     f.press(egui::Key::Tab);
-    // La columna 0 de la fila nueva es AUTO_INCREMENT
+    // Column 0 of the new row is AUTO_INCREMENT
     assert_eq!(
         f.view.editing_cell.as_ref().unwrap().cell,
         CellRef {
@@ -448,7 +448,7 @@ fn alt_av_pag_y_re_pag_cambian_de_pagina() {
     let mut f = Fixture::new(3);
     f.focus();
     let alt = egui::Modifiers::ALT;
-    // Una sola página: no hay adónde ir
+    // A single page: nowhere to go
     assert!(matches!(
         f.press_with(alt, egui::Key::PageDown),
         GridAction::None
@@ -475,7 +475,7 @@ fn alt_av_pag_y_re_pag_cambian_de_pagina() {
         f.press_with(alt, egui::Key::PageDown),
         GridAction::None
     ));
-    // Sin Alt, Av Pág sigue moviendo el cursor dentro de la página
+    // Without Alt, Page Down still moves the cursor within the page
     f.press(egui::Key::PageDown);
     assert!(f.cursor().is_some());
 }
@@ -486,7 +486,7 @@ fn sin_clave_primaria_solo_se_editan_las_filas_nuevas() {
     f.column_info[0].column_key.clear();
     f.focus();
 
-    // Fila existente: ni editar, ni vaciar, ni eliminar
+    // Existing row: no editing, no emptying, no deleting
     f.put_cursor(RowRef::Existing(1), 1);
     f.press(egui::Key::Enter);
     assert!(f.view.editing_cell.is_none());
@@ -498,7 +498,7 @@ fn sin_clave_primaria_solo_se_editan_las_filas_nuevas() {
         GridAction::None
     ));
 
-    // Insertar y clonar sí: la fila nueva no necesita identificarse
+    // Insert and clone do work: the new row does not need to be identified
     assert!(matches!(
         f.press_with(egui::Modifiers::COMMAND, egui::Key::D),
         GridAction::CloneRow { row_idx: 1 }
@@ -621,7 +621,7 @@ fn se_resalta_el_valor_que_muestra_el_cursor() {
 }
 
 impl Fixture {
-    /// Clic con el botón principal en `pos`.
+    /// Primary-button click at `pos`.
     fn click(&mut self, pos: egui::Pos2) {
         let button = |pressed| egui::Event::PointerButton {
             pos,
@@ -659,7 +659,7 @@ fn un_clic_en_una_celda_pone_el_cursor_y_da_el_foco() {
     f.press(egui::Key::ArrowUp);
     assert_eq!(f.cursor(), Some((RowRef::Existing(row - 1), col)));
 
-    // Un clic fuera (la barra con el nombre de la tabla) se lo quita
+    // A click outside (the bar with the table name) takes it away
     f.click(egui::pos2(200.0, 12.0));
     assert!(!f.has_focus());
     let before = f.cursor();
@@ -674,14 +674,14 @@ fn pasar_por_una_celda_sin_cambiarla_no_es_una_edicion() {
     f.add_insert_row();
     f.focus();
 
-    // Enter y Enter sobre un NULL: antes quedaba un cambio pendiente a ''
+    // Enter and Enter on a NULL: it used to leave a pending change to ''
     f.put_cursor(RowRef::Existing(0), 1);
     f.press(egui::Key::Enter);
     f.idle();
     let action = f.press(egui::Key::Enter);
     assert!(matches!(action, GridAction::None), "{action:?}");
 
-    // Tab por las celdas de una fila nueva las deja en DEFAULT
+    // Tabbing through the cells of a new row leaves them at DEFAULT
     f.put_cursor(RowRef::Insert(0), 1);
     f.press(egui::Key::F2);
     f.idle();
@@ -714,7 +714,7 @@ fn una_tabla_sin_filas_muestra_sus_columnas() {
     let mut f = Fixture::new(0);
     f.idle();
     f.idle();
-    // Con cabecera hay tabla: antes solo salía el texto «(tabla vacía)»
+    // With a header there is a table: it used to show only the text "(tabla vacía)"
     let layout = f
         .view
         .selection
@@ -724,7 +724,7 @@ fn una_tabla_sin_filas_muestra_sus_columnas() {
     assert_eq!(layout.col_widths.len(), COLS);
 }
 
-/// Un frame del grid de solo lectura (el del editor SQL) sobre `data`.
+/// A frame of the read-only grid (the SQL editor's) over `data`.
 fn read_only_frame(
     ctx: &egui::Context,
     data: &QueryResult,
@@ -782,7 +782,7 @@ fn el_grid_de_solo_lectura_navega_y_copia_pero_no_edita() {
         })
     );
 
-    // Nada que cambie los datos
+    // Nothing that changes the data
     for (modifiers, key) in [
         (none, egui::Key::Delete),
         (none, egui::Key::Enter),
@@ -807,7 +807,7 @@ fn el_grid_de_solo_lectura_navega_y_copia_pero_no_edita() {
 }
 
 impl Fixture {
-    /// Si la fila `display` se ve entera en la zona visible del grid.
+    /// Whether row `display` is fully visible in the grid's visible area.
     fn row_visible(&self, display: usize) -> bool {
         let layout = self.view.selection.layout.as_ref().unwrap();
         let (top, bottom) = layout.row_span(display);
@@ -819,13 +819,13 @@ impl Fixture {
 fn una_fila_recien_anadida_queda_a_la_vista() {
     let mut f = Fixture::new(300);
     f.focus();
-    // Lo que hace la sesión con InsertRow: añadir la fila y llevar el cursor
+    // What the session does with InsertRow: add the row and move the cursor
     f.add_insert_row();
     f.view.selection.move_to(CellRef {
         row: RowRef::Insert(0),
         col: 1,
     });
-    // En ese mismo frame aparece la barra de guardar y el grid encoge
+    // In that same frame the save bar appears and the grid shrinks
     f.height = 260.0;
     for _ in 0..4 {
         f.idle();
@@ -836,7 +836,7 @@ fn una_fila_recien_anadida_queda_a_la_vista() {
         f.visible()
     );
 
-    // Y sigue a la vista al moverse por ella
+    // And it stays in view when moving through it
     f.press(egui::Key::ArrowRight);
     for _ in 0..4 {
         f.idle();
@@ -846,14 +846,14 @@ fn una_fila_recien_anadida_queda_a_la_vista() {
 
 #[test]
 fn la_barra_vertical_esta_en_el_borde_visible_y_desplaza() {
-    // 30 columnas en 400 de ancho: el contenido es mucho más ancho que la
-    // vista, y la barra de la propia tabla quedaría fuera de ella
+    // 30 columns in a width of 400: the content is much wider than the
+    // view, and the table's own bar would be outside it
     let mut f = Fixture::new(200);
     f.idle();
     f.idle();
     assert_eq!(f.visible().0.y, 0.0);
 
-    // Pulsar al final del carril, pegado al borde derecho de lo que se ve
+    // Click at the end of the track, right against the right edge of what is visible
     f.click(egui::pos2(388.0, 280.0));
     f.idle();
     let layout = f.view.selection.layout.as_ref().unwrap();

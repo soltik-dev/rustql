@@ -10,7 +10,7 @@ pub enum ActiveTab {
     Bbdd,
     Tabla,
     Datos,
-    /// Pestaña SQL, por su posición en `Session::sql_tabs`.
+    /// SQL tab, by its position in `Session::sql_tabs`.
     Sql(usize),
 }
 
@@ -19,16 +19,16 @@ pub struct TabBarResult {
     pub tab_clicked: Option<ActiveTab>,
     pub new_sql_tab: bool,
     pub close_sql_tab: Option<usize>,
-    /// Nombre nuevo de una pestaña SQL (vacío: vuelve a «SQL n»).
+    /// New name of a SQL tab (empty: back to "SQL n").
     pub renamed: Option<(usize, String)>,
 }
 
-/// Pestaña SQL cuyo nombre se está editando en la propia barra.
+/// SQL tab whose name is being edited in the bar itself.
 #[derive(Debug)]
 pub struct TabRename {
     pub idx: usize,
     pub buffer: String,
-    /// Primer frame: el campo aún tiene que tomar el foco.
+    /// First frame: the field still has to take focus.
     needs_focus: bool,
 }
 
@@ -42,20 +42,20 @@ impl TabRename {
     }
 }
 
-/// Lo que enseña la barra: la pestaña activa y a qué se refiere cada una.
+/// What the bar shows: the active tab and what each one refers to.
 pub struct TabBarView<'a> {
     pub active: ActiveTab,
     pub server_name: &'a str,
-    /// BBDD seleccionada; sin ella su pestaña está desactivada.
+    /// Selected database; without it its tab is disabled.
     pub db_name: Option<&'a str>,
-    /// Tabla abierta; sin ella Estructura y Datos están desactivadas.
+    /// Open table; without it Structure and Data are disabled.
     pub table_name: Option<&'a str>,
-    /// Título de cada pestaña SQL.
+    /// Title of each SQL tab.
     pub sql_titles: &'a [String],
 }
 
-/// Barra de pestañas de la sesión. `rename` es estado suyo: la pestaña SQL
-/// cuyo nombre se está editando.
+/// Tab bar of the session. `rename` is its own state: the SQL tab whose
+/// name is being edited.
 pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>) -> TabBarResult {
     let TabBarView {
         active,
@@ -66,7 +66,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
     } = *view;
     let (has_db, has_table) = (db_name.is_some(), table_name.is_some());
     let mut result = TabBarResult::default();
-    // La pestaña que se renombraba ya no existe
+    // The tab being renamed no longer exists
     if rename.as_ref().is_some_and(|r| r.idx >= sql_titles.len()) {
         *rename = None;
     }
@@ -74,23 +74,23 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
     ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
     ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
 
-    // Pestañas de contexto + pestañas SQL, con salto de línea si no caben
+    // Context tabs + SQL tabs, wrapping to a new line if they do not fit
     ui.horizontal_wrapped(|ui| {
-        // Servidor
+        // Server
         let srv_label = format!("{PLUG} {}", ellipsize(server_name, 18));
         if tab_btn(ui, &srv_label, active == ActiveTab::Servidor, true).clicked() {
             result.tab_clicked = Some(ActiveTab::Servidor);
         }
 
-        // BBDD
+        // Database
         let db_label = format!("{DATABASE} {}", ellipsize(db_name.unwrap_or("BBDD"), 18));
         if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db).clicked() {
             result.tab_clicked = Some(ActiveTab::Bbdd);
         }
 
-        // Estructura y Datos son de la misma tabla: su nombre va solo en
-        // Datos (antes las dos pestañas decían lo mismo y solo las
-        // distinguía el icono)
+        // Structure and Data belong to the same table: its name only goes in
+        // Data (both tabs used to say the same and only the icon told them
+        // apart)
         let struct_label = format!("{EDIT} Estructura");
         let mut struct_tab = tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table);
         if let Some(table) = table_name {
@@ -100,7 +100,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
-        // Datos
+        // Data
         let datos_label = format!("{GRID} {}", ellipsize(table_name.unwrap_or("Datos"), 18));
         if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table).clicked() {
             result.tab_clicked = Some(ActiveTab::Datos);
@@ -108,7 +108,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
 
         tab_separator(ui);
 
-        // Pestañas SQL
+        // SQL tabs
         for (i, title) in sql_titles.iter().enumerate() {
             if rename.as_ref().is_some_and(|r| r.idx == i) {
                 rename_field(ui, rename, &mut result);
@@ -138,13 +138,13 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
                 .on_hover_text(format!(
                     "Cerrar pestaña SQL  {CMD}W (o clic central en la pestaña)"
                 ));
-            // Clic central, como en las pestañas de conexión
+            // Middle click, as on the connection tabs
             if close_resp.clicked() || tab.middle_clicked() {
                 result.close_sql_tab = Some(i);
             }
         }
 
-        // Pestaña SQL nueva
+        // New SQL tab
         if ui
             .add(egui::Button::new("＋").small().frame(false))
             .on_hover_text(format!("Nueva pestaña SQL  {CMD}T"))
@@ -157,8 +157,8 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
     result
 }
 
-/// Campo en el que se edita el nombre de una pestaña SQL, en su sitio de la
-/// barra. Enter o salir del campo lo confirma; Escape lo deja como estaba.
+/// Field where the name of a SQL tab is edited, in its place in the bar.
+/// Enter or leaving the field confirms it; Escape leaves it as it was.
 fn rename_field(ui: &mut egui::Ui, rename: &mut Option<TabRename>, result: &mut TabBarResult) {
     let Some(state) = rename else {
         return;
@@ -191,8 +191,8 @@ fn tab_separator(ui: &mut egui::Ui) {
     );
 }
 
-/// Pestaña: fondo transparente, hover en superficie y subrayado de acento si
-/// está activa.
+/// Tab: transparent background, surface hover and accent underline when
+/// active.
 fn tab_btn(ui: &mut egui::Ui, label: &str, active: bool, enabled: bool) -> egui::Response {
     let p = theme::get(ui);
     if !enabled {
@@ -300,8 +300,8 @@ mod tests {
             }])
         }
 
-        /// Doble clic en la primera pestaña SQL: la barra se recorre de
-        /// izquierda a derecha hasta dar con ella.
+        /// Double click on the first SQL tab: the bar is scanned from left to
+        /// right until it is found.
         fn start_rename(&mut self) {
             self.frame(Vec::new());
             for x in (0..900).step_by(6) {
@@ -309,12 +309,12 @@ mod tests {
                 self.click(pos);
                 self.click(pos);
                 if self.rename.is_some() {
-                    // El campo toma el foco en su primer frame
+                    // The field takes focus on its first frame
                     self.frame(Vec::new());
                     self.frame(Vec::new());
                     return;
                 }
-                // Que el siguiente intento no sea un triple clic
+                // So the next attempt is not a triple click
                 self.time += 1.0;
             }
             panic!("ningún doble clic empezó a renombrar");

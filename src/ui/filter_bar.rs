@@ -10,9 +10,9 @@ pub enum FilterAction {
     Clear,
 }
 
-/// Barra de filtro WHERE encima del grid.
-/// `filter_history` contiene los últimos filtros aplicados (más reciente primero).
-/// Retorna la acción que el usuario tomó este frame.
+/// WHERE filter bar above the grid.
+/// `filter_history` holds the last filters applied (most recent first).
+/// Returns the action the user took this frame.
 pub fn show(
     ui: &mut egui::Ui,
     filter_text: &mut String,
@@ -22,7 +22,7 @@ pub fn show(
     let mut action = FilterAction::None;
 
     ui.horizontal(|ui| {
-        // ── Botón historial ──────────────────────────────────────────────
+        // ── History button ───────────────────────────────────────────────
         let hist_btn = ui
             .button("▾")
             .on_hover_text("Historial de filtros recientes");
@@ -63,7 +63,7 @@ pub fn show(
             action = FilterAction::Apply;
         }
 
-        // ── Etiqueta + campo de texto ────────────────────────────────────
+        // ── Label + text field ───────────────────────────────────────────
         ui.monospace(egui::RichText::new("WHERE").color(theme::get(ui).sql_keyword));
 
         let resp = ui
@@ -74,7 +74,7 @@ pub fn show(
             )
             .on_hover_text("SQL directo — se inyecta como cláusula WHERE en la consulta");
 
-        // Enter en el campo también aplica
+        // Enter in the field also applies
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = FilterAction::Apply;
         }

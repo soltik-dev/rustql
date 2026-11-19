@@ -1,20 +1,20 @@
-//! Barra superior de pestañas de conexión: una por sesión, con el color de su
-//! conexión, y botón para abrir una nueva.
+//! Top bar of connection tabs: one per session, in its connection's
+//! colour, and a button to open a new one.
 
 use eframe::egui;
 
 use crate::ui::icons::PLUS;
 use crate::ui::theme;
 
-/// Lo que la barra necesita de cada sesión.
+/// What the bar needs from each session.
 pub struct ConnTab<'a> {
     pub title: &'a str,
-    /// «user@host:port»; vacío mientras la pestaña está en el formulario.
+    /// "user@host:port"; empty while the tab is on the form.
     pub tooltip: String,
     pub color: Option<egui::Color32>,
-    /// Conectando o con una query en curso: spinner en lugar del punto.
+    /// Connecting or with a query running: spinner instead of the dot.
     pub busy: bool,
-    /// Cambios sin guardar: punto de aviso en el hueco del botón de cerrar.
+    /// Unsaved changes: warning dot in the close button's slot.
     pub pending: bool,
 }
 
@@ -62,8 +62,8 @@ pub fn show(ui: &mut egui::Ui, tabs: &[ConnTab], active: usize) -> ConnTabsActio
     action
 }
 
-/// Pestaña dibujada a mano: [punto/spinner] título [×]. La activa se funde
-/// con el contenido (fondo base) y lleva el tinte y la franja de su color.
+/// Hand-drawn tab: [dot/spinner] title [×]. The active one blends with
+/// the content (base background) and carries its colour's tint and stripe.
 fn tab_widget(
     ui: &mut egui::Ui,
     tab: &ConnTab,
@@ -87,7 +87,7 @@ fn tab_widget(
         egui::pos2(rect.right() - 6.0 - CLOSE / 2.0, rect.center().y),
         egui::vec2(CLOSE, CLOSE),
     );
-    // Registrado después: tiene prioridad sobre la pestaña en su hueco
+    // Registered afterwards: takes priority over the tab in its slot
     let close_resp = ui.interact(close_rect, resp.id.with("close"), egui::Sense::click());
     let hovered = resp.hovered() || close_resp.hovered();
 
@@ -99,7 +99,7 @@ fn tab_widget(
         se: 0,
     };
 
-    // Fondo
+    // Background
     if active {
         painter.rect_filled(rect, top_radius, p.bg_base);
         if let Some(c) = tab.color {
@@ -114,7 +114,7 @@ fn tab_widget(
         painter.rect_filled(rect, top_radius, p.bg_surface);
     }
 
-    // Punto de color (anillo si no tiene) o spinner
+    // Colour dot (a ring if it has none) or spinner
     let dot_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + PAD + DOT / 2.0, rect.center().y),
         egui::vec2(DOT, DOT),
@@ -138,15 +138,15 @@ fn tab_widget(
         }
     }
 
-    // Título
+    // Title
     let text_pos = egui::pos2(
         dot_rect.right() + GAP,
         rect.center().y - galley.size().y / 2.0,
     );
     painter.galley(text_pos, galley, text_color);
 
-    // Hueco de cerrar: × en la activa o al pasar el ratón; si hay cambios
-    // pendientes, un punto de aviso que pasa a × con el ratón encima.
+    // Close slot: × on the active tab or on hover; with pending changes, a
+    // warning dot that turns into × when hovered.
     if tab.pending && !hovered {
         painter.circle_filled(close_rect.center(), 3.5, p.warning);
     } else if active || hovered {

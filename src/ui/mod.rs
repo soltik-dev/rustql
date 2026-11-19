@@ -17,15 +17,15 @@ pub mod table_structure;
 pub mod theme;
 pub mod toasts;
 
-/// Prefijo de los atajos con la tecla de comando: Ctrl en Linux y Windows,
-/// ⌘ en macOS (egui la expone como `Modifiers::command`).
+/// Prefix of the shortcuts with the command key: Ctrl on Linux and
+/// Windows, ⌘ on macOS (egui exposes it as `Modifiers::command`).
 pub const CMD: &str = if cfg!(target_os = "macos") {
     "⌘"
 } else {
     "Ctrl+"
 };
 
-/// Recorta `s` a `max_chars` caracteres, con «…» si sobraban.
+/// Truncates `s` to `max_chars` characters, with "…" if there were more.
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
@@ -36,7 +36,7 @@ pub fn ellipsize(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Tamaño en bytes con la unidad que mejor lo expresa (B, KB, MB o GB).
+/// Size in bytes with the unit that best expresses it (B, KB, MB or GB).
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;

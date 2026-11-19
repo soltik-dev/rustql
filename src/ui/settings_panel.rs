@@ -3,16 +3,16 @@ use eframe::egui;
 use crate::settings::{self, AppSettings, CopyFormat, Theme};
 use crate::ui::theme;
 
-/// Un deslizador da su valor por cambiado al soltarlo (o al teclearlo), no
-/// en cada frame del arrastre: aplicar un ajuste rehace los estilos y lo
-/// guarda en disco, y con el tamaño de fuente la interfaz se movería bajo
-/// el puntero.
+/// A slider reports its value as changed when released (or typed), not on
+/// every frame of the drag: applying a setting rebuilds the styles and
+/// saves it to disk, and with the font size the interface would move
+/// under the pointer.
 fn slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> bool {
     let resp = ui.add(slider);
     resp.drag_stopped() || (resp.changed() && !resp.dragged())
 }
 
-/// Devuelve true si algún ajuste cambió este frame.
+/// Returns true if any setting changed this frame.
 pub fn show(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     let mut changed = false;
 

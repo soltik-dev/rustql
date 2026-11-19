@@ -1,5 +1,5 @@
-//! Lo que hace la sesión con las acciones del usuario: grid, sidebar,
-//! pestañas SQL, diálogos y formulario de conexión.
+//! What the session does with the user's actions: grid, sidebar, SQL
+//! tabs, dialogs and connection form.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -31,8 +31,8 @@ use crate::ui::tab_bar::{ActiveTab, TabBarResult};
 use std::collections::BTreeSet;
 
 impl Session {
-    /// Aplica lo que el usuario hizo en el frame, en orden: lo de un
-    /// manejador puede depender de lo que hizo el anterior.
+    /// Applies what the user did in the frame, in order: what one handler
+    /// does may depend on what the previous one did.
     pub(super) fn apply_signals(
         &mut self,
         ctx: &egui::Context,
@@ -48,14 +48,14 @@ impl Session {
         }
         self.handle_tab_bar(sh, signals.tab_bar, keys);
         self.handle_grid_action(ctx, sh, signals.grid);
-        // Barra de guardar (solo visible con cambios pendientes)
+        // Save bar (only visible with pending changes)
         match signals.apply_bar {
             ApplyBarAction::Apply => self.commit_pending_changes(sh, AfterCommit::ReloadData),
             ApplyBarAction::Discard => self.discard_pending(),
             ApplyBarAction::None => {}
         }
         let disconnect = self.handle_sidebar_action(ctx, sh, signals.sidebar.action);
-        // Datos que el sidebar necesita para dibujar el árbol
+        // Data the sidebar needs to draw the tree
         for db in &signals.sidebar.load_tables {
             self.request_tables(db);
         }
@@ -63,7 +63,7 @@ impl Session {
             self.request_all_tables();
         }
         if disconnect {
-            // Lo escrito y sin ejecutar no debe perderse al reconectar
+            // Text typed but not run must not be lost when reconnecting
             self.save_tabs_state(sh);
             self.disconnect();
         }
@@ -75,11 +75,11 @@ impl Session {
         self.handle_sql_action(ctx, sh, signals.sql);
     }
 
-    /// F5: vuelve a leer lo que muestra la pestaña activa (antes recargaba
-    /// siempre la tabla abierta, se estuviera viendo o no).
+    /// F5: reads again what the active tab shows (it used to always reload
+    /// the open table, whether it was being viewed or not).
     fn refresh_active_tab(&mut self, ctx: &egui::Context, sh: &mut Shared) {
         match self.active_tab {
-            // Datos y estructura de la tabla abierta
+            // Data and structure of the open table
             ActiveTab::Datos => self.request_reload(sh, Reload::Refresh),
             ActiveTab::Tabla => {
                 if let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node {
@@ -93,7 +93,7 @@ impl Session {
                 }
             }
             ActiveTab::Servidor => self.schema.databases_info = Loadable::NotLoaded,
-            // La consulta de la pestaña, como Ctrl+Enter
+            // The tab's query, like Ctrl+Enter
             ActiveTab::Sql(i) => {
                 if let Some(tab) = self.sql_tabs.get(i)
                     && tab.running.is_none()
@@ -107,11 +107,11 @@ impl Session {
                 }
             }
         }
-        // Lo invalidado se vuelve a pedir en el siguiente frame (request_tab_data)
+        // Whatever was invalidated is requested again next frame (request_tab_data)
     }
 
-    /// Pestañas de la barra en su orden, sin las que están desactivadas por
-    /// no haber BBDD o tabla seleccionada.
+    /// Bar tabs in order, without those disabled because no database or
+    /// table is selected.
     fn tab_order(&self) -> Vec<ActiveTab> {
         let mut tabs = vec![ActiveTab::Servidor];
         if self.schema.selected_db().is_some() {
@@ -124,7 +124,7 @@ impl Session {
         tabs
     }
 
-    /// Pestaña siguiente (o anterior) a la activa, dando la vuelta.
+    /// Tab after (or before) the active one, wrapping around.
     fn neighbour_tab(&self, forward: bool) -> ActiveTab {
         let tabs = self.tab_order();
         let current = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
@@ -133,7 +133,7 @@ impl Session {
     }
 
     fn handle_tab_bar(&mut self, sh: &mut Shared, mut tab_bar: TabBarResult, keys: FrameKeys) {
-        // El teclado hace lo mismo que el ratón sobre la barra
+        // The keyboard does the same as the mouse on the bar
         if self.is_connected() {
             if let Some(forward) = keys.cycle_tab {
                 tab_bar.tab_clicked = Some(self.neighbour_tab(forward));
@@ -146,7 +146,7 @@ impl Session {
         }
 
         if let Some(t) = tab_bar.tab_clicked {
-            // Al salir de una pestaña SQL se guarda su texto
+            // Leaving a SQL tab saves its text
             if matches!(self.active_tab, ActiveTab::Sql(_)) && t != self.active_tab {
                 self.save_tabs_state(sh);
             }
@@ -167,7 +167,7 @@ impl Session {
         if let Some(idx) = tab_bar.close_sql_tab
             && let Some(tab) = self.sql_tabs.get(idx)
         {
-            // Cerrar borra su consulta para siempre: con texto, se pregunta
+            // Closing deletes its query for good: with text, it asks
             if tab.sql_text.trim().is_empty() {
                 self.close_sql_tab(sh, idx);
             } else {
@@ -180,8 +180,8 @@ impl Session {
         }
     }
 
-    /// Abre una pestaña SQL nueva con `sql_text` y pasa a ella. Su contexto
-    /// es `db` o, sin él, la BBDD seleccionada en el árbol.
+    /// Opens a new SQL tab with `sql_text` and switches to it. Its context
+    /// is `db` or, without it, the database selected in the tree.
     pub fn open_sql_tab(&mut self, sh: &mut Shared, db: Option<String>, sql_text: String) {
         if !self.is_connected() {
             return;
@@ -192,15 +192,15 @@ impl Session {
         self.save_tabs_state(sh);
     }
 
-    /// Cierra la pestaña SQL `idx` y descarta su texto. Siempre queda al
-    /// menos una pestaña.
+    /// Closes SQL tab `idx` and discards its text. At least one tab always
+    /// remains.
     pub(super) fn close_sql_tab(&mut self, sh: &mut Shared, idx: usize) {
         if idx >= self.sql_tabs.len() {
             return;
         }
-        // Su consulta, si aún se está ejecutando, ya no le interesa a nadie
+        // Its query, if still running, is of no interest to anyone now
         self.cancel_editor(idx);
-        // Los índices cambian: el nombre a medio escribir no se aplica
+        // The indices change: a half-typed name is not applied
         self.sql_tab_rename = None;
         self.sql_tabs.remove(idx);
         if self.sql_tabs.is_empty() {
@@ -218,7 +218,7 @@ impl Session {
     fn handle_grid_action(&mut self, ctx: &egui::Context, sh: &mut Shared, action: GridAction) {
         match action {
             GridAction::SortChanged(sorts) => {
-                // Re-ejecutar con ORDER BY para sort server-side (LIMIT correcto)
+                // Re-run with ORDER BY for server-side sorting (correct LIMIT)
                 self.request_reload(sh, Reload::Sort(sorts));
             }
             GridAction::CellEdited {
@@ -253,8 +253,8 @@ impl Session {
                         );
                         self.request_reload(sh, Reload::Filter(filter));
                     }
-                    // En un aviso: como error de la tabla tapaba el grid
-                    // hasta la siguiente recarga
+                    // In a notification: as a table error it covered the grid
+                    // until the next reload
                     Err(e) => {
                         sh.toasts
                             .error(format!("No se pudo leer el portapapeles: {e}"));
@@ -295,8 +295,8 @@ impl Session {
         }
     }
 
-    /// Añade al grid una fila nueva (copia de `source_row` si se indica) y
-    /// lleva a ella el cursor y el foco, lista para escribir.
+    /// Adds a new row to the grid (a copy of `source_row` if given) and moves
+    /// the cursor and focus to it, ready to type.
     fn add_insert_row(&mut self, ctx: &egui::Context, source_row: Option<usize>) {
         let Some(row) = self.new_insert_row(source_row) else {
             return;
@@ -313,7 +313,7 @@ impl Session {
         }
     }
 
-    /// Devuelve true si el usuario pidió desconectar.
+    /// Returns true if the user asked to disconnect.
     pub(super) fn handle_sidebar_action(
         &mut self,
         ctx: &egui::Context,
@@ -427,7 +427,7 @@ impl Session {
         }
     }
 
-    /// Doble clic en una tabla de la pestaña BBDD: la abre.
+    /// Double click on a table in the database tab: opens it.
     fn handle_db_info_action(&mut self, sh: &mut Shared, action: DbInfoAction) {
         if let DbInfoAction::OpenTable(table) = action
             && let Some(db) = self.selected_db().map(str::to_string)
@@ -443,7 +443,7 @@ impl Session {
         match action {
             SqlEditorAction::None => {}
             SqlEditorAction::Execute { sql, db_context } => {
-                // Persistir texto de pestañas SQL al ejecutar
+                // Persist SQL tab text when running
                 self.save_tabs_state(sh);
                 self.run_editor(tab_idx, sql, db_context, sh.settings.sql_editor_max_rows);
             }
@@ -464,7 +464,7 @@ impl Session {
                     );
                 }
             }
-            // Limpiar no se puede deshacer: se pregunta antes
+            // Clearing cannot be undone: it asks first
             SqlEditorAction::Clear => {
                 if let Some(tab) = self.sql_tabs.get(tab_idx) {
                     self.modal = ModalState::ConfirmClearSql {
@@ -477,7 +477,7 @@ impl Session {
         }
     }
 
-    /// Procesa la acción resultante del modal activo.
+    /// Handles the action coming from the active modal.
     pub(super) fn handle_modal_action(&mut self, modal_action: ModalAction, sh: &mut Shared) {
         match modal_action {
             ModalAction::None => {}
@@ -517,8 +517,8 @@ impl Session {
                 self.discard_pending();
                 self.reload_now(sh, reload);
             }
-            // Escrituras: en segundo plano. Los formularios siguen abiertos
-            // hasta saber el resultado; las confirmaciones se cierran ya.
+            // Writes: in the background. Forms stay open until the result is
+            // known; confirmations close right away.
             ModalAction::CreateDatabase { name, charset } => self.create_database(name, charset),
             ModalAction::CreateTable { db, name, columns } => {
                 let sql = modals::build_create_table_sql(self.engine(), &db, &name, &columns);
@@ -589,8 +589,8 @@ impl Session {
         }
     }
 
-    /// Formulario de conexión: elegir, guardar o borrar un perfil. Devuelve
-    /// el índice del perfil borrado (las demás sesiones deben reajustarse).
+    /// Connection form: pick, save or delete a profile. Returns the index of
+    /// the deleted profile (the other sessions must adjust).
     pub(super) fn handle_profile_form(
         &mut self,
         ctx: &egui::Context,
@@ -611,7 +611,7 @@ impl Session {
             self.color = profile.color;
             self.selected_profile_idx = Some(idx);
             self.error_message = None;
-            // La lista era la del servidor del perfil anterior
+            // The list belonged to the previous profile's server
             self.db_picker = Default::default();
         }
 
@@ -635,8 +635,8 @@ impl Session {
         removed
     }
 
-    /// Guarda el formulario como favorito: sobre el seleccionado (o el que
-    /// se llame igual) o, con `SaveProfile::AsNew`, como otro distinto.
+    /// Saves the form as a favourite: over the selected one (or the one with
+    /// the same name) or, with `SaveProfile::AsNew`, as a different one.
     fn save_profile(&mut self, ctx: &egui::Context, sh: &mut Shared, mode: SaveProfile) {
         let name = self.profile_name.trim().to_string();
         if name.is_empty() {
@@ -671,8 +671,8 @@ impl Session {
             database: self.params.database.trim().to_string(),
             tls: self.params.tls,
             tls_ca: self.params.tls_ca.trim().to_string(),
-            // Una contraseña nueva se marca cuando el llavero la confirma
-            // (poll_keyring). Con el campo vacío se conserva la que había.
+            // A new password is flagged once the keyring confirms it
+            // (poll_keyring). With the field empty, the existing one is kept.
             password_in_keyring: had_keyring && self.save_password,
             password: None,
             color: self.color,
@@ -702,9 +702,9 @@ impl Session {
             .success(format!("Favorito «{}» guardado", self.profile_name.trim()));
     }
 
-    /// Pasa el puerto del formulario a los parámetros. Si no es un puerto
-    /// válido lo dice en el formulario y devuelve false: antes se ignoraba y
-    /// se usaba el puerto anterior sin avisar.
+    /// Moves the form's port into the parameters. If it is not a valid port,
+    /// says so in the form and returns false: it used to be ignored and the
+    /// previous port was used without warning.
     fn read_port(&mut self) -> bool {
         match self.port_str.trim().parse::<u16>() {
             Ok(port) if port > 0 => {
@@ -721,8 +721,8 @@ impl Session {
         }
     }
 
-    /// Lee la definición de una vista y la abre en una pestaña SQL, lista
-    /// para verla o cambiarla.
+    /// Reads the definition of a view and opens it in a SQL tab, ready to see
+    /// or change it.
     fn open_view_definition(&mut self, db: String, view: String) {
         self.spawn_job(move |b| JobResult::ViewDefinition {
             result: b.view_definition(&db, &view),
@@ -731,8 +731,8 @@ impl Session {
         });
     }
 
-    /// Lee en segundo plano las BBDD del servidor del formulario, con sus
-    /// credenciales, para elegir una. Cada petición sustituye a la anterior.
+    /// Reads in the background the databases of the form's server, with its
+    /// credentials, to pick one. Each request replaces the previous one.
     pub(super) fn load_database_list(&mut self, ctx: &egui::Context) {
         if self.params.host.trim().is_empty() {
             self.db_picker.list = Loadable::Failed("Indica el host del servidor.".into());
@@ -753,7 +753,7 @@ impl Session {
         self.db_picker.receiver = Some(rx);
     }
 
-    /// Lanza la conexión en segundo plano con los parámetros del formulario.
+    /// Starts the connection in the background with the form's parameters.
     pub(super) fn start_connect(&mut self, sh: &Shared) {
         if self.params.host.trim().is_empty() {
             self.error_message = Some("Indica el host del servidor.".into());
@@ -783,8 +783,8 @@ impl Session {
     }
 }
 
-/// Copia al portapapeles las filas `rows` de `data` en el formato `fmt` y lo
-/// confirma con un aviso. `table` es el nombre que llevan los INSERT.
+/// Copies rows `rows` of `data` to the clipboard in format `fmt` and
+/// confirms it with a notification. `table` is the name the INSERTs use.
 fn copy_rows(
     ctx: &egui::Context,
     sh: &mut Shared,

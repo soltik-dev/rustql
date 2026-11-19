@@ -1,5 +1,5 @@
-//! Seguridad de la conexión: si va cifrada con TLS y si se comprueba con
-//! quién se habla. Es igual para todos los motores.
+//! Connection security: whether it is encrypted with TLS and whether the
+//! other end is checked. It is the same for every engine.
 
 use std::sync::Arc;
 
@@ -14,15 +14,15 @@ use super::DbResult;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
-    /// Cifra si el servidor lo ofrece; si no, conecta sin cifrar. No
-    /// comprueba el certificado (es el `sslmode=prefer` de libpq).
+    /// Encrypts if the server offers it; otherwise connects unencrypted. Does
+    /// not check the certificate (libpq's `sslmode=prefer`).
     #[default]
     Prefer,
-    /// Sin TLS no conecta. No comprueba el certificado: protege de quien
-    /// escucha, no de quien suplanta al servidor.
+    /// Does not connect without TLS. Does not check the certificate: protects
+    /// against eavesdroppers, not against someone impersonating the server.
     Require,
-    /// Sin TLS no conecta, y el certificado debe ser del servidor al que se
-    /// llama y estar firmado por una autoridad de confianza.
+    /// Does not connect without TLS, and the certificate must belong to the
+    /// server being called and be signed by a trusted authority.
     Verify,
 }
 
@@ -56,26 +56,26 @@ impl TlsMode {
         }
     }
 
-    /// Si el certificado del servidor se da por bueno sin mirarlo.
+    /// Whether the server certificate is accepted without looking at it.
     pub fn accepts_any_certificate(self) -> bool {
         self != TlsMode::Verify
     }
 }
 
-/// Cómo viaja de verdad una conexión abierta, para enseñarlo.
+/// How an open connection really travels, to show it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Security {
-    /// Cifrada con TLS.
+    /// Encrypted with TLS.
     Encrypted,
-    /// Sin cifrar, pero no sale de este equipo (socket o dirección local).
+    /// Unencrypted, but it never leaves this machine (socket or local address).
     Local,
-    /// Sin cifrar y por la red.
+    /// Unencrypted and over the network.
     Plain,
 }
 
 impl Security {
-    /// `encrypted`: lo que dice el servidor de la conexión. `host`: a dónde
-    /// se conectó.
+    /// `encrypted`: what the server says about the connection. `host`: where
+    /// it connected to.
     pub fn of(encrypted: bool, host: &str) -> Self {
         let host = host.trim();
         let local = host.starts_with('/')
@@ -91,7 +91,7 @@ impl Security {
         }
     }
 
-    /// Explicación para quien pasa el ratón por el candado.
+    /// Explanation for whoever hovers over the padlock.
     pub fn description(self, mode: TlsMode) -> &'static str {
         match (self, mode) {
             (Security::Encrypted, TlsMode::Verify) => {
@@ -110,8 +110,8 @@ impl Security {
     }
 }
 
-/// Lo que hay que añadir a un error de conexión para que se entienda qué
-/// hacer, si es de TLS. `error` es el texto del driver.
+/// What to add to a connection error so it is clear what to do, if it is
+/// a TLS one. `error` is the driver's text.
 pub fn hint(mode: TlsMode, error: &str) -> &'static str {
     let lower = error.to_lowercase();
     if mode == TlsMode::Verify && (lower.contains("certificate") || lower.contains("cert")) {
@@ -134,15 +134,15 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// El crate de MySQL usa el proveedor criptográfico por defecto del proceso:
-/// se fija el mismo que usa el resto (la primera vez; después no hace nada).
+/// The MySQL crate uses the process's default crypto provider: the same
+/// one the rest uses is installed (the first time; afterwards it does nothing).
 pub fn install_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// Da por bueno cualquier certificado: la conexión va cifrada pero no se
-/// comprueba con quién se habla. Permite entrar en los servidores con
-/// certificado autofirmado, que son la mayoría.
+/// Accepts any certificate: the connection is encrypted but the other end
+/// is not checked. Lets users into servers with a self-signed certificate,
+/// which are most of them.
 #[derive(Debug)]
 struct AnyCertificate(Arc<CryptoProvider>);
 
@@ -191,12 +191,12 @@ impl ServerCertVerifier for AnyCertificate {
     }
 }
 
-/// Autoridades en las que se confía al verificar, además de las públicas:
-/// las instaladas en el sistema y, si se indica, las del fichero PEM
-/// `ca_file`. Solo las que rustls sabe leer (un almacén del sistema puede
-/// traer alguna que no).
+/// Authorities trusted when verifying, besides the public ones: those
+/// installed on the system and, if given, those of the PEM file
+/// `ca_file`. Only those rustls can read (a system store may include
+/// some it cannot).
 pub fn trusted_authorities(ca_file: Option<&str>) -> DbResult<Vec<CertificateDer<'static>>> {
-    // Si el sistema no tiene almacén o no se puede leer, quedan las públicas
+    // If the system has no store or it cannot be read, the public ones remain
     let mut authorities = rustls_native_certs::load_native_certs().certs;
     if let Some(path) = ca_file {
         let unreadable =
@@ -217,12 +217,12 @@ pub fn trusted_authorities(ca_file: Option<&str>) -> DbResult<Vec<CertificateDer
     Ok(authorities)
 }
 
-/// Las autoridades de `trusted_authorities` en un fichero PEM temporal, para
-/// los drivers que solo admiten un fichero. Se borra al soltarlo.
+/// The authorities of `trusted_authorities` in a temporary PEM file, for
+/// drivers that only accept a file. Deleted when dropped.
 pub struct AuthorityBundle(std::path::PathBuf);
 
 impl AuthorityBundle {
-    /// `None` si no hay ninguna autoridad que añadir a las públicas.
+    /// `None` if there is no authority to add to the public ones.
     pub fn create(ca_file: Option<&str>) -> DbResult<Option<Self>> {
         use base64::Engine as _;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -241,7 +241,7 @@ impl AuthorityBundle {
             }
             pem.push_str("-----END CERTIFICATE-----\n");
         }
-        // Un fichero por conexión: cada una puede llevar su propia CA
+        // One file per connection: each one may carry its own CA
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = format!(
             "rustql-ca-{}-{}.pem",
@@ -265,9 +265,9 @@ impl Drop for AuthorityBundle {
     }
 }
 
-/// Configuración de rustls para `mode`. Al verificar se confía en las
-/// autoridades públicas, en las del sistema y, si se indica, en las del
-/// fichero PEM `ca_file`.
+/// rustls configuration for `mode`. When verifying, the public authorities,
+/// the system ones and, if given, those of the PEM file `ca_file` are
+/// trusted.
 pub fn client_config(mode: TlsMode, ca_file: Option<&str>) -> DbResult<rustls::ClientConfig> {
     let provider = provider();
     let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
@@ -301,19 +301,19 @@ mod tests {
         let err = client_config(TlsMode::Verify, empty.to_str()).unwrap_err();
         assert!(err.contains("ningún certificado"), "{err}");
 
-        // Sin verificar, el fichero ni se mira
+        // Without verifying, the file is not even looked at
         client_config(TlsMode::Require, Some("/no/existe/ca.pem")).unwrap();
         client_config(TlsMode::Verify, None).unwrap();
     }
 
     #[test]
     fn las_autoridades_del_sistema_van_en_un_fichero_que_se_borra() {
-        // Haya o no almacén en el sistema, no es un error
+        // Whether or not the system has a store, it is not an error
         let Some(bundle) = AuthorityBundle::create(None).unwrap() else {
             return;
         };
         let path = bundle.path().to_path_buf();
-        // Lo que se escribe se vuelve a leer como certificados
+        // What is written reads back as certificates
         let read = CertificateDer::pem_file_iter(&path).unwrap().count();
         assert_eq!(read, trusted_authorities(None).unwrap().len());
         assert!(read > 0);
@@ -344,7 +344,7 @@ mod tests {
         let cert = "invalid peer certificate: UnknownIssuer";
         assert!(hint(TlsMode::Verify, cert).contains("fichero de CA"));
         assert!(hint(TlsMode::Require, "server does not support TLS").contains("exige TLS"));
-        // Así lo dice el crate de MySQL
+        // That is how the MySQL crate puts it
         let mysql = "Client requires secure connection but server does not have this capability";
         assert!(hint(TlsMode::Verify, mysql).contains("exige TLS"));
         assert_eq!(hint(TlsMode::Prefer, "server does not support TLS"), "");

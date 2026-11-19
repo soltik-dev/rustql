@@ -1,5 +1,5 @@
-//! Contra un servidor real (`RUSTQL_TEST_POSTGRES`). Cada test crea y borra
-//! sus BBDD `rustql_test_*`.
+//! Against a real server (`RUSTQL_TEST_POSTGRES`). Each test creates and
+//! drops its own `rustql_test_*` databases.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -8,8 +8,8 @@ use super::super::{ExportEvent, spawn_export};
 use super::*;
 use crate::db::test_server::{pg_backend, pg_params};
 
-/// Tablas de la BBDD de prueba, con la hija antes que la madre: las claves
-/// foráneas no pueden depender del orden.
+/// Tables of the test database, with the child before the parent: foreign
+/// keys must not depend on the order.
 const TABLES: [&str; 5] = [
     "ventas.pedidos",
     "clientes",
@@ -63,8 +63,8 @@ nueva', 'l@example.com', '{}', '[1, 2]', '\\x');
     INSERT INTO \"es.quema\".notas VALUES ('a', 'uno'), ('b', NULL);
 ";
 
-/// Backend con la BBDD `db` recién creada con el esquema de prueba, y las
-/// BBDD `others` eliminadas.
+/// Backend with database `db` freshly created with the test schema, and
+/// the `others` databases dropped.
 fn source_database(db: &str, others: &[&str]) -> PostgresBackend {
     let b = pg_backend();
     for name in others.iter().chain([&db]) {
@@ -92,7 +92,7 @@ fn export(
     rx.iter().collect()
 }
 
-/// Los errores de una exportación, para enseñarlos si un test falla.
+/// The errors of an export, to show them if a test fails.
 fn errors(events: &[ExportEvent]) -> Vec<String> {
     events
         .iter()
@@ -115,8 +115,8 @@ fn finished(events: &[ExportEvent]) -> Option<(usize, u64)> {
     }
 }
 
-/// Lo que debe ser igual en el origen y en la copia: filas, estructura,
-/// claves, índices y por dónde van las secuencias.
+/// What must be the same at the source and in the copy: rows, structure,
+/// keys, indexes and where the sequences are.
 fn fingerprint(b: &PostgresBackend, db: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut query = |title: &str, sql: &str| {
@@ -160,7 +160,7 @@ fn fingerprint(b: &PostgresBackend, db: &str) -> Vec<String> {
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' \
            AND c.relkind IN ('r', 'v') ORDER BY 1",
     );
-    // Lo siguiente que dará cada secuencia
+    // The next value each sequence will return
     query(
         "secuencias",
         "SELECT schemaname, sequencename, last_value, increment_by FROM pg_sequences ORDER BY 1, 2",
@@ -173,7 +173,7 @@ fn fingerprint(b: &PostgresBackend, db: &str) -> Vec<String> {
     lines
 }
 
-/// Compara dos huellas enseñando solo lo que cambia.
+/// Compares two fingerprints, showing only what differs.
 #[track_caller]
 fn assert_same(copy: &[String], original: &[String]) {
     let missing: Vec<_> = original.iter().filter(|l| !copy.contains(l)).collect();
@@ -206,10 +206,10 @@ fn el_fichero_sql_recrea_la_base_de_datos() {
     let dump = std::fs::read_to_string(&path).unwrap();
     let _ = std::fs::remove_file(&path);
 
-    // Cargarlo en otra BBDD, como haría psql
+    // Load it into another database, as psql would
     let loaded = b.execute_write(Some(copy), &dump);
     let (original, restored) = (fingerprint(&b, db), fingerprint(&b, copy));
-    // La copia sigue numerando por donde iba el original
+    // The copy keeps numbering where the original was
     let next = b.execute_query(
         Some(copy),
         "INSERT INTO clientes (nombre) VALUES ('nuevo') RETURNING id; \
@@ -237,12 +237,12 @@ fn copia_a_otra_bbdd_y_se_puede_repetir() {
         target_db: copy.into(),
     };
 
-    // La BBDD de destino no existe: se crea
+    // The destination database does not exist: it is created
     let first = export(db, &TABLES, to_copy(), ExportOptions::default());
     let after_first = fingerprint(&b, copy);
-    // Sin eliminar lo que hay, la segunda vez las tablas ya existen
+    // Without dropping what is there, the second time the tables already exist
     let clash = export(db, &TABLES, to_copy(), ExportOptions::default());
-    // Eliminándolo, se puede repetir aunque haya claves foráneas entre ellas
+    // Dropping it, it can be repeated even with foreign keys between them
     let again = export(
         db,
         &TABLES,
@@ -253,14 +253,14 @@ fn copia_a_otra_bbdd_y_se_puede_repetir() {
         },
     );
     let after_again = fingerprint(&b, copy);
-    // Una tabla de la que dependen otras que no se exportan no se elimina:
-    // el servidor se niega y no se fuerza
+    // A table that other non-exported tables depend on is not dropped:
+    // the server refuses and it is not forced
     let with_drop = || ExportOptions {
         drop_if_exists: true,
         ..Default::default()
     };
     let blocked = export(db, &["productos"], to_copy(), with_drop());
-    // Con las que dependen de ella, sí. Primero solo la estructura…
+    // With the ones that depend on it, it is. First only the structure…
     let related = ["productos", "ventas.pedidos", "clientes_activos"];
     let empty = export(
         db,
@@ -272,7 +272,7 @@ fn copia_a_otra_bbdd_y_se_puede_repetir() {
         },
     );
     let empty_rows = b.execute_query(Some(copy), "SELECT count(*) FROM ventas.pedidos");
-    // …y después solo los datos, sobre las tablas ya creadas
+    // …and then only the data, over the tables already created
     let data_only = export(
         db,
         &related,
@@ -321,7 +321,7 @@ fn a_otro_servidor_y_nunca_sobre_si_misma() {
         drop_if_exists: true,
         ..Default::default()
     };
-    // El mismo servidor a través de un perfil «remoto», y la misma BBDD
+    // The same server through a "remote" profile, and the same database
     let onto_itself = export(db, &TABLES, remote(db), options.clone());
     let same_server_db = export(
         db,
@@ -378,7 +378,7 @@ fn una_carpeta_con_un_fichero_por_tabla_y_lo_que_no_se_exporta() {
     let _ = std::fs::remove_dir_all(&folder);
     b.drop_database(db).unwrap();
 
-    // Las dos que no se pueden exportar lo dicen; las demás, se exportan
+    // The two that cannot be exported say so; the rest are exported
     let errors = errors(&events);
     assert_eq!(errors.len(), 2, "{errors:?}");
     assert!(errors[0].starts_with("medidas: ") && errors[0].contains("pg_dump"));
@@ -391,7 +391,7 @@ fn una_carpeta_con_un_fichero_por_tabla_y_lo_que_no_se_exporta() {
             ..
         })
     ));
-    // Cada fichero lleva todo lo suyo, también lo que va al final
+    // Each file carries everything it needs, including what goes at the end
     for expected in [
         "DROP TABLE IF EXISTS \"ventas\".\"pedidos\";",
         "CREATE SCHEMA IF NOT EXISTS \"ventas\";",
@@ -446,14 +446,14 @@ fn una_tabla_grande_se_copia_por_bloques_y_se_puede_cancelar() {
             .collect()
     };
 
-    // Entera: en bloques del tamaño pedido, y llega completa
+    // Whole: in batches of the requested size, and it arrives complete
     let whole = export(db, &["grande", "pequena"], target(), options(1000));
     let copied = b.execute_query(
         Some(copy),
         "SELECT count(*), sum(id), count(DISTINCT v) FROM grande",
     );
 
-    // Cancelada al llegar el primer bloque: no sigue hasta el final
+    // Cancelled when the first batch arrives: it does not go on to the end
     let cancel = Arc::new(AtomicBool::new(false));
     let rx = spawn_export(
         pg_params(),
@@ -471,8 +471,8 @@ fn una_tabla_grande_se_copia_por_bloques_y_se_puede_cancelar() {
         cancelled.push(event);
     }
 
-    // Si el destino rechaza un bloque, esa tabla falla (y deja de leerse en
-    // el origen) y las demás siguen
+    // If the destination rejects a batch, that table fails (and stops being
+    // read at the source) and the others carry on
     b.execute_write(
         Some(copy),
         "DROP TABLE IF EXISTS grande, pequena;

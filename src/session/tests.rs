@@ -13,7 +13,7 @@ use crate::ui::results_grid::{GridAction, SortSpec};
 use crate::ui::sidebar::SidebarAction;
 use crate::ui::sql_editor::SqlEditorAction;
 
-/// Backend sin servidor: las lecturas devuelven vacío y las escrituras, ok.
+/// Backend without a server: reads return empty and writes succeed.
 struct FakeBackend;
 
 impl DbBackend for FakeBackend {
@@ -46,7 +46,7 @@ impl DbBackend for FakeBackend {
         _: usize,
         cancel: &CancelFlag,
     ) -> DbResult<QueryResult> {
-        // «LENTA» no termina hasta que la cancelan
+        // "LENTA" does not finish until it is cancelled
         let start = Instant::now();
         while sql == "LENTA" && !cancel.load(Ordering::SeqCst) {
             assert!(start.elapsed() < Duration::from_secs(10), "sin cancelar");
@@ -122,8 +122,8 @@ fn column(name: &str, key: &str, extra: &str) -> ColumnInfo {
     }
 }
 
-/// Sesión conectada con `db.t` (clave primaria `id`) abierta y sus datos
-/// y estructura cargados.
+/// Connected session with `db.t` (primary key `id`) open and its data and
+/// structure loaded.
 fn session_with_table() -> Session {
     let mut s = Session::new(0);
     s.state = ConnState::Connected(Arc::new(FakeBackend));
@@ -312,7 +312,7 @@ fn vaciar_la_tabla_abierta_la_recarga_sin_cambios() {
     finish_jobs(&mut s, &mut sh);
     assert_eq!(open_table(&s), Some(("db", "t")));
     assert_eq!(s.pending_count(), 0);
-    // Recargada: FakeBackend devuelve una tabla vacía
+    // Reloaded: FakeBackend returns an empty table
     assert_eq!(
         s.table_view.table_data.as_ref().map(|d| d.rows.len()),
         Some(0)
@@ -328,8 +328,8 @@ fn edit(row_idx: usize, col_idx: usize, value: Option<&str>) -> PendingEdit {
     }
 }
 
-/// Sentencias de un DELETE, un UPDATE (clave y otra columna de la misma
-/// fila) y un INSERT pendientes, en el dialecto de `engine`.
+/// Statements for a pending DELETE, UPDATE (key and another column of the
+/// same row) and INSERT, in the dialect of `engine`.
 fn pending_statements_for(engine: Engine) -> Vec<Statement> {
     let mut s = session_with_table();
     s.params.engine = engine;
@@ -342,7 +342,7 @@ fn pending_statements_for(engine: Engine) -> Vec<Statement> {
         ..Default::default()
     });
     s.table_view.pending_deletes.insert(1);
-    // Clave primaria y otra columna de la misma fila: un único UPDATE
+    // Primary key and another column of the same row: a single UPDATE
     s.table_view.pending_edits = vec![edit(0, 0, Some("10")), edit(0, 1, None)];
     s.table_view.pending_inserts.push(PendingInsert {
         values: vec![
@@ -351,7 +351,7 @@ fn pending_statements_for(engine: Engine) -> Vec<Statement> {
         ],
         auto_cols: vec![false, false],
     });
-    // Y una fila con todo por defecto
+    // And a row with every default
     s.table_view.pending_inserts.push(PendingInsert {
         values: vec![InsertValue::Default, InsertValue::Default],
         auto_cols: vec![false, false],
@@ -390,7 +390,7 @@ fn cambios_pendientes_como_sentencias_con_parametros() {
 
 #[test]
 fn cambios_pendientes_en_el_dialecto_de_postgres() {
-    // Parámetros numerados, comillas dobles y el esquema en vez de la BBDD
+    // Numbered parameters, double quotes and the schema instead of the database
     assert_eq!(
         pending_statements_for(Engine::Postgres),
         [
@@ -556,9 +556,9 @@ fn vaciar_todas_sin_haber_desplegado_el_arbol() {
 
     assert_eq!(suelta, Some("0".into()));
     assert_eq!(hija, Some("0".into()));
-    // La referenciada por una clave foránea no se puede truncar: se avisa
+    // The one referenced by a foreign key cannot be truncated: a warning is shown
     assert_eq!(padre, Some("1".into()));
-    // …y solo de ella: una vista no tiene datos que vaciar, ni se intenta
+    // …and only about it: a view has no data to empty, and it is not even tried
     assert!(
         matches!(&s.modal, ModalState::Error { message, .. }
             if message.starts_with("padre:") && !message.contains("vista")),
@@ -567,8 +567,8 @@ fn vaciar_todas_sin_haber_desplegado_el_arbol() {
     );
 }
 
-/// Una vista en el árbol: se sabe que lo es, su definición se abre en el
-/// editor y se elimina como vista. En los dos motores.
+/// A view in the tree: it is known to be one, its definition opens in the
+/// editor and it is dropped as a view. In both engines.
 fn views_through_the_session(mut s: Session, db: &str, definition_starts: &str) {
     let mut sh = shared();
     s.request_tables(db);
@@ -576,10 +576,10 @@ fn views_through_the_session(mut s: Session, db: &str, definition_starts: &str) 
     assert_eq!(tables(&s, db).unwrap(), &["t", "vista"]);
     assert_eq!(s.schema.kind(db, "t"), TableKind::Table);
     assert_eq!(s.schema.kind(db, "vista"), TableKind::View);
-    // Lo que no se ha leído se trata como tabla
+    // Anything not read yet is treated as a table
     assert_eq!(s.schema.kind("otra", "vista"), TableKind::Table);
 
-    // Su definición, en una pestaña SQL nueva sobre su BBDD
+    // Its definition, in a new SQL tab on its database
     let tabs = s.sql_tabs.len();
     let ctx = egui::Context::default();
     s.handle_sidebar_action(
@@ -605,7 +605,7 @@ fn views_through_the_session(mut s: Session, db: &str, definition_starts: &str) 
         tab.sql_text
     );
 
-    // Eliminarla pide confirmación como vista y usa DROP VIEW
+    // Dropping it asks for confirmation as a view and uses DROP VIEW
     s.handle_sidebar_action(
         &ctx,
         &mut sh,
@@ -696,7 +696,7 @@ fn una_vista_de_postgres_en_el_arbol() {
         .unwrap();
 }
 
-/// `db.t` con columnas id (AUTO_INCREMENT), v y n.
+/// `db.t` with columns id (AUTO_INCREMENT), v and n.
 fn session_with_auto_id() -> Session {
     let mut s = session_with_table();
     s.table_view.table_data = Some(QueryResult {
@@ -719,7 +719,7 @@ fn session_with_auto_id() -> Session {
 fn fila_nueva_deja_los_valores_por_defecto_al_servidor() {
     let mut s = session_with_auto_id();
     let row = s.new_insert_row(None).unwrap();
-    // Antes: '' en v y n, y el texto «CURRENT_TIMESTAMP» como valor
+    // Before: '' in v and n, and the text "CURRENT_TIMESTAMP" as a value
     assert_eq!(row.values, vec![InsertValue::Default; 3]);
     s.table_view.pending_inserts.push(row);
     s.record_edit(RowRef::Insert(0), 1, Some("x".into()));
@@ -803,7 +803,7 @@ fn fila_nueva_contra_el_servidor() {
     assert_eq!(rows.unwrap(), [[some("1"), some("1"), None, some("x")]]);
 }
 
-/// Espera a que terminen los trabajos en segundo plano y los aplica.
+/// Waits for the background jobs to finish and applies them.
 fn finish_jobs(s: &mut Session, sh: &mut Shared) {
     let start = Instant::now();
     while s.jobs.pending() > 0 {
@@ -833,7 +833,7 @@ fn un_fallo_de_esquema_no_se_reintenta_solo() {
     s.schema.databases = Loadable::Failed("sin permiso".into());
     s.request_tab_data();
     assert!(matches!(s.schema.databases, Loadable::Failed(_)));
-    // Refrescar sí lo vuelve a pedir
+    // Refresh does request it again
     s.schema.clear();
     s.request_tab_data();
     assert!(matches!(s.schema.databases, Loadable::Loading(_)));
@@ -964,7 +964,7 @@ fn el_resultado_del_editor_va_a_su_pestana() {
     s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
     s.run_editor(1, "SELECT 1".into(), String::new(), 10);
     assert!(s.sql_tabs[1].running.is_some());
-    // Se cierra la primera: la que ejecuta pasa a ser la 0
+    // The first one is closed: the one running becomes 0
     s.sql_tabs.remove(0);
     finish_jobs(&mut s, &mut shared());
     assert!(s.sql_tabs[0].running.is_none());
@@ -986,7 +986,7 @@ fn cancelar_termina_la_consulta_del_editor() {
     };
     let ctx = egui::Context::default();
     s.apply_signals(&ctx, &mut sh, signals(), FrameKeys::default());
-    // Pedirlo dos veces no lanza dos cancelaciones
+    // Asking twice does not start two cancellations
     let pending = s.jobs.pending();
     s.apply_signals(&ctx, &mut sh, signals(), FrameKeys::default());
     assert_eq!(s.jobs.pending(), pending);
@@ -1005,7 +1005,7 @@ fn cerrar_una_pestana_sql_cancela_su_consulta() {
     s.run_editor(1, "LENTA".into(), String::new(), 10);
     s.close_sql_tab(&mut sh, 1);
     assert_eq!(s.sql_tabs.len(), 1);
-    // Si no se cancelara, el hilo no terminaría nunca (ni el test)
+    // If it were not cancelled, the thread would never end (nor the test)
     finish_jobs(&mut s, &mut sh);
 }
 
@@ -1046,7 +1046,7 @@ fn guardar_como_nuevo_no_toca_el_favorito_seleccionado() {
     s.handle_profile_form(&ctx, &mut sh, None, Some(SaveProfile::Update), false);
     assert_eq!(s.selected_profile_idx, Some(0));
 
-    // Mismo nombre: sería un duplicado indistinguible
+    // Same name: it would be an indistinguishable duplicate
     s.params.host = "dos.example".into();
     s.handle_profile_form(&ctx, &mut sh, None, Some(SaveProfile::AsNew), false);
     assert_eq!(sh.profiles.len(), 1);
@@ -1087,7 +1087,7 @@ fn cerrar_una_pestana_sql_con_texto_pide_confirmacion() {
     assert_eq!(s.sql_tabs.len(), 1);
     assert_eq!(s.active_tab, ActiveTab::Sql(0));
 
-    // Vacía: se cierra directamente (y queda una nueva en su lugar)
+    // Empty: closed right away (and a new one takes its place)
     s.apply_signals(&ctx, &mut sh, close(0), FrameKeys::default());
     assert!(matches!(s.modal, ModalState::None));
     assert_eq!(s.sql_tabs.len(), 1);
@@ -1137,7 +1137,7 @@ fn la_tabla_se_pide_por_paginas_con_una_fila_de_mas() {
     );
 }
 
-/// Llegan estos datos para la consulta en curso de la tabla.
+/// This data arrives for the table's current query.
 fn receive(s: &mut Session, sh: &mut Shared, ids: &[&str]) {
     s.apply_job(
         sh,
@@ -1167,7 +1167,7 @@ fn la_fila_de_mas_dice_que_hay_otra_pagina_y_no_se_muestra() {
 fn cambiar_de_pagina_con_cambios_pregunta_y_ordenar_vuelve_a_la_primera() {
     let mut s = session_with_table();
     let mut sh = shared();
-    // La tabla ya está cargada con páginas de 2 filas
+    // The table is already loaded with pages of 2 rows
     sh.settings.query_limit = 2;
     s.table_view.page_size = 2;
     let ctx = egui::Context::default();
@@ -1181,7 +1181,7 @@ fn cambiar_de_pagina_con_cambios_pregunta_y_ordenar_vuelve_a_la_primera() {
     assert!(s.table_view.query_loading);
     receive(&mut s, &mut sh, &["3", "4", "5"]);
 
-    // Los cambios van por posición de fila: con otra página no valdrían
+    // Changes go by row position: on another page they would not apply
     s.table_view.pending_deletes.insert(0);
     s.apply_signals(&ctx, &mut sh, go(2), FrameKeys::default());
     assert_eq!(s.table_view.page, 1, "hasta decidir, la misma página");
@@ -1196,18 +1196,18 @@ fn cambiar_de_pagina_con_cambios_pregunta_y_ordenar_vuelve_a_la_primera() {
     assert_eq!(s.table_view.page, 2);
     assert_eq!(s.pending_count(), 0);
 
-    // Otra ordenación (u otro filtro): las páginas ya no son las mismas
+    // Another sort order (or filter): the pages are no longer the same
     s.reload_now(&mut sh, Reload::Sort(Vec::new()));
     assert_eq!(s.table_view.page, 0);
     s.table_view.page = 3;
     s.reload_now(&mut sh, Reload::Filter("id > 1".into()));
     assert_eq!(s.table_view.page, 0);
-    // F5 se queda donde está
+    // F5 stays where it is
     s.table_view.page = 3;
     s.reload_now(&mut sh, Reload::Refresh);
     assert_eq!(s.table_view.page, 3);
 
-    // Con otro tamaño de página en los ajustes, a la primera
+    // With another page size in the settings, back to the first
     sh.settings.query_limit = 50;
     s.reload_now(&mut sh, Reload::Refresh);
     assert_eq!((s.table_view.page, s.table_view.page_size), (0, 50));
@@ -1267,8 +1267,8 @@ fn paginas_contra_el_servidor() {
     );
 }
 
-/// El recorrido de una tabla de PostgreSQL, de otro esquema, por la sesión:
-/// abrirla, paginarla y ordenarla, filtrarla, editarla y clonarla.
+/// The journey of a PostgreSQL table from another schema through the
+/// session: open it, page and sort it, filter it, edit it and clone it.
 #[test]
 #[ignore = "necesita RUSTQL_TEST_POSTGRES"]
 fn una_tabla_de_postgres_de_principio_a_fin() {
@@ -1295,14 +1295,14 @@ fn una_tabla_de_postgres_de_principio_a_fin() {
         data.rows.iter().map(|r| r[0].clone().unwrap()).collect()
     };
 
-    // Abrir: datos de la primera página y estructura, con su clave
+    // Open: data of the first page and structure, with its key
     s.on_table_selected(&mut sh, db.into(), table.into());
     finish_jobs(&mut s, &mut sh);
     assert_eq!(s.table_view.table_error, None);
     assert_eq!(s.table_view.primary_keys, ["id"]);
     assert_eq!((ids(&s).len(), s.table_view.has_more), (2, true));
 
-    // Ordenar y pasar de página
+    // Sort and change page
     s.table_view.sort_specs = vec![SortSpec {
         col_idx: 0,
         col_name: "id".into(),
@@ -1315,7 +1315,7 @@ fn una_tabla_de_postgres_de_principio_a_fin() {
         (vec!["1".to_string()], false)
     );
 
-    // Filtrar con lo que genera el diálogo: sin distinguir mayúsculas
+    // Filter with what the dialog generates: case-insensitive
     sh.settings.query_limit = 100;
     let filter = Engine::Postgres.like("v", "%UNO%");
     s.reload_now(&mut sh, Reload::Filter(filter));
@@ -1325,8 +1325,8 @@ fn una_tabla_de_postgres_de_principio_a_fin() {
     finish_jobs(&mut s, &mut sh);
     assert_eq!(ids(&s), ["3", "2", "1"]);
 
-    // Editar un número, poner un NULL, borrar una fila e insertar dos: una
-    // con valores y otra con todo por defecto (id de la secuencia)
+    // Edit a number, set a NULL, delete a row and insert two: one with
+    // values and one with every default (id from the sequence)
     let row_of = |s: &Session, id: &str| ids(s).iter().position(|i| i == id).unwrap();
     s.table_view.pending_edits = vec![
         edit(row_of(&s, "1"), 1, Some("11")),
@@ -1344,7 +1344,7 @@ fn una_tabla_de_postgres_de_principio_a_fin() {
     assert!(matches!(s.modal, ModalState::None), "{:?}", s.modal);
     assert_eq!(s.pending_count(), 0);
 
-    // Clonar con datos, a otro nombre del mismo esquema
+    // Clone with data, to another name in the same schema
     s.clone_table(db.into(), table.into(), "ventas.copia".into(), true);
     finish_jobs(&mut s, &mut sh);
     assert!(!sh.toasts.has_error(), "{:?}", sh.toasts.texts());
@@ -1405,7 +1405,7 @@ fn copiar_filas_dice_cuantas_y_en_que_formato() {
     s.apply_signals(&ctx, &mut sh, copy(None), FrameKeys::default());
     assert_eq!(sh.toasts.texts(), ["2 filas copiadas (CSV)"]);
 
-    // Las del resultado de una pestaña SQL, igual
+    // Those of a SQL tab's result, the same
     s.active_tab = ActiveTab::Sql(0);
     s.sql_tabs[0].result = Some(Ok(data(&["7"])));
     s.sql_tabs[0].selection.rows = [0].into();
@@ -1436,7 +1436,7 @@ fn renombrar_una_pestana_sql_se_guarda_y_vacio_vuelve_al_numero() {
     assert_eq!(s.sql_tabs[0].title(0), "Informe");
     let saved = &sh.settings.sql_tabs_by_conn[&s.params.key()];
     assert_eq!(saved[0].name.as_deref(), Some("Informe"));
-    // Al reconectar se restaura con su nombre
+    // On reconnecting it is restored with its name
     assert_eq!(SqlTab::restore(&saved[0]).title(3), "Informe");
 
     s.apply_signals(&ctx, &mut sh, rename(""), FrameKeys::default());
@@ -1450,7 +1450,7 @@ fn una_consulta_del_log_se_abre_en_una_pestana_sql_nueva() {
     s.open_sql_tab(&mut sh, None, "SELECT del log".into());
     assert_eq!(s.active_tab, ActiveTab::Sql(1));
     assert_eq!(s.sql_tabs[1].sql_text, "SELECT del log");
-    // Con la BBDD de la tabla abierta como contexto, y ya guardada
+    // With the open table's database as context, and already saved
     assert_eq!(s.sql_tabs[1].db_context, "db");
     assert_eq!(saved_sql(&s, &sh), ["", "SELECT del log"]);
 }
@@ -1467,13 +1467,13 @@ fn ctrl_w_cierra_la_pestana_sql_activa_y_solo_esa() {
     s.sql_tabs = vec![SqlTab::default(), SqlTab::default()];
     s.sql_tabs[1].sql_text = "SELECT importante".into();
 
-    // En una pestaña que no es SQL no cierra nada
+    // In a tab that is not SQL it closes nothing
     s.active_tab = ActiveTab::Datos;
     s.apply_signals(&ctx, &mut sh, Default::default(), ctrl_w);
     assert_eq!(s.sql_tabs.len(), 2);
     assert!(matches!(s.modal, ModalState::None));
 
-    // Con texto pregunta, igual que la × de la pestaña
+    // With text it asks, just like the tab's ×
     s.active_tab = ActiveTab::Sql(1);
     s.apply_signals(&ctx, &mut sh, Default::default(), ctrl_w);
     assert!(matches!(
@@ -1498,7 +1498,7 @@ fn los_atajos_de_pestana_no_llegan_a_los_campos_de_texto() {
         repeat: false,
         modifiers,
     };
-    // Como llega Ctrl en Linux y Windows: es también la tecla de comando
+    // As Ctrl arrives on Linux and Windows: it is also the command key
     let ctrl = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
     let ctrl_shift = ctrl | egui::Modifiers::SHIFT;
     let frame = |events: Vec<egui::Event>| {
@@ -1509,7 +1509,7 @@ fn los_atajos_de_pestana_no_llegan_a_los_campos_de_texto() {
         let mut seen = None;
         ctx.run_ui(input, |ui| {
             let keys = FrameKeys::read(ui.ctx());
-            // Lo que le queda por leer a un TextEdit dibujado después
+            // What a TextEdit drawn later has left to read
             let left = ui.input(|i| i.events.len());
             seen = Some((keys.cycle_tab, keys.ctrl_w, left));
         })
@@ -1521,7 +1521,7 @@ fn los_atajos_de_pestana_no_llegan_a_los_campos_de_texto() {
     assert_eq!(frame(vec![key(tab, ctrl)]), (Some(true), false, 0));
     assert_eq!(frame(vec![key(tab, ctrl_shift)]), (Some(false), false, 0));
     assert_eq!(frame(vec![key(egui::Key::W, ctrl)]), (None, true, 0));
-    // Tab a secas sigue siendo del widget con el foco
+    // Plain Tab still belongs to the focused widget
     assert_eq!(
         frame(vec![key(tab, egui::Modifiers::NONE)]),
         (None, false, 1)
@@ -1552,7 +1552,7 @@ fn ctrl_tab_recorre_las_pestanas_activas_y_da_la_vuelta() {
     s.apply_signals(&ctx, &mut sh, Default::default(), cycle(false));
     assert_eq!(s.active_tab, ActiveTab::Sql(1));
 
-    // Sin tabla abierta, Estructura y Datos están desactivadas: se saltan
+    // With no open table, Structure and Data are disabled: they are skipped
     s.schema.selected_node = Some(SelectedNode::Database("db".into()));
     s.active_tab = ActiveTab::Bbdd;
     s.apply_signals(&ctx, &mut sh, Default::default(), cycle(true));
@@ -1606,7 +1606,7 @@ fn el_texto_sql_se_guarda_al_desconectar_y_no_en_el_formulario() {
     assert!(!s.is_connected());
     assert_eq!(saved_sql(&s, &sh), ["SELECT 1"]);
 
-    // Ya en el formulario, no se guarda bajo unos parámetros cualesquiera
+    // Back in the form, it is not saved under arbitrary parameters
     s.sql_tabs[0].sql_text = "otra cosa".into();
     s.save_tabs_state(&mut sh);
     assert_eq!(saved_sql(&s, &sh), ["SELECT 1"]);
@@ -1641,7 +1641,7 @@ fn al_cambiar_de_tabla_no_se_ven_los_datos_de_la_anterior() {
     assert!(s.table_view.query_loading);
 }
 
-/// Un frame en el que solo se pulsa F5.
+/// A frame in which only F5 is pressed.
 fn press_f5(s: &mut Session, sh: &mut Shared) {
     let ctx = egui::Context::default();
     let f5 = FrameKeys {

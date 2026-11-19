@@ -13,7 +13,7 @@ use super::{
     tls, validate_charset,
 };
 
-// El dialecto de este backend, para él y para la exportación
+// This backend's dialect, for it and for the export
 pub(super) fn quote_ident(s: &str) -> String {
     Engine::Mysql.quote_ident(s)
 }
@@ -26,15 +26,15 @@ pub(super) fn literal(s: &str) -> String {
     Engine::Mysql.literal(s)
 }
 
-/// ER_QUERY_INTERRUPTED: la sentencia se interrumpió con KILL QUERY.
+/// ER_QUERY_INTERRUPTED: the statement was interrupted with KILL QUERY.
 const ER_QUERY_INTERRUPTED: u16 = 1317;
 
 fn is_interrupted(e: &mysql::Error) -> bool {
     matches!(e, mysql::Error::MySqlError(e) if e.code == ER_QUERY_INTERRUPTED)
 }
 
-/// Tabla del árbol a partir de su TABLE_TYPE: «VIEW» y «SYSTEM VIEW» son
-/// vistas; lo demás (tablas, secuencias de MariaDB) se trata como tabla.
+/// Tree table from its TABLE_TYPE: "VIEW" and "SYSTEM VIEW" are views;
+/// everything else (tables, MariaDB sequences) is treated as a table.
 fn table_entry(name: String, table_type: &str) -> TableEntry {
     let kind = if table_type.contains("VIEW") {
         TableKind::View
@@ -62,9 +62,9 @@ fn value_to_string(v: Value) -> Option<String> {
     }
 }
 
-/// Un valor leído del servidor, escrito como literal SQL. Lo que no es
-/// texto válido (el contenido de un BLOB) va en hexadecimal: como cadena se
-/// estropearía.
+/// A value read from the server, written as a SQL literal. Anything that
+/// is not valid text (the content of a BLOB) goes in hexadecimal: as a
+/// string it would get corrupted.
 pub(super) fn sql_literal(v: Value) -> String {
     match v {
         Value::NULL => "NULL".into(),
@@ -83,9 +83,9 @@ pub(super) fn sql_literal(v: Value) -> String {
     }
 }
 
-/// Lee el primer conjunto de resultados: sus columnas —que vienen aunque no
-/// haya ninguna fila— y, como mucho, `max_rows` filas. Al soltar `set`, el
-/// crate lee y descarta lo que quede.
+/// Reads the first result set: its columns (which arrive even when there
+/// are no rows) and at most `max_rows` rows. When `set` is dropped, the
+/// crate reads and discards whatever is left.
 fn read_result<P: Protocol>(
     mut set: mysql::QueryResult<'_, '_, '_, P>,
     max_rows: usize,
@@ -128,28 +128,28 @@ fn col(row: &[Option<String>], i: usize) -> String {
         .to_string()
 }
 
-/// Almacena el Pool en lugar de una PooledConn individual.
-/// El pool detecta conexiones muertas y reconecta de forma transparente
-/// al solicitar una nueva conexión mediante get_conn().
+/// Stores the Pool instead of a single PooledConn.
+/// The pool detects dead connections and reconnects transparently when
+/// a new connection is requested through get_conn().
 pub struct MysqlBackend {
     pool: Pool,
     opts: Opts,
     security: Security,
-    /// Fichero con las autoridades con las que se verifica al servidor.
+    /// File with the authorities the server is verified against.
     _authorities: Option<tls::AuthorityBundle>,
-    /// La conexión se limita a esta BBDD: es la única que se lista.
+    /// The connection is limited to this database: it is the only one listed.
     only_database: Option<String>,
-    /// Conexión propia del editor SQL, fuera del pool: el pool resetea cada
-    /// conexión al devolverla (COM_RESET_CONNECTION), lo que deshace
-    /// transacciones, variables y tablas temporales entre ejecuciones.
-    /// Se abre al primer uso.
+    /// The SQL editor's own connection, outside the pool: the pool resets
+    /// each connection when it is returned (COM_RESET_CONNECTION), which
+    /// undoes transactions, variables and temporary tables between runs.
+    /// Opened on first use.
     session: Arc<Mutex<Option<Conn>>>,
-    /// Ejecución del editor que está ahora mismo en el servidor: el id de su
-    /// conexión (para KILL QUERY) y su señal de cancelación.
+    /// Editor run currently on the server: the id of its connection (for
+    /// KILL QUERY) and its cancellation signal.
     session_running: Mutex<Option<(u32, CancelFlag)>>,
-    /// Se envió un KILL QUERY a la sesión del editor. Si llegó con la
-    /// sentencia ya terminada, el servidor puede aplicárselo a la siguiente:
-    /// antes de ejecutarla se absorbe con una sentencia vacía.
+    /// A KILL QUERY was sent to the editor session. If it arrived after the
+    /// statement had finished, the server may apply it to the next one: before
+    /// running it, it is absorbed with an empty statement.
     session_killed: AtomicBool,
 }
 
@@ -165,17 +165,18 @@ impl MysqlBackend {
         on_status("Estableciendo conexión TCP...");
         tls::install_provider();
         let strict = params.tls != TlsMode::Prefer;
-        // Al verificar: las autoridades del sistema y la del fichero de CA,
-        // juntas en un fichero (el crate solo admite uno, y ya confía en las
-        // públicas). Vive lo que la conexión: se lee en cada conexión nueva
+        // When verifying: the system authorities and the one in the CA file,
+        // together in one file (the crate only accepts one, and it already
+        // trusts the public ones). It lives as long as the connection: it is
+        // read on every new connection
         let authorities = match params.tls {
             TlsMode::Verify => tls::AuthorityBundle::create(params.ca_file())?,
             _ => None,
         };
         let build = |with_tls: bool| -> Opts {
-            // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
-            // max:4 deja que los trabajos en segundo plano (datos, metadatos,
-            // escrituras) no esperen unos a otros; el editor SQL va aparte.
+            // min:0 avoids opening 10 connections in parallel at startup (default min:10).
+            // max:4 lets the background jobs (data, metadata, writes) run without
+            // waiting for each other; the SQL editor has its own connection.
             let pool_constraints = PoolConstraints::new(0, 4).unwrap();
             let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
             let any_certificate = params.tls.accepts_any_certificate();
@@ -189,22 +190,22 @@ impl MysqlBackend {
                 .tcp_port(params.port)
                 .user(Some(params.user.as_str()))
                 .pass(Some(password.as_str()))
-                // BBDD por defecto de la conexión: si no existe o el usuario no
-                // puede entrar, lo dice el servidor al conectar
+                // Default database of the connection: if it does not exist or the
+                // user cannot enter it, the server says so on connect
                 .db_name(params.only_database())
-                // Filas afectadas = filas encontradas por el WHERE, aunque el
-                // UPDATE las deje como estaban: así se distingue «ya tenía ese
-                // valor» de «la fila no existe» (ver execute_transaction).
+                // Affected rows = rows found by the WHERE, even if the UPDATE leaves
+                // them as they were: that tells "it already had that value" apart
+                // from "the row does not exist" (see execute_transaction).
                 .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS)
                 .ssl_opts(with_tls.then_some(ssl))
-                // En local el crate cambia la conexión TCP por el socket del
-                // servidor, que no va cifrado (ni lo necesita). Si se exige
-                // TLS, la conexión se queda en la que lo lleva
+                // Locally the crate swaps the TCP connection for the server's
+                // socket, which is not encrypted (and does not need to be). If
+                // TLS is required, the connection stays on the one that has it
                 .prefer_socket(!strict)
                 .pool_opts(pool_opts)
                 .into()
         };
-        // Abre el pool y comprueba que se puede entrar
+        // Opens the pool and checks that it can log in
         let open = |opts: Opts| -> mysql::Result<(Pool, Opts)> {
             let pool = Pool::new(opts.clone())?;
             pool.get_conn()?;
@@ -213,9 +214,9 @@ impl MysqlBackend {
 
         on_status("Autenticando...");
         let (pool, opts) = match open(build(true)) {
-            // «Cifrar si se puede»: si no se puede (el servidor no ofrece TLS
-            // o solo versiones antiguas), sin cifrar. Un error del servidor
-            // (contraseña, permisos) llega ya con TLS: no es de cifrado
+            // "Encrypt if possible": if it cannot (the server offers no TLS, or
+            // only old versions), unencrypted. A server error (password,
+            // privileges) already arrives over TLS: it is not an encryption one
             Err(e) if !strict && !matches!(e, mysql::Error::MySqlError(_)) => open(build(false)),
             result => result,
         }
@@ -227,8 +228,8 @@ impl MysqlBackend {
             )
         })?;
 
-        // Lo que dice el servidor de la conexión que se acaba de abrir (en
-        // local el crate puede haberla cambiado por el socket, sin TLS)
+        // What the server says about the connection just opened (locally the
+        // crate may have swapped it for the socket, without TLS)
         let cipher: Option<(String, String)> = pool
             .get_conn()
             .and_then(|mut conn| conn.query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'"))
@@ -248,17 +249,17 @@ impl MysqlBackend {
         })
     }
 
-    /// Obtiene una conexión del pool. Si la conexión previa había muerto,
-    /// el pool crea una nueva automáticamente.
-    /// `pub(super)` para que export.rs pueda mantener una sesión estable
-    /// (variables como FOREIGN_KEY_CHECKS no sobreviven al pool).
+    /// Gets a connection from the pool. If the previous connection had died,
+    /// the pool creates a new one automatically.
+    /// `pub(super)` so export.rs can keep a stable session (variables such
+    /// as FOREIGN_KEY_CHECKS do not survive the pool).
     pub(super) fn conn(&self) -> DbResult<PooledConn> {
         self.pool
             .get_conn()
             .map_err(|e| format!("Sin conexión con el servidor: {e}"))
     }
 
-    /// Lectura con parámetros posicionales (`?`).
+    /// Read with positional parameters (`?`).
     fn query_with(&self, sql: &str, params: Vec<Option<String>>) -> DbResult<QueryResult> {
         let mut conn = self.conn()?;
         conn.exec_iter(sql, params)
@@ -286,7 +287,7 @@ impl DbBackend for MysqlBackend {
     }
 
     fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>> {
-        // Con su tipo: «BASE TABLE», «VIEW»…
+        // With its type: "BASE TABLE", "VIEW"…
         let query = format!("SHOW FULL TABLES FROM {}", quote_ident(database));
         let rows: Vec<(String, String)> = self
             .conn()?
@@ -299,7 +300,7 @@ impl DbBackend for MysqlBackend {
     }
 
     fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>> {
-        // Sin BBDD a la que limitarse, el filtro no descarta ninguna
+        // With no database to limit to, the filter discards none
         let rows: Vec<(String, String, String)> = self
             .conn()?
             .exec(
@@ -344,7 +345,7 @@ impl DbBackend for MysqlBackend {
         max_rows: usize,
         cancel: &CancelFlag,
     ) -> DbResult<QueryResult> {
-        // El turno se espera aquí: las ejecuciones del editor van de una en una
+        // The turn is awaited here: editor runs go one at a time
         let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
         let conn = match &mut *session {
             Some(conn) => conn,
@@ -354,7 +355,7 @@ impl DbBackend for MysqlBackend {
             ),
         };
         if self.session_killed.swap(false, Ordering::SeqCst) {
-            // Un KILL QUERY que llegó tarde se lo lleva esta sentencia
+            // A KILL QUERY that arrived late is taken by this statement
             let _ = conn.query_drop("DO 0");
         }
         let running = |value| {
@@ -363,8 +364,8 @@ impl DbBackend for MysqlBackend {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = value;
         };
-        // Primero anunciarse y luego mirar la señal: quien cancela hace lo
-        // contrario, así que al menos uno de los dos ve al otro
+        // Announce first and then check the signal: whoever cancels does the
+        // opposite, so at least one of the two sees the other
         running(Some((conn.connection_id(), Arc::clone(cancel))));
         let result = if cancel.load(Ordering::SeqCst) {
             running(None);
@@ -382,8 +383,8 @@ impl DbBackend for MysqlBackend {
             Ok(data) => Ok(data),
             Err(e) if is_interrupted(&e) => Err(QUERY_CANCELLED.into()),
             Err(e) => {
-                // Conexión perdida (servidor reiniciado, timeout…): la próxima
-                // ejecución abre otra; el estado de la sesión ya se ha perdido.
+                // Connection lost (server restarted, timeout…): the next run opens
+                // another one; the session state is already lost.
                 if conn.ping().is_err() {
                     *session = None;
                 }
@@ -399,13 +400,13 @@ impl DbBackend for MysqlBackend {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        // Solo si es la que está en el servidor: KILL QUERY interrumpiría la
-        // de otra pestaña. La que espera su turno verá la señal al llegar
+        // Only if it is the one on the server: KILL QUERY would interrupt
+        // another tab's. One waiting for its turn will see the signal on arrival
         let Some((conn_id, _)) = running.filter(|(_, flag)| Arc::ptr_eq(flag, cancel)) else {
             return Ok(());
         };
         self.session_killed.store(true, Ordering::SeqCst);
-        // Por otra conexión: la del editor está ocupada con la consulta
+        // Through another connection: the editor's is busy with the query
         self.conn()?
             .query_drop(format!("KILL QUERY {conn_id}"))
             .map_err(|e| format!("No se pudo cancelar la consulta: {e}"))
@@ -527,7 +528,7 @@ impl DbBackend for MysqlBackend {
                 let _ = conn.query_drop("ROLLBACK");
                 return Err(format!("Error en transacción (ROLLBACK): {e}"));
             }
-            // Con CLIENT_FOUND_ROWS son las filas encontradas por el WHERE
+            // With CLIENT_FOUND_ROWS they are the rows found by the WHERE
             let found = conn.affected_rows();
             if stmt.single_row && found != 1 {
                 let _ = conn.query_drop("ROLLBACK");
@@ -553,7 +554,7 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn metadatos_con_parametros() {
         let b = test_server::backend();
-        // Nombres con comilla y barra: con el escape a mano eran frágiles
+        // Names with a quote and a backslash: escaping by hand made them fragile
         let db = "rustql_test_meta'\\x";
         let qdb = quote_ident(db);
         b.execute_write(None, &format!("DROP DATABASE IF EXISTS {qdb}"))
@@ -615,9 +616,9 @@ mod tests {
         let databases = only.list_databases();
         let tables = only.list_all_tables();
         let info = only.get_databases_info();
-        // Es la BBDD por defecto: las consultas no necesitan nombrarla
+        // It is the default database: queries do not need to name it
         let unqualified = only.execute_query(None, "SELECT COUNT(*) FROM t");
-        // El botón de elegir del formulario lista todas, haya o no una puesta
+        // The form's pick button lists them all, whether one is set or not
         let picker = crate::db::list_server_databases(&params);
         let missing = MysqlBackend::connect_with_progress(
             &ConnectionParams {
@@ -662,23 +663,23 @@ mod tests {
             status.unwrap().rows[0][1].clone().unwrap_or_default()
         };
 
-        // Por defecto: entra, cifre o no (en local el crate pasa al socket,
-        // que no va cifrado pero tampoco sale del equipo)
+        // Default: gets in, encrypted or not (locally the crate switches to the
+        // socket, which is not encrypted but never leaves the machine either)
         let preferred = connect(TlsMode::Prefer, false).unwrap();
         assert_ne!(preferred.security(), Security::Plain);
-        // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
+        // Require: encrypted, without checking the certificate (from a private CA)
         let required = connect(TlsMode::Require, false).unwrap();
         assert_ne!(cipher(&required), "", "la conexión va por TLS");
         assert_eq!(required.security(), Security::Encrypted);
-        // Verificar sin decir qué autoridad lo firma: no se conoce
+        // Verify without saying which authority signs it: it is unknown
         let unknown = connect(TlsMode::Verify, false)
             .err()
             .expect("CA desconocida");
         assert!(unknown.contains("fichero de CA"), "{unknown}");
-        // Con su CA, el certificado vale (y es de 127.0.0.1)
+        // With its CA, the certificate is valid (and is for 127.0.0.1)
         let verified = connect(TlsMode::Verify, true).unwrap();
         assert_ne!(cipher(&verified), "");
-        // La sesión del editor usa la misma conexión segura
+        // The editor session uses the same secure connection
         let run = verified.execute_in_session(
             None,
             "SHOW SESSION STATUS LIKE 'Ssl_cipher'",
@@ -706,8 +707,8 @@ mod tests {
         b.execute_write(None, "DROP DATABASE rustql_test_empty")
             .unwrap();
 
-        // Sin las columnas, el grid no puede mostrar la cabecera ni dejar
-        // insertar la primera fila
+        // Without the columns, the grid cannot show the header or allow
+        // inserting the first row
         let empty = empty.unwrap();
         assert_eq!(empty.columns, ["id", "v"]);
         assert!(empty.rows.is_empty());
@@ -739,9 +740,9 @@ mod tests {
             single_row: true,
         };
 
-        // La fila 9 no existe (otro la borró): tampoco se guarda la 1
+        // Row 9 does not exist (someone else deleted it): row 1 is not saved either
         let missing = b.execute_transaction(None, &[update("x", "1"), update("y", "9")]);
-        // Dejar una fila con el valor que ya tenía no es «no encontrada»
+        // Leaving a row with the value it already had is not "not found"
         let unchanged = b.execute_transaction(None, &[update("b", "2")]);
         let rows = b.execute_query(None, "SELECT v FROM rustql_test_rows.t ORDER BY id");
         b.execute_write(None, "DROP DATABASE rustql_test_rows")
@@ -779,7 +780,7 @@ mod tests {
                 .clone()
         };
 
-        // Cada línea es una ejecución (F9) distinta
+        // Each line is a separate run (F9)
         run("SET @x = 42");
         run("START TRANSACTION");
         run("INSERT INTO t VALUES (1)");
@@ -821,7 +822,7 @@ mod tests {
         let capped = run("SELECT * FROM t ORDER BY id", 3);
         let exact = run("SELECT * FROM t", 5);
         let empty = run("SELECT id AS n FROM t WHERE 1 = 0", 3);
-        // Tras recortar, la sesión sigue utilizable
+        // After truncating, the session is still usable
         let after = run("SELECT COUNT(*) FROM t", 3);
         b.execute_write(None, "DROP DATABASE rustql_test_cap")
             .unwrap();
@@ -845,7 +846,7 @@ mod tests {
         let run = |sql: &str, cancel: &CancelFlag| b.execute_in_session(None, sql, 100, cancel);
         run("SET @x = 7", &CancelFlag::default()).unwrap();
 
-        // Una consulta de minutos, cancelada a los 300 ms
+        // A query that takes minutes, cancelled after 300 ms
         let cancelled = |sql: &'static str| {
             let cancel = CancelFlag::default();
             let slow = {
@@ -867,18 +868,18 @@ mod tests {
         let join = "SELECT COUNT(*) FROM information_schema.COLUMNS a, \
                     information_schema.COLUMNS b, information_schema.COLUMNS c";
         assert_eq!(cancelled(join).unwrap_err(), QUERY_CANCELLED);
-        // SLEEP interrumpido no da error (devuelve 1): termina, que es lo
-        // que importa, y el servidor dice lo que tenga que decir
+        // An interrupted SLEEP gives no error (it returns 1): it ends, which is
+        // what matters, and the server says whatever it has to say
         if let Err(e) = cancelled("SELECT SLEEP(60)") {
             assert_eq!(e, QUERY_CANCELLED);
         }
 
-        // La sesión es la misma (conserva la variable) y la siguiente
-        // consulta no hereda la cancelación
+        // The session is the same (it keeps the variable) and the next query
+        // does not inherit the cancellation
         let after = run("SELECT @x", &CancelFlag::default()).unwrap();
         assert_eq!(after.rows, [[Some("7".to_string())]]);
 
-        // Cancelada antes de empezar, no llega al servidor
+        // Cancelled before starting, it never reaches the server
         let never = CancelFlag::default();
         b.cancel_in_session(&never).unwrap();
         assert_eq!(run("SET @x = 8", &never).unwrap_err(), QUERY_CANCELLED);

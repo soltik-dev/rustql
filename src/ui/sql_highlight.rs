@@ -1,5 +1,5 @@
-//! Resaltado de sintaxis SQL sin dependencias: lexer ligero + LayoutJob
-//! cacheado por frame (solo se recalcula si cambia texto, tema o tamaño).
+//! Dependency-free SQL syntax highlighting: a light lexer + a LayoutJob
+//! cached per frame (only recomputed if the text, theme or size changes).
 
 use eframe::egui;
 
@@ -35,8 +35,8 @@ struct Token {
     kind: TokenKind,
 }
 
-/// Palabras reservadas y tipos de MySQL y PostgreSQL. DEBE mantenerse ordenada
-/// (se busca con binary_search; hay un test que lo comprueba).
+/// Reserved words and types of MySQL and PostgreSQL. MUST be kept sorted
+/// (it is searched with binary_search; a test checks it).
 static KEYWORDS: &[&str] = &[
     "ACTION",
     "ADD",
@@ -253,14 +253,14 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$'
 }
 
-/// Si en `chars[i]` empieza una cadena entre dólares de PostgreSQL
-/// (`$$…$$` o `$etiqueta$…$etiqueta$`), dónde acaba su marca de apertura.
+/// If a PostgreSQL dollar-quoted string starts at `chars[i]` (`$$…$$` or
+/// `$tag$…$tag$`), where its opening marker ends.
 fn dollar_quote_open(chars: &[(usize, char)], i: usize) -> Option<usize> {
     let mut j = i + 1;
     while j < chars.len() && (chars[j].1.is_ascii_alphanumeric() || chars[j].1 == '_') {
         j += 1;
     }
-    // `$1` es un parámetro, no una marca
+    // `$1` is a parameter, not a marker
     let tagged_by_number = chars.get(i + 1).is_some_and(|c| c.1.is_ascii_digit());
     (j < chars.len() && chars[j].1 == '$' && !tagged_by_number).then_some(j + 1)
 }
@@ -273,7 +273,7 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
 
     let mut tokens: Vec<Token> = Vec::new();
     let push = |start: usize, end: usize, kind: TokenKind, tokens: &mut Vec<Token>| {
-        // Fusionar runs contiguos de "Other" (espacios, identificadores…)
+        // Merge contiguous runs of "Other" (spaces, identifiers…)
         if kind == TokenKind::Other
             && let Some(last) = tokens.last_mut()
             && last.kind == TokenKind::Other
@@ -289,14 +289,14 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
     while i < n {
         let (start, c) = chars[i];
         let kind = match c {
-            // Comentarios: -- hasta EOL, # hasta EOL, /* … */
+            // Comments: -- to EOL, # to EOL, /* … */
             '-' if i + 1 < n && chars[i + 1].1 == '-' => {
                 while i < n && chars[i].1 != '\n' {
                     i += 1;
                 }
                 TokenKind::Comment
             }
-            // En PostgreSQL `#` es un operador (`datos #> '{a}'`)
+            // In PostgreSQL `#` is an operator (`data #> '{a}'`)
             '#' if mysql => {
                 while i < n && chars[i].1 != '\n' {
                     i += 1;
@@ -308,10 +308,10 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                 while i < n && !(chars[i].1 == '*' && i + 1 < n && chars[i + 1].1 == '/') {
                     i += 1;
                 }
-                i = (i + 2).min(n); // tolera comentario sin cerrar
+                i = (i + 2).min(n); // tolerates an unclosed comment
                 TokenKind::Comment
             }
-            // Cadena entre dólares: hasta que se repite su marca
+            // Dollar-quoted string: until its marker repeats
             '$' if !mysql && dollar_quote_open(&chars, i).is_some() => {
                 let body = dollar_quote_open(&chars, i).unwrap_or(n);
                 let tag: Vec<char> = chars[i..body].iter().map(|c| c.1).collect();
@@ -319,12 +319,12 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                 while i < n && !chars[i..].iter().map(|c| &c.1).take(tag.len()).eq(&tag) {
                     i += 1;
                 }
-                i = (i + tag.len()).min(n); // tolera la cadena sin cerrar
+                i = (i + tag.len()).min(n); // tolerates an unclosed string
                 TokenKind::StringLit
             }
-            // Strings con comilla doblada ('' / "") y, en MySQL, escapes \x.
-            // En PostgreSQL las comillas dobles encierran un identificador:
-            // color normal
+            // Strings with a doubled quote ('' / "") and, in MySQL, \x escapes.
+            // In PostgreSQL double quotes enclose an identifier:
+            // normal colour
             '\'' | '"' => {
                 let quote = c;
                 i += 1;
@@ -333,7 +333,7 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                         '\\' if mysql => i += 2,
                         ch if ch == quote => {
                             if i + 1 < n && chars[i + 1].1 == quote {
-                                i += 2; // comilla doblada: sigue el string
+                                i += 2; // doubled quote: the string goes on
                             } else {
                                 i += 1;
                                 break;
@@ -349,7 +349,7 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                     TokenKind::StringLit
                 }
             }
-            // Identificador entre backticks: color normal
+            // Identifier in backticks: normal colour
             '`' if mysql => {
                 i += 1;
                 while i < n && chars[i].1 != '`' {
@@ -358,7 +358,7 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                 i = (i + 1).min(n);
                 TokenKind::Other
             }
-            // Números: enteros, decimales, exponente, hex 0x…
+            // Numbers: integers, decimals, exponent, hex 0x…
             '0'..='9' => {
                 i += 1;
                 if c == '0' && i < n && (chars[i].1 == 'x' || chars[i].1 == 'X') {
@@ -389,7 +389,7 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                 }
                 TokenKind::Number
             }
-            // Palabras: keyword o identificador
+            // Words: keyword or identifier
             c if is_word_start(c) => {
                 i += 1;
                 while i < n && is_word_char(chars[i].1) {
@@ -403,13 +403,13 @@ fn tokenize(engine: Engine, sql: &str) -> Vec<Token> {
                     TokenKind::Other
                 }
             }
-            // Operadores y puntuación
+            // Operators and punctuation
             '=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%' | ',' | ';' | '(' | ')' | '.'
             | '|' | '&' | '^' | '~' | '?' | ':' | '@' => {
                 i += 1;
                 TokenKind::Operator
             }
-            // Espacios y cualquier otro carácter
+            // Spaces and any other character
             _ => {
                 i += 1;
                 TokenKind::Other
@@ -452,8 +452,8 @@ impl egui::cache::ComputerMut<Key<'_>, egui::text::LayoutJob> for Highlighter {
 
 type HighlightCache = egui::cache::FrameCache<egui::text::LayoutJob, Highlighter>;
 
-/// LayoutJob resaltado para `sql` en el dialecto de `engine`, cacheado
-/// (clave: motor + tema + tamaño + texto).
+/// Highlighted LayoutJob for `sql` in the dialect of `engine`, cached
+/// (key: engine + theme + size + text).
 pub fn highlight(
     ctx: &egui::Context,
     engine: Engine,
@@ -527,13 +527,13 @@ mod tests {
         let mysql = kinds_in(Engine::Mysql, sql);
         assert!(mysql.contains(&("\"col\"".into(), TokenKind::StringLit)));
         assert!(mysql.contains(&("# resto".into(), TokenKind::Comment)));
-        // En PostgreSQL las comillas dobles son un identificador y `#`, un
-        // operador
+        // In PostgreSQL double quotes are an identifier and `#` an
+        // operator
         let postgres = kinds_in(Engine::Postgres, sql);
         assert!(!postgres.iter().any(|(_, k)| *k == TokenKind::StringLit));
         assert!(!postgres.iter().any(|(_, k)| *k == TokenKind::Comment));
 
-        // La barra solo escapa en MySQL: allí la cadena sigue tras `\\'`
+        // The backslash only escapes in MySQL: there the string goes on after `\\'`
         let sql = "'a\\' AND 'b'";
         assert_eq!(kinds_in(Engine::Postgres, sql)[0].0, "'a\\'");
         assert_eq!(kinds_in(Engine::Mysql, sql)[0].0, "'a\\' AND '");
@@ -550,7 +550,7 @@ mod tests {
         )));
         assert!(toks.contains(&("RETURNING".into(), TokenKind::Keyword)));
         assert!(toks.contains(&("$$a$$".into(), TokenKind::StringLit)));
-        // Ni el parámetro ni un dólar suelto abren una cadena
+        // Neither the parameter nor a lone dollar opens a string
         assert!(
             !toks
                 .iter()

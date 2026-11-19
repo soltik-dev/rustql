@@ -17,40 +17,40 @@ pub struct ConnectionParams {
     pub port: u16,
     pub user: String,
     pub password: String,
-    /// Perfil con la contraseña en el llavero del sistema: si `password` está
-    /// vacía, se lee de ahí al conectar.
+    /// Profile with its password in the system keyring: if `password` is
+    /// empty, it is read from there when connecting.
     pub keyring_id: Option<String>,
-    /// Base de datos a la que se limita la conexión: el árbol solo enseña
-    /// esa. Vacía = todas las del servidor.
+    /// Database the connection is limited to: the tree only shows that one.
+    /// Empty = every database on the server.
     pub database: String,
-    /// Si la conexión va cifrada y si se comprueba el certificado.
+    /// Whether the connection is encrypted and whether the certificate is checked.
     pub tls: TlsMode,
-    /// Fichero PEM con la autoridad que firma el certificado del servidor,
-    /// para `TlsMode::Verify`. Vacío = solo las autoridades públicas.
+    /// PEM file with the authority that signs the server certificate, for
+    /// `TlsMode::Verify`. Empty = only the public authorities.
     pub tls_ca: String,
 }
 
 impl ConnectionParams {
-    /// Identidad estable de la conexión («user@host:port») para guardar
-    /// estado por servidor, independiente del nombre del perfil.
+    /// Stable identity of the connection ("user@host:port") to keep state per
+    /// server, independent of the profile name.
     pub fn key(&self) -> String {
         format!("{}@{}:{}", self.user, self.host, self.port)
     }
 
-    /// La contraseña escrita o, si está vacía, la del llavero. Puede bloquear
-    /// (el llavero puede pedir desbloqueo): solo desde hilos de trabajo.
-    /// El fichero de CA con el que verificar al servidor, si se indicó.
+    /// The CA file to verify the server with, if one was given.
     pub fn ca_file(&self) -> Option<&str> {
         let path = self.tls_ca.trim();
         (!path.is_empty()).then_some(path)
     }
 
-    /// La base de datos a la que se limita la conexión, si se indicó alguna.
+    /// The database the connection is limited to, if one was given.
     pub fn only_database(&self) -> Option<&str> {
         let database = self.database.trim();
         (!database.is_empty()).then_some(database)
     }
 
+    /// The password typed in or, if empty, the one in the keyring. May block
+    /// (the keyring may ask to be unlocked): only call it from worker threads.
     pub fn resolve_password(&self) -> DbResult<String> {
         match &self.keyring_id {
             Some(id) if self.password.is_empty() => crate::secrets::get(id)
@@ -84,30 +84,30 @@ impl Default for ConnectionParams {
 
 pub type DbResult<T> = Result<T, String>;
 
-/// Señal para cancelar una ejecución del editor SQL: la comparten quien la
-/// lanza y quien la cancela (`DbBackend::cancel_in_session`).
+/// Signal to cancel a SQL editor run: shared by whoever starts it and
+/// whoever cancels it (`DbBackend::cancel_in_session`).
 pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
 
-/// Error con el que termina una ejecución del editor cancelada.
+/// Error a cancelled editor run ends with.
 pub const QUERY_CANCELLED: &str = "Consulta cancelada.";
 
-/// Sentencia con parámetros (ver `ParamList`). Los valores viajan aparte
-/// del SQL: no hace falta escaparlos y llegan intactos (`None` = NULL).
+/// Statement with parameters (see `ParamList`). The values travel apart
+/// from the SQL: they need no escaping and arrive intact (`None` = NULL).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
     pub sql: String,
     pub params: Vec<Option<String>>,
-    /// La sentencia cambia una fila concreta (UPDATE o DELETE por clave
-    /// primaria): si no encuentra exactamente una, la transacción se deshace.
+    /// The statement changes one specific row (UPDATE or DELETE by primary
+    /// key): if it does not find exactly one, the transaction is rolled back.
     pub single_row: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryResult {
     pub columns: Vec<String>,
-    /// Cada celda es `None` si el valor es NULL en la base de datos.
+    /// Each cell is `None` if the value is NULL in the database.
     pub rows: Vec<Vec<Option<String>>>,
-    /// Había más filas de las que se leyeron (tope del editor SQL).
+    /// There were more rows than were read (SQL editor limit).
     pub truncated: bool,
 }
 
@@ -116,29 +116,29 @@ pub struct DatabaseInfo {
     pub name: String,
     pub charset: String,
     pub collation: String,
-    /// `None` si el motor no puede contarlas sin entrar en la BBDD.
+    /// `None` if the engine cannot count them without entering the database.
     pub table_count: Option<usize>,
     pub size_bytes: u64,
 }
 
-/// Qué es lo que el árbol enseña como una tabla.
+/// What the tree shows as a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TableKind {
     #[default]
     Table,
     View,
-    /// Vista con sus datos guardados (PostgreSQL).
+    /// View with its data stored (PostgreSQL).
     MaterializedView,
 }
 
 impl TableKind {
-    /// Una vista no tiene datos propios: no se vacía, no se clona ni se
-    /// editan sus filas.
+    /// A view has no data of its own: it is not emptied or cloned, and its
+    /// rows are not edited.
     pub fn is_view(self) -> bool {
         self != TableKind::Table
     }
 
-    /// Cómo se llama, con su artículo: «la tabla», «la vista».
+    /// What it is called, with its article: «la tabla», «la vista».
     pub fn label(self) -> &'static str {
         match self {
             TableKind::Table => "la tabla",
@@ -147,7 +147,7 @@ impl TableKind {
         }
     }
 
-    /// Palabra con la que SQL la nombra en `DROP …`.
+    /// Word SQL names it with in `DROP …`.
     pub fn keyword(self) -> &'static str {
         match self {
             TableKind::Table => "TABLE",
@@ -157,14 +157,14 @@ impl TableKind {
     }
 }
 
-/// Una tabla (o vista) de una BBDD.
+/// A table (or view) of a database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableEntry {
     pub name: String,
     pub kind: TableKind,
 }
 
-/// En los tests, una tabla (no una vista) con ese nombre.
+/// In tests, a table (not a view) with that name.
 #[cfg(test)]
 impl From<&str> for TableEntry {
     fn from(name: &str) -> Self {
@@ -190,11 +190,11 @@ pub struct ColumnInfo {
     pub col_type: String,
     pub is_nullable: bool,
     pub default_val: Option<String>,
-    /// Tipo de clave de la que forma parte: «PRI», «UNI», «MUL» o nada.
+    /// Kind of key it is part of: "PRI", "UNI", "MUL" or nothing.
     pub column_key: String,
     pub extra: String,
-    /// El servidor le da valor al insertar (AUTO_INCREMENT, serial,
-    /// identidad): en una fila nueva no se escribe.
+    /// The server gives it a value on insert (AUTO_INCREMENT, serial,
+    /// identity): it is not written in a new row.
     pub is_auto: bool,
 }
 
@@ -204,8 +204,8 @@ impl ColumnInfo {
     }
 }
 
-/// Valida que un nombre de charset MySQL solo contenga caracteres seguros.
-/// Los charsets MySQL son siempre alfanuméricos con guiones bajos (ej. utf8mb4, latin1).
+/// Checks that a MySQL charset name only contains safe characters.
+/// MySQL charsets are always alphanumeric with underscores (e.g. utf8mb4, latin1).
 pub fn validate_charset(s: &str) -> DbResult<()> {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty() {
         Ok(())
@@ -216,40 +216,40 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
     }
 }
 
-/// Backend de una conexión. Es `Sync` y todos sus métodos toman `&self`: se
-/// comparte (`Arc`) entre la UI y los hilos de trabajo, que piden conexiones
-/// a su pool cuando las necesitan.
+/// Backend of a connection. It is `Sync` and every method takes `&self`: it
+/// is shared (`Arc`) between the UI and the worker threads, which ask its
+/// pool for connections when they need them.
 ///
-/// Los métodos con `db: Option<&str>` ejecutan SQL en esa BBDD. MySQL ve
-/// todas desde cualquier conexión y no la necesita (las tablas van
-/// cualificadas con su BBDD); en PostgreSQL decide a cuál se conecta. Sin
-/// ella, en la BBDD con la que se abrió la conexión.
+/// Methods with `db: Option<&str>` run SQL in that database. MySQL sees
+/// every database from any connection and does not need it (tables are
+/// qualified with their database); in PostgreSQL it decides which one to
+/// connect to. Without it, in the database the connection was opened with.
 pub trait DbBackend: Send + Sync {
     fn engine(&self) -> Engine;
 
-    /// Si la conexión va cifrada, según el servidor al conectar.
+    /// Whether the connection is encrypted, according to the server on connect.
     fn security(&self) -> Security;
 
-    // ── Lectura (no modifican el estado del backend) ───────────────────────────
+    // ── Reads (do not change the backend's state) ──────────────────────────────
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
-    /// Tablas y vistas de una BBDD.
+    /// Tables and views of a database.
     fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>>;
-    /// Pares (BBDD, tabla) de todo el servidor.
+    /// (database, table) pairs of the whole server.
     fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>>;
-    /// Sentencia que vuelve a crear la vista `view` con su definición
-    /// actual, para verla o cambiarla.
+    /// Statement that recreates view `view` with its current definition, to
+    /// see or change it.
     fn view_definition(&self, db: &str, view: &str) -> DbResult<String>;
 
-    /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
+    /// Runs arbitrary read SQL and returns the result.
     fn execute_query(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
 
-    /// SQL del editor, en una conexión propia que se mantiene entre
-    /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
-    /// tablas temporales siguen vivas en la siguiente. Con `db`, antes `USE`.
-    /// Lee como mucho `max_rows` filas (el resto se descarta, `truncated`).
-    /// Con `cancel` activada (antes de empezar o mientras se ejecuta, ver
-    /// `cancel_in_session`) termina con el error `QUERY_CANCELLED`.
+    /// SQL from the editor, on its own connection that is kept between runs:
+    /// open transactions, variables (`SET @x`), `USE` and temporary tables are
+    /// still alive in the next one. With `db`, `USE` first.
+    /// Reads at most `max_rows` rows (the rest are discarded, `truncated`).
+    /// With `cancel` set (before starting or while running, see
+    /// `cancel_in_session`) it ends with the `QUERY_CANCELLED` error.
     fn execute_in_session(
         &self,
         db: Option<&str>,
@@ -258,31 +258,31 @@ pub trait DbBackend: Send + Sync {
         cancel: &CancelFlag,
     ) -> DbResult<QueryResult>;
 
-    /// Cancela la ejecución de `execute_in_session` que recibió `cancel`: si
-    /// ya está en el servidor, la interrumpe allí; si espera su turno, no
-    /// llega a empezar. La conexión del editor y su estado se conservan.
+    /// Cancels the `execute_in_session` run that received `cancel`: if it is
+    /// already on the server, interrupts it there; if it is waiting for its
+    /// turn, it never starts. The editor's connection and its state are kept.
     fn cancel_in_session(&self, cancel: &CancelFlag) -> DbResult<()>;
 
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>>;
     fn get_tables_info(&self, db: &str) -> DbResult<Vec<TableInfo>>;
-    /// Columnas en orden; las de la clave primaria tienen `column_key` «PRI».
+    /// Columns in order; those of the primary key have `column_key` "PRI".
     fn get_columns_info(&self, db: &str, table: &str) -> DbResult<Vec<ColumnInfo>>;
 
-    // ── Escritura (modifican datos en el servidor) ─────────────────────────────
+    // ── Writes (change data on the server) ─────────────────────────────────────
 
-    /// Ejecuta SQL de escritura (INSERT/UPDATE/DELETE/DDL). Devuelve filas afectadas.
+    /// Runs write SQL (INSERT/UPDATE/DELETE/DDL). Returns the affected rows.
     fn execute_write(&self, db: Option<&str>, sql: &str) -> DbResult<u64>;
 
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()>;
     fn drop_database(&self, name: &str) -> DbResult<()>;
-    /// Elimina una tabla o una vista (`kind` dice cuál: se eliminan con
-    /// sentencias distintas).
+    /// Drops a table or a view (`kind` says which: they are dropped with
+    /// different statements).
     fn drop_table(&self, db: &str, table: &str, kind: TableKind) -> DbResult<()>;
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
-    /// Ejecuta una lista de sentencias dentro de una transacción.
-    /// Si alguna falla, o una `single_row` no encuentra su fila, se hace
-    /// ROLLBACK y se devuelve el error.
+    /// Runs a list of statements inside a transaction.
+    /// If one fails, or a `single_row` one does not find its row, it rolls
+    /// back and returns the error.
     fn execute_transaction(&self, db: Option<&str>, stmts: &[Statement]) -> DbResult<()>;
 }
 
@@ -291,7 +291,7 @@ pub enum ConnectEvent {
     Done(DbResult<Arc<dyn DbBackend>>),
 }
 
-/// Conecta con el servidor de `params`, con el backend de su motor.
+/// Connects to the server of `params`, with the backend for its engine.
 pub fn connect(
     params: &ConnectionParams,
     on_status: impl Fn(&str),
@@ -306,7 +306,7 @@ pub fn connect(
     })
 }
 
-/// Como `connect`, contando el progreso y el resultado por `tx`.
+/// Like `connect`, reporting progress and the result through `tx`.
 pub fn connect_with_progress(
     params: &ConnectionParams,
     tx: &std::sync::mpsc::Sender<ConnectEvent>,
@@ -318,11 +318,11 @@ pub fn connect_with_progress(
     let _ = tx.send(ConnectEvent::Done(result));
 }
 
-/// Las BBDD del servidor de `params`, para elegir una en el formulario de
-/// conexión: se conecta, las lista todas y desconecta.
+/// The databases of the server of `params`, to pick one in the connection
+/// form: connects, lists them all and disconnects.
 pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>> {
     match params.engine {
-        // Sin limitarse a la BBDD que haya en el formulario
+        // Without limiting itself to the database in the form
         Engine::Mysql => {
             let all = ConnectionParams {
                 database: String::new(),
@@ -330,19 +330,19 @@ pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>>
             };
             mysql::MysqlBackend::connect_with_progress(&all, |_| {})?.list_databases()
         }
-        // Entrando por la del formulario, si hay: puede ser la única en la
-        // que el servidor deja entrar, y desde ella se ven las demás
+        // Going in through the form's database, if any: it may be the only one
+        // the server lets this user into, and the others are visible from it
         Engine::Postgres => {
             postgres::PostgresBackend::connect_with_progress(params, |_| {})?.all_databases()
         }
     }
 }
 
-/// Servidores reales para los tests marcados `#[ignore]`:
-/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto` y
-/// `RUSTQL_TEST_POSTGRES=…`, con `cargo test -- --ignored`. Los de TLS
-/// necesitan además `RUSTQL_TEST_CA` (ver `with_tls`).
-/// Crean y borran sus propias BBDD `rustql_test_*`.
+/// Real servers for the tests marked `#[ignore]`:
+/// `RUSTQL_TEST_MYSQL=user:password@host:port` and
+/// `RUSTQL_TEST_POSTGRES=…`, with `cargo test -- --ignored`. The TLS ones
+/// also need `RUSTQL_TEST_CA` (see `with_tls`).
+/// They create and drop their own `rustql_test_*` databases.
 #[cfg(test)]
 pub mod test_server {
     use super::{ConnectionParams, Engine};
@@ -374,9 +374,9 @@ pub mod test_server {
         super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
     }
 
-    /// Parámetros de `base` con el nivel de seguridad `tls`. Para verificar,
-    /// `RUSTQL_TEST_CA` es el fichero de la autoridad que firma el
-    /// certificado de los servidores de prueba (válido para 127.0.0.1).
+    /// Parameters of `base` with security level `tls`. To verify,
+    /// `RUSTQL_TEST_CA` is the file of the authority that signs the test
+    /// servers' certificate (valid for 127.0.0.1).
     pub fn with_tls(base: ConnectionParams, tls: super::TlsMode, ca: bool) -> ConnectionParams {
         ConnectionParams {
             tls,
@@ -389,7 +389,7 @@ pub mod test_server {
         }
     }
 
-    /// Nombres de unas tablas, para compararlos sin su tipo.
+    /// Names of some tables, to compare them without their kind.
     pub fn names(tables: Vec<super::TableEntry>) -> Vec<String> {
         tables.into_iter().map(|table| table.name).collect()
     }
@@ -409,15 +409,15 @@ mod tests {
 
     use super::*;
 
-    /// Con NO_BACKSLASH_ESCAPES, escapando la comilla como `\'`, este valor
-    /// convertía `v = '…'` en `v = '\\\' OR 1=1 -- '`.
+    /// With NO_BACKSLASH_ESCAPES, escaping the quote as `\'`, this value
+    /// turned `v = '…'` into `v = '\\\' OR 1=1 -- '`.
     const ATTACK: &str = "\\' OR 1=1 -- ";
 
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn un_literal_no_permite_inyectar_en_ningun_sql_mode() {
         let backend = test_server::backend();
-        // Una sola conexión: sql_mode es de sesión
+        // A single connection: sql_mode is per session
         let mut conn = backend.conn().unwrap();
         conn.query_drop("DROP DATABASE IF EXISTS rustql_test_escape")
             .unwrap();
