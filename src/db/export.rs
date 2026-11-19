@@ -1,9 +1,10 @@
-//! Exportación de tablas: a un fichero .sql, a una carpeta (un fichero por
-//! tabla), a otra BBDD del mismo servidor o a otro servidor.
+//! Table export: to a .sql file, to a folder (one file per table), to
+//! another database on the same server or to another server.
 //!
-//! Cada motor sabe describir sus tablas como sentencias (`Source`, en
-//! export/mysql.rs y export/postgres.rs); aquí está lo común: a dónde van
-//! esas sentencias (`Sink`), el orden en que se ejecutan y el progreso.
+//! Each engine knows how to describe its tables as statements (`Source`,
+//! in export/mysql.rs and export/postgres.rs); what they share lives here:
+//! where those statements go (`Sink`), the order they run in and the
+//! progress.
 
 mod mysql;
 mod postgres;
@@ -16,7 +17,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::{ConnectionParams, DbResult, Engine};
 
-// ── Tipos públicos ─────────────────────────────────────────────────────────────
+// ── Public types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum ExportDestination {
@@ -70,17 +71,17 @@ pub enum ExportEvent {
         elapsed_ms: u64,
     },
     Cancelled,
-    /// Filas copiadas desde el aviso anterior: las tablas se copian por
-    /// bloques, y una grande tarda.
+    /// Rows copied since the previous notification: tables are copied in
+    /// batches, and a big one takes a while.
     RowsCopied(u64),
-    /// Error fatal que aborta toda la exportación (conexión, fichero, etc.).
+    /// Fatal error that aborts the whole export (connection, file, etc.).
     Failed(String),
 }
 
-// ── Función pública ────────────────────────────────────────────────────────────
+// ── Public function ────────────────────────────────────────────────────────────
 
-/// Lanza el export en un hilo separado y devuelve un Receiver de eventos de progreso.
-/// No toma el backend principal: abre su propia conexión usando `params`.
+/// Runs the export on a separate thread and returns a Receiver of progress events.
+/// It does not take the main backend: it opens its own connection with `params`.
 pub fn spawn_export(
     params: ConnectionParams,
     source_db: String,
@@ -116,15 +117,15 @@ pub fn spawn_export(
     rx
 }
 
-// ── Lo común a todos los motores ───────────────────────────────────────────────
+// ── Shared by every engine ─────────────────────────────────────────────────────
 
-/// Tablas exportadas y filas copiadas.
+/// Tables exported and rows copied.
 type Totals = (usize, u64);
 
 const SAME_TARGET_ERROR: &str = "El destino es la misma base de datos del mismo servidor que el origen: \
      la copia borraría o duplicaría sus datos. Elige otra base de datos destino.";
 
-/// Lo que se exporta y cómo se cuenta.
+/// What gets exported and how it is counted.
 struct Job<'a> {
     source_db: &'a str,
     tables: &'a [String],
@@ -142,8 +143,8 @@ impl Job<'_> {
         self.cancel.load(Ordering::Relaxed)
     }
 
-    /// Recorre las tablas avisando del progreso; `export` exporta una y
-    /// devuelve sus filas. Se detiene al cancelar.
+    /// Walks the tables reporting progress; `export` exports one and returns
+    /// its rows. Stops when cancelled.
     fn for_each_table(&self, mut export: impl FnMut(&str) -> DbResult<u64>) -> Totals {
         let (mut done, mut total_rows) = (0, 0);
         for table in self.tables {
@@ -165,54 +166,54 @@ impl Job<'_> {
     }
 }
 
-/// Lo que hay que ejecutar, y en qué momento, para recrear una tabla.
+/// What has to run, and when, to recreate a table.
 #[derive(Default)]
 struct TableScript {
-    /// Antes de sus datos: crearla, con lo que necesite (esquema, tipos…).
+    /// Before its data: create it, with whatever it needs (schema, types…).
     create: Vec<String>,
-    /// Sus datos; `None` si no los tiene (una vista).
+    /// Its data; `None` if it has none (a view).
     data: Option<TableData>,
-    /// Tras sus datos: claves, índices y el valor de sus secuencias.
+    /// After its data: keys, indexes and the value of its sequences.
     after_data: Vec<String>,
-    /// Cuando ya están todas las tablas: lo que depende de otras (claves
-    /// foráneas, vistas).
+    /// Once every table exists: whatever depends on others (foreign keys,
+    /// views).
     finish: Vec<String>,
 }
 
 struct TableData {
-    /// Consulta que lee las filas en el origen.
+    /// Query that reads the rows at the source.
     select: String,
-    /// `INSERT INTO tabla`, sin columnas ni valores.
+    /// `INSERT INTO table`, without columns or values.
     insert_into: String,
-    /// Lo que va entre la lista de columnas y la de valores.
+    /// What goes between the column list and the values list.
     values_keyword: &'static str,
 }
 
-/// Origen de una exportación: una BBDD de un motor concreto.
+/// Source of an export: a database of a specific engine.
 trait Source {
     fn engine(&self) -> Engine;
-    /// Sentencias que dejan una sesión (o un fichero) lista para la carga.
+    /// Statements that get a session (or a file) ready for loading.
     fn prelude(&self) -> Vec<String>;
-    /// Sentencias que eliminan `tables` del destino antes de crearlas, si
-    /// el motor necesita eliminarlas juntas. Si no, cada tabla se elimina
-    /// en su propio `TableScript::create`.
+    /// Statements that drop `tables` at the destination before creating them,
+    /// if the engine needs to drop them together. Otherwise each table is
+    /// dropped in its own `TableScript::create`.
     fn drop_together(&self, tables: &[String]) -> DbResult<Vec<String>>;
     fn script(&self, table: &str, options: &ExportOptions) -> DbResult<TableScript>;
-    /// Lee las filas de `select` sin traerlas todas a memoria: las entrega
-    /// a `each` en bloques de hasta `batch`, con los nombres de las columnas
-    /// y cada valor ya escrito como literal SQL. Si `each` falla, deja de
-    /// leer y devuelve su error.
+    /// Reads the rows of `select` without loading them all into memory: hands
+    /// them to `each` in batches of up to `batch`, with the column names and
+    /// every value already written as a SQL literal. If `each` fails, stops
+    /// reading and returns its error.
     fn read_rows(&self, select: &str, batch: usize, each: &mut RowBatch<'_>) -> DbResult<()>;
 }
 
-/// Lo que recibe cada bloque de filas: columnas y valores como literales.
+/// What each batch of rows receives: columns and values as literals.
 type RowBatch<'a> = dyn FnMut(&[String], Vec<Vec<String>>) -> DbResult<()> + 'a;
 
-/// Destino de las sentencias: un fichero o una conexión.
+/// Destination of the statements: a file or a connection.
 trait Sink {
     fn run(&mut self, sql: &str) -> DbResult<()>;
 
-    /// Texto para quien lea el destino; una conexión no lo necesita.
+    /// Text for whoever reads the destination; a connection does not need it.
     fn comment(&mut self, _text: &str) -> DbResult<()> {
         Ok(())
     }
@@ -222,7 +223,7 @@ trait Sink {
     }
 }
 
-/// Fichero .sql: cada sentencia, terminada en punto y coma.
+/// .sql file: every statement, ending in a semicolon.
 struct FileSink(BufWriter<std::fs::File>);
 
 impl FileSink {
@@ -257,7 +258,7 @@ fn write_error(e: std::io::Error) -> String {
     format!("Error escribiendo fichero: {e}")
 }
 
-/// Cabecera de una parte del volcado, para quien lo lea.
+/// Header of a part of the dump, for whoever reads it.
 fn section(sink: &mut dyn Sink, title: &str) -> DbResult<()> {
     sink.comment("")?;
     sink.comment(&format!(
@@ -267,8 +268,8 @@ fn section(sink: &mut dyn Sink, title: &str) -> DbResult<()> {
     sink.comment("")
 }
 
-/// Crea la tabla en `sink` y copia sus datos, bloque a bloque. Devuelve las
-/// filas copiadas y lo que queda por ejecutar cuando estén todas las tablas.
+/// Creates the table in `sink` and copies its data, batch by batch. Returns
+/// the rows copied and what is left to run once every table exists.
 fn export_table(
     source: &dyn Source,
     sink: &mut dyn Sink,
@@ -277,7 +278,7 @@ fn export_table(
 ) -> DbResult<(u64, Vec<String>)> {
     let options = job.options;
     let script = source.script(table, options)?;
-    // Sin nada que escribir ahora (una vista, que va al final), sin cabecera
+    // Nothing to write now (a view, which goes at the end): no header
     if !script.create.is_empty() || script.data.is_some() || !script.after_data.is_empty() {
         section(sink, &format!("Tabla: {table}"))?;
     }
@@ -288,7 +289,7 @@ fn export_table(
         let engine = source.engine();
         let mut header = None;
         let mut write_batch = |columns: &[String], rows: Vec<Vec<String>>| {
-            // Una tabla grande son muchos bloques: se puede cancelar entre ellos
+            // A big table is many batches: it can be cancelled between them
             if job.cancelled() {
                 return Err("Exportación cancelada.".to_string());
             }
@@ -317,13 +318,13 @@ fn export_table(
     Ok((total_rows, script.finish))
 }
 
-/// Exporta todas las tablas del trabajo a un mismo destino.
+/// Exports every table of the job to a single destination.
 fn export_into(source: &dyn Source, sink: &mut dyn Sink, job: &Job) -> DbResult<Totals> {
     sink.run_all(&source.prelude())?;
     if job.options.drop_if_exists {
-        // Si algo del destino que no se exporta depende de ellas (una clave
-        // foránea, una vista), el servidor se niega: no se fuerza, porque
-        // eso lo eliminaría sin avisar
+        // If something at the destination that is not being exported depends
+        // on them (a foreign key, a view), the server refuses: it is not
+        // forced, because that would drop it without warning
         let drops = source.drop_together(job.tables)?;
         sink.run_all(&drops).map_err(|e| {
             format!(
@@ -334,8 +335,8 @@ fn export_into(source: &dyn Source, sink: &mut dyn Sink, job: &Job) -> DbResult<
         })?;
     }
 
-    // Las tablas con algo pendiente para el final no se dan por hechas
-    // hasta entonces: ahí también pueden fallar
+    // Tables with something pending for the end are not counted as done
+    // until then: they can still fail there
     let mut pending: Vec<(String, u64, Vec<String>)> = Vec::new();
     let (mut done, mut total_rows) = (0, 0);
     for table in job.tables {
@@ -377,8 +378,8 @@ fn export_to_file(source: &dyn Source, path: &str, job: &Job) -> DbResult<Totals
     Ok(totals)
 }
 
-/// Un fichero por tabla, cada uno con todo lo suyo (también lo que en un
-/// único destino se deja para el final).
+/// One file per table, each with everything it needs (including what a
+/// single destination leaves for the end).
 fn export_to_folder(source: &dyn Source, folder: &str, job: &Job) -> DbResult<Totals> {
     std::fs::create_dir_all(folder)
         .map_err(|e| format!("No se pudo crear la carpeta '{folder}': {e}"))?;
@@ -396,9 +397,9 @@ fn export_to_folder(source: &dyn Source, folder: &str, job: &Job) -> DbResult<To
     }))
 }
 
-/// Nombre de fichero para una tabla, válido en cualquier sistema: sin
-/// separadores de ruta (una tabla «../x» escribiría fuera de la carpeta) ni
-/// caracteres o nombres que Windows no admite, y sin empezar por punto.
+/// File name for a table, valid on any system: no path separators (a
+/// table "../x" would write outside the folder), no characters or names
+/// that Windows rejects, and not starting with a dot.
 fn file_name_for(table: &str) -> String {
     let name: String = table
         .chars()
@@ -433,7 +434,7 @@ mod tests {
         assert_eq!(file_name_for("a:b*c"), "a_b_c");
         assert_eq!(file_name_for("con"), "_con");
         assert_eq!(file_name_for("año"), "año");
-        // Una tabla de otro esquema de PostgreSQL
+        // A table of another PostgreSQL schema
         assert_eq!(file_name_for("ventas.pedidos"), "ventas.pedidos");
         assert_eq!(file_name_for("\"a.b\".t"), "_a.b_.t");
     }

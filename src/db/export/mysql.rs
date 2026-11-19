@@ -1,5 +1,5 @@
-//! Exportación desde MySQL / MariaDB. La estructura de cada tabla es la que
-//! da `SHOW CREATE TABLE`, que ya trae sus claves e índices.
+//! Export from MySQL / MariaDB. The structure of each table is the one
+//! `SHOW CREATE TABLE` returns, which already includes its keys and indexes.
 
 use std::cell::RefCell;
 
@@ -35,8 +35,8 @@ pub(super) fn run(
         ExportDestination::RemoteServer { params, target_db } => {
             let target = MysqlBackend::connect_with_progress(params, |_| {})
                 .map_err(|e| format!("Conexión al destino: {e}"))?;
-            // Otro perfil (u otro nombre de host) puede llevar al mismo servidor:
-            // copiar una BBDD sobre sí misma borra (DROP) o duplica sus datos.
+            // Another profile (or another host name) may lead to the same server:
+            // copying a database onto itself drops (DROP) or duplicates its data.
             if target_db == job.source_db
                 && same_server(&backend, &target).map_err(|e| {
                     format!("No se pudo comprobar si el destino es el mismo servidor: {e}")
@@ -53,9 +53,10 @@ pub(super) fn run(
 struct MysqlSource<'a> {
     backend: &'a MysqlBackend,
     db: &'a str,
-    /// Conexión con la BBDD de origen en uso, para pedir el DDL: el de una
-    /// vista nombra la vista y sus tablas con su BBDD salvo que sea la que
-    /// está en uso, y así crearía la vista en el origen y no en el destino.
+    /// Connection with the source database in use, to ask for the DDL: a
+    /// view's DDL names the view and its tables with their database unless it
+    /// is the one in use, and so it would create the view at the source and
+    /// not at the destination.
     ddl_conn: RefCell<PooledConn>,
 }
 
@@ -82,7 +83,7 @@ impl<'a> MysqlSource<'a> {
         Ok(result.rows.first().and_then(|r| r[0].as_deref()) == Some("VIEW"))
     }
 
-    /// DDL de una tabla o de una vista, como lo da `SHOW CREATE TABLE`.
+    /// DDL of a table or a view, as `SHOW CREATE TABLE` returns it.
     fn ddl(&self, table: &str) -> DbResult<String> {
         let sql = format!("SHOW CREATE TABLE {}", quote_ident(table));
         let row: Option<mysql::Row> = self
@@ -100,7 +101,7 @@ impl Source for MysqlSource<'_> {
         Engine::Mysql
     }
 
-    /// Sin comprobar las claves foráneas: el orden de las tablas no importa.
+    /// Without checking foreign keys: the order of the tables does not matter.
     fn prelude(&self) -> Vec<String> {
         vec![
             "SET NAMES utf8mb4".into(),
@@ -115,8 +116,8 @@ impl Source for MysqlSource<'_> {
     fn script(&self, table: &str, options: &ExportOptions) -> DbResult<TableScript> {
         let name = quote_ident(table);
         let mut script = TableScript::default();
-        // Una vista no tiene datos propios (insertar en ella duplicaría los
-        // de sus tablas) y se crea al final, cuando ya existen
+        // A view has no data of its own (inserting into it would duplicate the
+        // data of its tables) and is created at the end, once they exist
         if self.is_view(table)? {
             if options.drop_if_exists {
                 script.finish.push(format!("DROP VIEW IF EXISTS {name}"));
@@ -141,8 +142,8 @@ impl Source for MysqlSource<'_> {
     }
 
     fn read_rows(&self, select: &str, batch: usize, each: &mut RowBatch<'_>) -> DbResult<()> {
-        // En su propia conexión, ocupada mientras dure la lectura: el crate
-        // va leyendo las filas del servidor según se le piden
+        // On its own connection, busy for as long as the read lasts: the
+        // crate reads the rows from the server as they are requested
         let mut conn = self.backend.conn()?;
         let mut set = conn
             .query_iter(select)
@@ -172,9 +173,9 @@ impl Source for MysqlSource<'_> {
     }
 }
 
-/// Conexión al servidor de destino, con la BBDD de destino en uso. Una sola
-/// para toda la copia: FOREIGN_KEY_CHECKS es de sesión, y el pool la
-/// resetea al devolverla.
+/// Connection to the destination server, with the destination database in
+/// use. A single one for the whole copy: FOREIGN_KEY_CHECKS is per session,
+/// and the pool resets it when it is returned.
 struct ConnSink(PooledConn);
 
 impl ConnSink {
@@ -194,9 +195,9 @@ impl Sink for ConnSink {
     }
 }
 
-/// A otra BBDD del mismo servidor: las tablas las copia el propio servidor,
-/// sin que los datos pasen por aquí. Las vistas se crean después, con su
-/// definición.
+/// To another database on the same server: the server itself copies the
+/// tables, without the data passing through here. Views are created
+/// afterwards, from their definition.
 fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbResult<Totals> {
     let backend = source.backend;
     let mut conn = backend.conn()?;
@@ -205,12 +206,12 @@ fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbRes
         quote_ident(target_db)
     ))
     .map_err(|e| format!("No se pudo crear la base de datos '{target_db}': {e}"))?;
-    // Sin ello, el orden de las tablas con claves foráneas hace fallar
-    // CREATE e INSERT
+    // Without it, the order of tables with foreign keys makes CREATE
+    // and INSERT fail
     conn.query_drop("SET FOREIGN_KEY_CHECKS = 0")
         .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
 
-    // Las vistas, al final: dependen de las tablas
+    // Views at the end: they depend on the tables
     let mut views = Vec::new();
     let mut tables = Vec::new();
     for table in job.tables {
@@ -235,7 +236,7 @@ fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbRes
     Ok(ordered.for_each_table(|table| {
         position += 1;
         if position > first_view {
-            // En una conexión con la BBDD de destino en uso
+            // On a connection with the destination database in use
             if view_sink.is_none() {
                 view_sink = Some(ConnSink::open(backend, target_db)?);
             }
@@ -263,8 +264,8 @@ fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbRes
     }))
 }
 
-/// Si dos conexiones llegan al mismo servidor, según el propio servidor
-/// (host, puerto y directorio de datos), no según los parámetros usados.
+/// Whether two connections reach the same server, according to the server
+/// itself (host, port and data directory), not to the parameters used.
 fn same_server(a: &MysqlBackend, b: &MysqlBackend) -> DbResult<bool> {
     let identity = |backend: &MysqlBackend| {
         backend
@@ -300,7 +301,7 @@ mod tests {
         b.execute_write(None, "INSERT INTO rustql_test_export.t VALUES (1)")
             .unwrap();
 
-        // Mismo servidor a través de un perfil «remoto», con DROP IF EXISTS
+        // Same server through a "remote" profile, with DROP IF EXISTS
         let rx = spawn_export(
             test_server::params(),
             "rustql_test_export".into(),
@@ -375,7 +376,7 @@ mod tests {
         let dump = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
 
-        // Cargarlo en otra BBDD, como haría el cliente mysql
+        // Load it into another database, as the mysql client would
         let mut conn = b.conn().unwrap();
         let loaded = conn.query_drop(format!("USE rustql_test_dump2; {dump}"));
         let select = "SELECT id, v FROM t ORDER BY id";
@@ -428,7 +429,7 @@ mod tests {
         ] {
             b.execute_write(None, sql).unwrap();
         }
-        // La vista y la tabla hija, antes que aquello de lo que dependen
+        // The view and the child table, before what they depend on
         let tables = ["resumen", "pedidos", "clientes"];
         let run_to = |destination, options: ExportOptions| -> Vec<ExportEvent> {
             let rx = spawn_export(
@@ -459,15 +460,15 @@ mod tests {
             };
             run_to(remote, options)
         };
-        // La BBDD de destino no existe: se crea. La segunda vez, eliminando
-        // lo que hay
+        // The destination database does not exist: it is created. The second
+        // time, dropping what is there
         let first = run(ExportOptions::default());
         let again = run(ExportOptions {
             drop_if_exists: true,
             ..Default::default()
         });
-        // Dentro del mismo servidor las tablas las copia el servidor, y las
-        // vistas se crean igual
+        // Within the same server the server copies the tables, and the views
+        // are created the same way
         let within = run_to(
             ExportDestination::SameServerDb {
                 target_db: "rustql_test_remote3".into(),
@@ -484,14 +485,14 @@ mod tests {
              WHERE TABLE_SCHEMA = 'rustql_test_remote3' AND TABLE_NAME = 'resumen'",
         );
         let read = |sql: &str| b.execute_query(None, sql).map(|r| r.rows);
-        // La vista se crea como vista: sus filas no se insertan en las tablas
+        // The view is created as a view: its rows are not inserted into tables
         let rows = read("SELECT COUNT(*) FROM rustql_test_remote2.clientes");
         let view = read("SELECT n, pedidos FROM rustql_test_remote2.resumen ORDER BY n");
         let kind = read(
             "SELECT TABLE_TYPE FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = 'rustql_test_remote2' ORDER BY TABLE_NAME",
         );
-        // La copia conserva la clave foránea y el contador
+        // The copy keeps the foreign key and the counter
         let orphan = b.execute_write(
             None,
             "INSERT INTO rustql_test_remote2.pedidos VALUES (9, 99)",
@@ -551,7 +552,7 @@ mod tests {
     fn una_tabla_grande_por_bloques_y_los_binarios_intactos() {
         let (db, copy) = ("rustql_test_chunks", "rustql_test_chunks2");
         let b = test_server::backend();
-        // 4096 filas; el binario no es texto válido en ninguna
+        // 4096 rows; the binary is not valid text in any of them
         let rows: Vec<String> = (1..=4096)
             .map(|n| format!("({n}, 'fila {n}', UNHEX(CONCAT('00FF80', HEX({n}))))"))
             .collect();
@@ -570,7 +571,7 @@ mod tests {
         ] {
             b.execute_write(None, sql).unwrap();
         }
-        // A otro servidor: las filas pasan por aquí, bloque a bloque
+        // To another server: the rows pass through here, batch by batch
         let rx = spawn_export(
             test_server::params(),
             db.into(),

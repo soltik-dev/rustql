@@ -4,7 +4,7 @@ use egui_extras::{Column, TableBuilder};
 use crate::db::TableInfo;
 use crate::ui::{format_bytes, theme};
 
-/// Retornado por db_info::show cuando el usuario hace click en una tabla.
+/// Returned by db_info::show when the user clicks a table.
 #[derive(Default)]
 pub enum DbInfoAction {
     #[default]
@@ -12,7 +12,7 @@ pub enum DbInfoAction {
     OpenTable(String),
 }
 
-/// Panel "BBDD": lista de tablas con estadísticas de la base de datos seleccionada.
+/// "Database" panel: list of tables with statistics of the selected database.
 pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
     let mut action = DbInfoAction::None;
 
@@ -26,7 +26,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
     ui.separator();
 
     if tables.is_empty() {
-        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        // Already loaded and with nothing to list (while loading it never gets here)
         ui.label(
             egui::RichText::new("Esta base de datos no tiene tablas.")
                 .color(theme::get(ui).text_muted),
@@ -36,7 +36,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
 
     let mut clicked_table: Option<String> = None;
 
-    // Motor y collation solo si el servidor los tiene por tabla (MySQL)
+    // Engine and collation only if the server has them per table (MySQL)
     let has_engine = tables.iter().any(|t| !t.engine.is_empty());
     let has_collation = tables.iter().any(|t| !t.collation.is_empty());
     let mut headers = vec!["Tabla"];

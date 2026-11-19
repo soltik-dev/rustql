@@ -1,9 +1,9 @@
-//! Grid de datos de la tabla abierta, con edición de celdas.
+//! Data grid of the open table, with cell editing.
 //!
-//! El grid es dueño de su estado de vista (cursor, filas seleccionadas, celda
-//! en edición, desplazamiento) y lo cambia él mismo. Lo que afecta a los
-//! datos —editar, insertar, eliminar, ordenar, filtrar— lo devuelve como
-//! `GridAction` y lo aplica la sesión.
+//! The grid owns its view state (cursor, selected rows, cell being edited,
+//! scroll) and changes it itself. Whatever affects the data (editing,
+//! inserting, deleting, sorting, filtering) it returns as a `GridAction`
+//! for the session to apply.
 
 mod apply_bar;
 mod copy;
@@ -29,11 +29,11 @@ use crate::settings::CopyFormat;
 use crate::ui::icons::{PLUS, VIEW};
 use crate::ui::{CMD, theme};
 
-// ── Lo que el grid dibuja ────────────────────────────────────────────────────
+// ── What the grid draws ──────────────────────────────────────────────────────
 
-/// Datos, estructura y cambios pendientes con los que se dibuja el grid.
+/// Data, structure and pending changes the grid is drawn with.
 struct Grid<'a> {
-    /// Identifica el grid: de él salen el id del foco y los del scroll.
+    /// Identifies the grid: the focus id and the scroll ids come from it.
     id: egui::Id,
     data: &'a QueryResult,
     column_info: &'a [ColumnInfo],
@@ -41,31 +41,31 @@ struct Grid<'a> {
     pending_edits: &'a [PendingEdit],
     pending_deletes: &'a BTreeSet<usize>,
     pending_inserts: &'a [PendingInsert],
-    /// Se pueden editar celdas e insertar o eliminar filas.
+    /// Cells can be edited and rows inserted or deleted.
     editable: bool,
-    /// Las filas que ya existen se pueden identificar (la tabla tiene clave
-    /// primaria): sin ello no se editan ni se eliminan, solo se insertan.
+    /// Existing rows can be identified (the table has a primary key): without
+    /// that they are not edited or deleted, only inserted.
     keyed: bool,
-    /// Los datos son los de una tabla: se puede ordenar y filtrar relanzando
-    /// su consulta.
+    /// The data is a table's: it can be sorted and filtered by re-running its
+    /// query.
     queryable: bool,
-    /// Motor de la conexión: los filtros del menú se escriben en su dialecto.
+    /// Engine of the connection: the menu's filters are written in its dialect.
     engine: Engine,
-    /// Página de la tabla que se muestra, si los datos van por páginas.
+    /// Page of the table being shown, if the data comes in pages.
     pager: Option<Pager>,
 }
 
-/// Página de la tabla que muestra el grid.
+/// Page of the table the grid shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Pager {
-    /// 0 = la primera.
+    /// 0 = the first.
     page: usize,
     page_size: usize,
     has_more: bool,
 }
 
 impl Pager {
-    /// Hay más de una página: tiene sentido enseñar por cuál se va.
+    /// There is more than one page: it makes sense to show which one it is on.
     fn paged(&self) -> bool {
         self.page > 0 || self.has_more
     }
@@ -79,14 +79,14 @@ impl Pager {
     }
 }
 
-/// Lo que muestra una celda.
+/// What a cell shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Shown<'a> {
     Value(&'a str),
     Null,
-    /// Fila nueva: el servidor pondrá el valor por defecto.
+    /// New row: the server will set the default value.
     Default,
-    /// Fila nueva: columna AUTO_INCREMENT.
+    /// New row: AUTO_INCREMENT column.
     Auto,
 }
 
@@ -95,7 +95,7 @@ impl<'a> Grid<'a> {
         self.id.with("focus")
     }
 
-    /// Filas de los datos; las nuevas van después.
+    /// Rows of the data; new ones come after.
     fn existing(&self) -> usize {
         self.data.rows.len()
     }
@@ -118,13 +118,13 @@ impl<'a> Grid<'a> {
         matches!(row, RowRef::Existing(r) if self.pending_deletes.contains(&r))
     }
 
-    /// Valor guardado en el servidor (sin los cambios pendientes).
+    /// Value saved on the server (without the pending changes).
     fn stored(&self, row: usize, col: usize) -> Option<&'a str> {
         self.data.rows.get(row)?.get(col)?.as_deref()
     }
 
-    /// Lo que se ve en la celda: el cambio pendiente si lo hay y, si no, el
-    /// dato.
+    /// What the cell shows: the pending change if there is one and, if not,
+    /// the data.
     fn shown(&self, cell: CellRef) -> Shown<'a> {
         match cell.row {
             RowRef::Existing(row) => match self.pending_edit(row, cell.col) {
@@ -148,9 +148,9 @@ impl<'a> Grid<'a> {
         }
     }
 
-    /// Valor que se resalta en las demás celdas que lo muestran: el de la
-    /// celda del cursor, salvo que esté vacía, sea NULL o sea el DEFAULT o
-    /// AUTO de una fila nueva (no son un valor que buscar).
+    /// Value highlighted in the other cells that show it: that of the
+    /// cursor's cell, unless it is empty, NULL, or the DEFAULT or AUTO of a
+    /// new row (they are not a value to look for).
     fn highlighted_value(&self, cursor: Option<CellRef>) -> Option<&'a str> {
         match self.shown(cursor?) {
             Shown::Value(v) if !v.is_empty() => Some(v),
@@ -158,8 +158,8 @@ impl<'a> Grid<'a> {
         }
     }
 
-    /// Texto con el que arranca el editor de la celda: NULL y DEFAULT se
-    /// editan como texto vacío.
+    /// Text the cell editor starts with: NULL and DEFAULT are edited as
+    /// empty text.
     fn edit_text(&self, cell: CellRef) -> String {
         match self.shown(cell) {
             Shown::Value(v) => v.to_string(),
@@ -167,9 +167,8 @@ impl<'a> Grid<'a> {
         }
     }
 
-    /// No se editan las filas marcadas para eliminar, las columnas
-    /// AUTO_INCREMENT de una fila nueva ni, sin clave primaria, las filas
-    /// que ya existen.
+    /// Rows marked for deletion, AUTO_INCREMENT columns of a new row and,
+    /// without a primary key, existing rows are not edited.
     fn can_edit(&self, cell: CellRef) -> bool {
         self.editable
             && cell.col < self.cols()
@@ -178,20 +177,20 @@ impl<'a> Grid<'a> {
             && self.shown(cell) != Shown::Auto
     }
 
-    /// Si la fila se puede editar o eliminar: las nuevas siempre; las que ya
-    /// existen, solo si se pueden identificar al guardar.
+    /// Whether the row can be edited or deleted: new ones always; existing
+    /// ones only if they can be identified when saving.
     fn can_change_row(&self, row: RowRef) -> bool {
         self.editable && (self.keyed || matches!(row, RowRef::Insert(_)))
     }
 
-    /// Si la columna admite NULL. Sin su estructura (aún cargando) se supone
-    /// que sí: el servidor lo rechazará al guardar si no.
+    /// Whether the column allows NULL. Without its structure (still loading)
+    /// it is assumed so: the server will reject it on save if not.
     fn nullable(&self, col: usize) -> bool {
         self.column_info.get(col).is_none_or(|c| c.is_nullable)
     }
 
-    /// Siguiente celda editable en orden de lectura (o la anterior): la que
-    /// toca al pulsar Tab mientras se edita.
+    /// Next editable cell in reading order (or the previous one): the one
+    /// Tab moves to while editing.
     fn next_editable(&self, from: CellRef, forward: bool) -> Option<CellRef> {
         let cols = self.cols();
         let total = self.total_rows() * cols;
@@ -216,11 +215,11 @@ impl<'a> Grid<'a> {
     }
 }
 
-// ── Grid de la tabla abierta ─────────────────────────────────────────────────
+// ── Grid of the open table ───────────────────────────────────────────────────
 
-/// Muestra los datos de la tabla abierta. Devuelve lo que el usuario pide
-/// hacer con ellos en este frame. Con `busy` (cargando o guardando) no se
-/// puede editar ni cambiar de página.
+/// Shows the data of the open table. Returns what the user asks to do
+/// with it this frame. With `busy` (loading or saving) editing and
+/// changing pages are not possible.
 pub fn show(
     ui: &mut egui::Ui,
     selected_table: Option<(&str, &str)>,
@@ -254,8 +253,8 @@ pub fn show(
         return GridAction::None;
     };
 
-    // Sin la estructura (aún cargando) se supone que hay clave: si no la
-    // hay, se sabrá antes de que dé tiempo a guardar nada
+    // Without the structure (still loading) a key is assumed: if there is
+    // none, it will be known before anything can be saved
     let keyed = column_info.is_empty() || column_info.iter().any(ColumnInfo::is_primary);
     let pager = Pager {
         page: view.page,
@@ -287,17 +286,17 @@ pub fn show(
         pending_edits: &view.pending_edits,
         pending_deletes: &view.pending_deletes,
         pending_inserts: &view.pending_inserts,
-        // Una vista se ve, se ordena y se filtra, pero no se edita aquí
+        // A view can be seen, sorted and filtered, but is not edited here
         editable: !busy && !kind.is_view(),
         keyed,
         queryable: true,
         engine,
-        // Mientras carga, la página que se ve ya no es la pedida
+        // While loading, the page shown is no longer the one requested
         pager: (!busy).then_some(pager),
     };
     let out = show_grid(ui, &grid, &mut view.selection, &mut view.editing_cell);
 
-    // La edición tiene prioridad sobre la ordenación
+    // Editing takes priority over sorting
     match (out.action, out.clicked_col) {
         (GridAction::None, Some(col)) => {
             GridAction::SortChanged(toggle_sort(&view.sort_specs, col, &data.columns[col]))
@@ -307,10 +306,10 @@ pub fn show(
     }
 }
 
-/// Grid de solo lectura para el resultado de una consulta libre: el mismo
-/// cursor, teclado y copia que el de una tabla, sin edición, ordenación ni
-/// filtros. `result_id` debe cambiar con cada resultado (sus columnas son
-/// otras). La única acción que puede devolver es `CopyRows`.
+/// Read-only grid for the result of a free query: the same cursor,
+/// keyboard and copy as a table's, without editing, sorting or filters.
+/// `result_id` must change with each result (its columns are different).
+/// The only action it can return is `CopyRows`.
 pub fn show_read_only(
     ui: &mut egui::Ui,
     result_id: u64,
@@ -336,8 +335,8 @@ pub fn show_read_only(
     show_grid(ui, &grid, sel, &mut editing).action
 }
 
-/// Copia al portapapeles las filas `rows` de `data` en el formato `fmt`.
-/// `table` es el nombre que llevan los INSERT. Devuelve cuántas ha copiado.
+/// Copies rows `rows` of `data` to the clipboard in format `fmt`.
+/// `table` is the name the INSERTs use. Returns how many it copied.
 pub fn copy_rows(
     ctx: &egui::Context,
     data: &QueryResult,
@@ -359,7 +358,7 @@ pub fn copy_rows(
     rows.len()
 }
 
-/// Teclado y tabla de un grid, sea el de una tabla o uno de solo lectura.
+/// Keyboard and table of a grid, whether a table's or a read-only one.
 fn show_grid(
     ui: &mut egui::Ui,
     grid: &Grid,
@@ -375,7 +374,7 @@ fn show_grid(
     sel.focus_id = Some(focus_id);
     let focused = ui.memory(|m| m.has_focus(focus_id));
     if focused {
-        // Tab y las flechas mueven el cursor del grid, no el foco de egui
+        // Tab and the arrows move the grid cursor, not egui's focus
         let filter = egui::EventFilter {
             tab: true,
             horizontal_arrows: true,
@@ -398,9 +397,9 @@ fn show_grid(
     out
 }
 
-/// Lo que enseña la barra de información del grid.
+/// What the grid's information bar shows.
 struct InfoBar<'a> {
-    /// «bbdd.tabla».
+    /// "db.table".
     name: String,
     data: &'a QueryResult,
     sorts: &'a [SortSpec],
@@ -410,9 +409,9 @@ struct InfoBar<'a> {
     kind: TableKind,
 }
 
-/// Nombre de la tabla, número de filas, botón de fila nueva y la ordenación
-/// activa. Devuelve lo que el usuario pide desde ella: insertar una fila o
-/// quitar columnas de la ordenación.
+/// Table name, row count, new row button and the active sort order.
+/// Returns what the user asks for from it: insert a row or remove columns
+/// from the sort order.
 fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
     let InfoBar {
         data,
@@ -427,7 +426,7 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
     ui.horizontal_wrapped(|ui| {
         ui.strong(&bar.name);
         if pager.paged() {
-            // La tabla no cabe en una página: cuáles se ven y cómo moverse
+            // The table does not fit in one page: which ones are shown and how to move
             let first = pager.page * pager.page_size + 1;
             let rows = if data.rows.is_empty() {
                 "— ninguna fila en esta página".to_string()
@@ -471,7 +470,7 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             ui.spinner();
             ui.label("Cargando…");
         } else if bar.kind.is_view() {
-            // Sin datos propios: ni filas nuevas ni el aviso de la clave
+            // No data of its own: neither new rows nor the key warning
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("{VIEW} Vista · solo lectura")).color(p.text_muted),
@@ -486,11 +485,11 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
                 .on_hover_text(format!("Insertar una fila  {CMD}Ins"))
                 .clicked()
         {
-            // A la vista aunque no haya filas sobre las que abrir el menú
+            // In view even when there are no rows to open the menu on
             action = GridAction::InsertRow;
         }
         if !bar.keyed && !bar.kind.is_view() {
-            // Antes de que alguien edite para descubrirlo al guardar
+            // Before someone edits only to find out when saving
             ui.separator();
             ui.label(egui::RichText::new("⚠ Sin clave primaria").color(p.warning))
                 .on_hover_text(
@@ -542,8 +541,8 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
     action
 }
 
-/// Ordenación tras pulsar la cabecera de `col`: ascendente, descendente y
-/// fuera, por ese orden.
+/// Sort order after clicking the header of `col`: ascending, descending
+/// and off, in that order.
 fn toggle_sort(sorts: &[SortSpec], col: usize, name: &str) -> Vec<SortSpec> {
     let mut specs = sorts.to_vec();
     match specs.iter().position(|s| s.col_idx == col) {

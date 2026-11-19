@@ -14,37 +14,37 @@ use crate::ui::{log_panel, settings_panel, statusbar, theme};
 
 const STATUSBAR_HEIGHT: f32 = 26.0;
 
-/// Visibilidad de los paneles globales (comunes a todas las conexiones).
+/// Visibility of the global panels (shared by every connection).
 pub struct UiPanelState {
     pub show_sidebar: bool,
     pub show_log: bool,
     pub show_settings: bool,
     pub settings_dirty: bool,
-    /// Fuente con la que se cargaron las fuentes por última vez.
+    /// Font the fonts were last loaded with.
     pub applied_font: String,
 }
 
-// ── Estado principal ─────────────────────────────────────────────────────────
+// ── Main state ───────────────────────────────────────────────────────────────
 
-/// Shell de la aplicación: pestañas de conexión, paneles globales y el estado
-/// que comparten. Cada pestaña es una `Session` independiente.
+/// Application shell: connection tabs, global panels and the state they
+/// share. Each tab is an independent `Session`.
 pub struct RustqlApp {
-    /// Siempre hay al menos una.
+    /// There is always at least one.
     pub sessions: Vec<Session>,
     pub active: usize,
     next_session_id: u64,
     pub shared: Shared,
     pub ui: UiPanelState,
-    /// Arranque del llavero: ids de los perfiles cuya contraseña en claro ya
-    /// se ha pasado a él.
+    /// Keyring startup: ids of the profiles whose plain-text password has
+    /// already been moved into it.
     keyring_migration: Option<Receiver<Vec<String>>>,
     window: WindowGeometry,
 }
 
-/// Tamaño de la ventana visto en el último frame, para guardarlo al salir.
+/// Window size seen in the last frame, to save it on exit.
 #[derive(Default)]
 struct WindowGeometry {
-    /// Sin maximizar: es al que vuelve la ventana al restaurarla.
+    /// Not maximized: the size the window goes back to when restored.
     size: Option<[f32; 2]>,
     maximized: bool,
 }
@@ -64,8 +64,8 @@ impl WindowGeometry {
             && !fullscreen
             && let Some(rect) = rect
         {
-            // El rect va en puntos de la interfaz, que dependen del zoom
-            // (Ctrl + y Ctrl -); el tamaño inicial de la ventana no lo tiene
+            // The rect is in UI points, which depend on the zoom (Ctrl + and
+            // Ctrl -); the initial window size does not take it into account
             let zoom = ctx.zoom_factor();
             self.size = Some([rect.width() * zoom, rect.height() * zoom]);
         }
@@ -100,8 +100,9 @@ impl RustqlApp {
     }
 }
 
-/// Conecta con el llavero en segundo plano (el formulario consulta si está
-/// disponible sin bloquear) y le pasa las contraseñas en claro heredadas.
+/// Connects to the keyring in the background (the form checks whether it
+/// is available without blocking) and moves the inherited plain-text
+/// passwords into it.
 fn start_keyring(
     ctx: &egui::Context,
     legacy: Vec<(String, String, String)>,
@@ -124,7 +125,7 @@ fn start_keyring(
     rx
 }
 
-// ── Gestión de pestañas de conexión ──────────────────────────────────────────
+// ── Connection tab management ────────────────────────────────────────────────
 
 impl RustqlApp {
     fn new_session(&mut self) {
@@ -133,8 +134,8 @@ impl RustqlApp {
         self.active = self.sessions.len() - 1;
     }
 
-    /// Cierra una pestaña; si tiene cambios sin guardar, la activa y pide
-    /// confirmación (el modal responde con SessionOutcome::close).
+    /// Closes a tab; if it has unsaved changes, activates it and asks for
+    /// confirmation (the modal answers with SessionOutcome::close).
     fn request_close(&mut self, idx: usize) {
         let session = &mut self.sessions[idx];
         let pending_count = session.pending_count();
@@ -149,8 +150,8 @@ impl RustqlApp {
         }
     }
 
-    /// Cierra sin preguntar. Activa la pestaña de la derecha (o la última) y,
-    /// si no queda ninguna, abre una nueva con el formulario.
+    /// Closes without asking. Activates the tab on the right (or the last one)
+    /// and, if none is left, opens a new one with the form.
     fn close_session(&mut self, idx: usize) {
         let session = self.sessions.remove(idx);
         session.save_tabs_state(&mut self.shared);
@@ -165,7 +166,7 @@ impl RustqlApp {
         self.active = self.active.min(self.sessions.len() - 1);
     }
 
-    /// Quita del JSON las contraseñas en claro que ya están en el llavero.
+    /// Removes from the JSON the plain-text passwords already in the keyring.
     fn poll_keyring_migration(&mut self) {
         let Some(rx) = &self.keyring_migration else {
             return;
@@ -178,7 +179,7 @@ impl RustqlApp {
         self.keyring_migration = None;
         let mut changed = false;
         for p in &mut self.shared.profiles {
-            // Si se volvió a guardar entretanto, ya no tiene la heredada.
+            // If it was saved again meanwhile, it no longer has the inherited one.
             if p.password.is_some() && migrated.contains(&p.id) {
                 p.password = None;
                 p.password_in_keyring = true;
@@ -190,7 +191,7 @@ impl RustqlApp {
         }
     }
 
-    /// Tras borrar un perfil, corrige los índices de las demás sesiones.
+    /// After deleting a profile, fixes the indices of the other sessions.
     fn on_profile_removed(&mut self, removed: usize) {
         for session in &mut self.sessions {
             session.selected_profile_idx = match session.selected_profile_idx {
@@ -201,8 +202,8 @@ impl RustqlApp {
         }
     }
 
-    /// Barra superior a todo el ancho, con una línea inferior del color de la
-    /// conexión activa. Devuelve también el rect de la barra.
+    /// Full-width top bar, with a bottom line in the colour of the active
+    /// connection. Also returns the bar's rect.
     fn show_conn_tabs(&self, ui: &mut egui::Ui) -> (ConnTabsAction, egui::Rect) {
         let p = theme::get(ui);
         let tabs: Vec<ConnTab> = self
@@ -248,17 +249,17 @@ impl RustqlApp {
     }
 }
 
-// ── Loop principal ────────────────────────────────────────────────────────────
+// ── Main loop ─────────────────────────────────────────────────────────────────
 
 impl eframe::App for RustqlApp {
-    /// Al salir se guarda el texto de las pestañas SQL de cada conexión:
-    /// hasta ahora solo se guardaba al ejecutar, y lo escrito sin ejecutar
-    /// se perdía al cerrar la aplicación.
+    /// On exit the text of each connection's SQL tabs is saved: it used to
+    /// be saved only when run, and anything typed but not run was lost when
+    /// the application closed.
     fn on_exit(&mut self) {
         for session in &self.sessions {
             session.save_tabs_state(&mut self.shared);
         }
-        // Y el tamaño de la ventana, para abrirla igual la próxima vez
+        // And the window size, to open it the same way next time
         if self.window.size.is_some() {
             self.shared.settings.window_size = self.window.size;
         }
@@ -270,9 +271,9 @@ impl eframe::App for RustqlApp {
         let ctx = &ui.ctx().clone();
         let window_rect = ui.max_rect();
         self.window.track(ctx);
-        // Aplicar ajustes si cambiaron
+        // Apply settings if they changed
         if self.ui.settings_dirty {
-            // Recargar las fuentes rehace su atlas: solo si cambió la fuente
+            // Reloading the fonts rebuilds their atlas: only if the font changed
             if self.ui.applied_font != self.shared.settings.font_family {
                 settings::setup_fonts(ctx, &self.shared.settings);
                 self.ui.applied_font = self.shared.settings.font_family.clone();
@@ -285,18 +286,18 @@ impl eframe::App for RustqlApp {
         let keys = FrameKeys::read(ctx);
         self.poll_keyring_migration();
 
-        // ── Polling de hilos de fondo (todas las sesiones) ────────────────
+        // ── Polling of background threads (all sessions) ──────────────────
         for session in &mut self.sessions {
             session.poll(ctx, &mut self.shared);
         }
 
-        // Snapshot de visibilidad de paneles para detectar cambios
+        // Snapshot of panel visibility to detect changes
         let (prev_sidebar, prev_log) = (self.ui.show_sidebar, self.ui.show_log);
         let mut settings_changed = false;
 
-        // ── Paneles globales (antes que los de la sesión) ─────────────────
-        // Borde inferior del marco de color: encima del log, o de la barra
-        // de estado si el log está oculto.
+        // ── Global panels (before the session's) ──────────────────────────
+        // Bottom edge of the coloured frame: above the log, or above the
+        // status bar if the log is hidden.
         let mut frame_bottom = {
             let status = self.sessions[self.active].status();
             let statusbar_frame =
@@ -340,13 +341,13 @@ impl eframe::App for RustqlApp {
                 });
         }
 
-        // ── Sesión activa ─────────────────────────────────────────────────
+        // ── Active session ────────────────────────────────────────────────
         let outcome =
             self.sessions[self.active].show(ui, &mut self.shared, keys, self.ui.show_sidebar);
 
-        // Marco con el color de la conexión activa alrededor del área de
-        // trabajo (sin log ni barra de estado), por encima de sus paneles. Su
-        // lado superior es la línea de las pestañas.
+        // Frame in the active connection's colour around the work area
+        // (without the log or the status bar), above its panels. Its top side
+        // is the tab line.
         if let Some(color) = self.sessions[self.active].color {
             let frame = egui::Rect::from_min_max(
                 egui::pos2(
@@ -363,13 +364,13 @@ impl eframe::App for RustqlApp {
             );
         }
 
-        // ── Aplicar señales ───────────────────────────────────────────────
+        // ── Apply signals ─────────────────────────────────────────────────
 
         if settings_changed {
             self.ui.settings_dirty = true;
         }
 
-        // Persistir visibilidad de paneles cuando cambia
+        // Persist panel visibility when it changes
         if self.ui.show_sidebar != prev_sidebar || self.ui.show_log != prev_log {
             self.shared.settings.show_sidebar = self.ui.show_sidebar;
             self.shared.settings.show_log = self.ui.show_log;
@@ -383,7 +384,7 @@ impl eframe::App for RustqlApp {
             self.sessions[self.active].open_sql_tab(&mut self.shared, None, sql);
         }
 
-        // Cerrar invalida los índices de la barra: ignorar su acción ese frame
+        // Closing invalidates the bar's indices: ignore its action this frame
         if outcome.close {
             self.close_session(self.active);
         } else {
@@ -395,7 +396,7 @@ impl eframe::App for RustqlApp {
             }
         }
 
-        // Avisos: sobre todo lo demás, por encima de la barra de estado
+        // Notifications: on top of everything else, above the status bar
         self.shared.toasts.show(ctx, STATUSBAR_HEIGHT + 12.0);
     }
 }
@@ -404,7 +405,7 @@ impl eframe::App for RustqlApp {
 mod tests {
     use super::*;
 
-    /// App con `n` sesiones y sin tocar la configuración del disco.
+    /// App with `n` sessions that does not touch the configuration on disk.
     fn app_with(n: usize, active: usize) -> RustqlApp {
         RustqlApp {
             sessions: (0..n as u64).map(Session::new).collect(),
@@ -432,7 +433,7 @@ mod tests {
         app.sessions.iter().map(|s| s.id).collect()
     }
 
-    /// Un frame con la ventana en ese estado.
+    /// One frame with the window in that state.
     fn track(window: &mut WindowGeometry, size: [f32; 2], maximized: bool) {
         let ctx = egui::Context::default();
         let mut input = egui::RawInput::default();
@@ -449,7 +450,7 @@ mod tests {
         track(&mut window, [1200.0, 700.0], false);
         assert_eq!(window.size, Some([1200.0, 700.0]));
         assert!(!window.maximized);
-        // Maximizada ocupa la pantalla: ese no es el tamaño al restaurarla
+        // Maximized it fills the screen: that is not its restored size
         track(&mut window, [1920.0, 1040.0], true);
         assert_eq!(window.size, Some([1200.0, 700.0]));
         assert!(window.maximized);

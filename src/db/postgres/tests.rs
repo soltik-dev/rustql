@@ -1,10 +1,10 @@
-//! Contra un servidor real: `RUSTQL_TEST_POSTGRES=usuario:contraseña@host:puerto
-//! cargo test -- --ignored`. Cada test crea y borra su BBDD `rustql_test_*`.
+//! Against a real server: `RUSTQL_TEST_POSTGRES=user:password@host:port
+//! cargo test -- --ignored`. Each test creates and drops its `rustql_test_*` database.
 
 use super::*;
 use crate::db::test_server::{names, pg_backend, pg_params};
 
-/// Backend con la BBDD `db` recién creada y vacía.
+/// Backend with database `db` freshly created and empty.
 fn fresh(db: &str) -> PostgresBackend {
     let b = pg_backend();
     b.execute_write(None, &format!("DROP DATABASE IF EXISTS {db}"))
@@ -45,8 +45,8 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
     let all = b.list_all_tables();
     let info = b.get_tables_info(db);
     let server = b.get_databases_info();
-    // Las tablas de otros esquemas se leen con el nombre que les da el
-    // árbol, también si el esquema lleva un punto
+    // Tables of other schemas are read with the name the tree gives
+    // them, also when the schema has a dot
     let other = b.execute_query(
         Some(db),
         &format!("SELECT * FROM {}", SQL.qualified(db, "ventas.pedidos")),
@@ -60,9 +60,9 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
 
     let databases = databases.unwrap();
     assert!(databases.contains(&db.to_string()), "{databases:?}");
-    // Ni las plantillas ni las que no admiten conexiones
+    // Neither templates nor those that do not allow connections
     assert!(!databases.iter().any(|d| d.starts_with("template")));
-    // Las del esquema por defecto, primero y sin prefijo
+    // Those of the default schema, first and without a prefix
     let expected = [
         "clientes",
         "public.con.punto",
@@ -71,7 +71,7 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
         "ventas.pedidos",
     ];
     let tables = tables.unwrap();
-    // La vista se distingue de las tablas
+    // The view is told apart from the tables
     let kinds: Vec<TableKind> = tables.iter().map(|t| t.kind).collect();
     assert_eq!(
         kinds,
@@ -110,7 +110,7 @@ fn las_bbdd_se_ven_como_en_mysql_y_los_esquemas_van_en_el_nombre() {
     let this = server.iter().find(|d| d.name == db).expect("en la lista");
     assert_eq!(this.charset, "UTF8");
     assert!(this.size_bytes > 0);
-    // Las tablas solo se cuentan en la BBDD desde la que se pregunta
+    // Tables are only counted in the database being asked from
     assert_eq!(this.table_count, None);
     assert!(server.iter().any(|d| d.table_count.is_some()));
 }
@@ -219,7 +219,7 @@ fn cualquier_tipo_llega_como_texto() {
         ]]
     );
 
-    // Sin filas, las columnas llegan igual: el grid las necesita
+    // With no rows, the columns arrive anyway: the grid needs them
     let empty = b
         .execute_query(None, "SELECT 1 AS uno WHERE false")
         .unwrap();
@@ -243,7 +243,7 @@ fn la_transaccion_convierte_los_parametros_al_tipo_de_su_columna() {
         .iter()
         .map(|c| SQL.quote_ident(c))
         .collect();
-    // Tal como los escribiría el usuario en el grid: todo texto
+    // As the user would type them in the grid: all text
     let insert = |values: &[Option<&str>]| Statement {
         sql: SQL.insert(&target, &columns),
         params: values.iter().map(|v| v.map(String::from)).collect(),
@@ -277,7 +277,7 @@ fn la_transaccion_convierte_los_parametros_al_tipo_de_su_columna() {
     )
     .unwrap();
 
-    // Un valor que no vale para su columna: lo dice el servidor y no queda nada
+    // A value that is not valid for its column: the server says so and nothing is left
     let bad_type = b.execute_transaction(
         Some(db),
         &[
@@ -294,11 +294,11 @@ fn la_transaccion_convierte_los_parametros_al_tipo_de_su_columna() {
             ]),
         ],
     );
-    // La fila 9 no existe (otro la borró): tampoco se guarda la 1
+    // Row 9 does not exist (someone else deleted it): row 1 is not saved either
     let missing = b.execute_transaction(Some(db), &[update("x", "1"), update("y", "9")]);
-    // Dejar una fila con el valor que ya tenía no es «no encontrada»
+    // Leaving a row with the value it already had is not "not found"
     let unchanged = b.execute_transaction(Some(db), &[update("it's a \\ test", "1")]);
-    // Tras los fallos, las conexiones del pool siguen fuera de transacción
+    // After the failures, the pool connections are still outside a transaction
     let after = rows(&b, db, "SELECT * FROM t ORDER BY id");
     b.drop_database(db).unwrap();
 
@@ -344,7 +344,7 @@ fn sentencias_del_dialecto_que_cambian_de_un_motor_a_otro() {
     b.execute_write(Some(db), &SQL.create_table_like(&dst, &src))
         .unwrap();
     let copied = b.execute_write(Some(db), &format!("INSERT INTO {dst} SELECT * FROM {src}"));
-    // Fila con todo por defecto
+    // Row with every default
     b.execute_transaction(
         Some(db),
         &[Statement {
@@ -356,7 +356,7 @@ fn sentencias_del_dialecto_que_cambian_de_un_motor_a_otro() {
     .unwrap();
     let structure = b.get_columns_info(db, "copia");
     let defaults = rows(&b, db, "SELECT v, n FROM origen ORDER BY id DESC LIMIT 1");
-    // LIKE sobre un número y sin distinguir mayúsculas
+    // LIKE on a number and case-insensitive
     let like = |column: &str, pattern: &str| {
         let sql = format!(
             "SELECT id FROM {src} WHERE {} ORDER BY id",
@@ -365,7 +365,7 @@ fn sentencias_del_dialecto_que_cambian_de_un_motor_a_otro() {
         rows(&b, db, &sql)
     };
     let (by_number, by_text) = (like("n", "%5%"), like("v", "UN%"));
-    // Vaciar y borrar
+    // Empty and drop
     b.truncate_table(db, "copia").unwrap();
     let truncated = rows(&b, db, "SELECT count(*) FROM copia");
     b.drop_table(db, "copia", TableKind::Table).unwrap();
@@ -431,7 +431,7 @@ fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
     };
     let count = || rows(&b, db, "SELECT count(*) FROM t");
 
-    // Cada línea es una ejecución (F9) distinta
+    // Each line is a separate run (F9)
     run("SET application_name = 'editor'", 100).unwrap();
     run("CREATE TEMP TABLE tmp (v int)", 100).unwrap();
     run("BEGIN", 100).unwrap();
@@ -450,19 +450,19 @@ fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
     )
     .unwrap();
     let committed = count();
-    // Tope de filas, y la sesión sigue utilizable después
+    // Row limit, and the session is still usable afterwards
     let capped = run("SELECT * FROM t ORDER BY id", 3);
     let exact = run("SELECT * FROM t", 5);
     let empty = run("SELECT id AS n FROM t WHERE false", 3);
-    // De varias sentencias, el resultado es el de la primera que devuelve filas
+    // With several statements, the result is that of the first one returning rows
     let several = run(
         "SET application_name = 'x'; SELECT 1 AS uno; SELECT 2 AS dos",
         100,
     );
-    // Un error deja la sesión viva y se cuenta como lo cuenta el servidor
+    // An error leaves the session alive and is reported as the server reports it
     let error = run("SELECT * FROM no_existe", 100);
     let alive = run("SELECT count(*) FROM tmp", 100);
-    // Otra BBDD, otra sesión: aquí la tabla temporal no existe
+    // Another database, another session: here the temporary table does not exist
     let elsewhere = b.execute_in_session(None, "SELECT * FROM tmp", 1, &CancelFlag::default());
     b.drop_database(db).unwrap();
 
@@ -495,7 +495,7 @@ fn cancelar_interrumpe_la_consulta_y_conserva_la_sesion() {
     let run = |sql: &str, cancel: &CancelFlag| b.execute_in_session(None, sql, 100, cancel);
     run("SET application_name = 'siete'", &CancelFlag::default()).unwrap();
 
-    // Una consulta de un minuto, cancelada a los 300 ms
+    // A query that takes a minute, cancelled after 300 ms
     let cancel = CancelFlag::default();
     let slow = {
         let (b, cancel) = (Arc::clone(&b), Arc::clone(&cancel));
@@ -511,11 +511,11 @@ fn cancelar_interrumpe_la_consulta_y_conserva_la_sesion() {
     assert!(elapsed.as_secs() < 10, "tardó {elapsed:?}");
     assert_eq!(result.unwrap_err(), QUERY_CANCELLED);
 
-    // La sesión es la misma y la siguiente consulta no hereda la cancelación
+    // The session is the same and the next query does not inherit the cancellation
     let after = run("SHOW application_name", &CancelFlag::default()).unwrap();
     assert_eq!(after.rows, [text(&["siete"])]);
 
-    // Cancelada antes de empezar, no llega al servidor
+    // Cancelled before starting, it never reaches the server
     let never = CancelFlag::default();
     b.cancel_in_session(&never).unwrap();
     let skipped = run("SET application_name = 'ocho'", &never);
@@ -540,9 +540,9 @@ fn la_conexion_limitada_a_una_bbdd_solo_ensena_esa() {
     let databases = only.list_databases();
     let tables = only.list_all_tables();
     let info = only.get_databases_info();
-    // Sin nombrar ninguna BBDD, se ejecuta en esa
+    // Without naming a database, it runs in that one
     let unqualified = only.execute_query(None, "SELECT current_database()");
-    // El botón de elegir del formulario lista todas, haya o no una puesta
+    // The form's pick button lists them all, whether one is set or not
     let picker = crate::db::list_server_databases(&params);
     let missing = PostgresBackend::connect_with_progress(
         &ConnectionParams {
@@ -586,7 +586,7 @@ fn errores_de_conexion_legibles() {
         },
         |_| {},
     );
-    // Con su causa, no solo «error connecting to server»
+    // With its cause, not just "error connecting to server"
     let err = nobody_listening.err().expect("nadie escucha");
     assert!(err.to_lowercase().contains("refused"), "{err}");
 }
@@ -596,7 +596,7 @@ fn errores_de_conexion_legibles() {
 fn borrar_una_bbdd_cierra_antes_las_conexiones_propias() {
     let db = "rustql_test_drop";
     let b = fresh(db);
-    // Conexiones abiertas a ella: las del pool y la del editor
+    // Connections open to it: the pool's and the editor's
     b.execute_write(Some(db), "CREATE TABLE t (id int)")
         .unwrap();
     b.list_tables(db).unwrap();
@@ -605,7 +605,7 @@ fn borrar_una_bbdd_cierra_antes_las_conexiones_propias() {
 
     b.drop_database(db).unwrap();
     assert!(!b.list_databases().unwrap().contains(&db.to_string()));
-    // Y se puede volver a crear y usar con el mismo nombre
+    // And it can be created again and used with the same name
     b.create_database(db, "").unwrap();
     assert!(b.list_tables(db).unwrap().is_empty());
     b.drop_database(db).unwrap();
@@ -623,8 +623,8 @@ fn la_conexion_va_cifrada_si_el_servidor_lo_ofrece() {
         )
         .unwrap()
         .rows;
-    // Con un certificado autofirmado también: no se comprueba (como libpq
-    // con sslmode=prefer). Sin TLS en el servidor, la conexión va en claro
+    // With a self-signed certificate too: it is not checked (like libpq
+    // with sslmode=prefer). Without TLS on the server, the connection is plain
     let expected = if server_has_tls { "t" } else { "f" };
     assert_eq!(encrypted, [text(&[expected])]);
 }
@@ -633,7 +633,7 @@ fn la_conexion_va_cifrada_si_el_servidor_lo_ofrece() {
 #[ignore = "necesita RUSTQL_TEST_POSTGRES"]
 fn una_conexion_caida_en_el_pool_no_se_nota() {
     let b = pg_backend();
-    // La conexión que queda esperando en el pool, cortada desde el servidor
+    // The connection waiting in the pool, cut from the server side
     let pid = &rows(&b, "postgres", "SELECT pg_backend_pid()")[0][0];
     let pid = pid.as_deref().expect("pid");
     let admin = pg_backend();
@@ -641,7 +641,7 @@ fn una_conexion_caida_en_el_pool_no_se_nota() {
         .execute_query(None, &format!("SELECT pg_terminate_backend({pid})"))
         .unwrap();
 
-    // Las lecturas siguientes van por una conexión nueva, sin error
+    // The following reads go through a new connection, without error
     for _ in 0..3 {
         let result = b.execute_query(Some("postgres"), "SELECT 1").unwrap();
         assert_eq!(result.rows, [text(&["1"])]);
@@ -659,20 +659,20 @@ fn niveles_de_seguridad_de_la_conexion() {
         b.execute_query(None, sql).unwrap().rows == [text(&["t"])]
     };
 
-    // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
+    // Require: encrypted, without checking the certificate (from a private CA)
     let required = connect(TlsMode::Require, false).unwrap();
     assert!(encrypted(&required));
     assert_eq!(required.security(), Security::Encrypted);
-    // Verificar sin decir qué autoridad lo firma: no se conoce
+    // Verify without saying which authority signs it: it is unknown
     let unknown = connect(TlsMode::Verify, false)
         .err()
         .expect("CA desconocida");
     assert!(unknown.contains("fichero de CA"), "{unknown}");
-    // Con su CA, el certificado vale (y es de 127.0.0.1)
+    // With its CA, the certificate is valid (and is for 127.0.0.1)
     let verified = connect(TlsMode::Verify, true).unwrap();
     assert!(encrypted(&verified));
-    // También las conexiones que se abren después: otra BBDD, el editor y
-    // la que cancela una consulta
+    // Also the connections opened later: another database, the editor and
+    // the one that cancels a query
     verified.list_tables("template1").unwrap();
     let cancel = CancelFlag::default();
     verified
@@ -699,12 +699,12 @@ fn vistas_y_vistas_materializadas() {
     let view = b.view_definition(db, "informes.pares");
     let materialized = b.view_definition(db, "guardada");
     let not_a_view = b.view_definition(db, "t");
-    // Lo que devuelve se puede ejecutar tal cual para cambiar la vista
+    // What it returns can be run as is to change the view
     let replaced = view
         .clone()
         .and_then(|sql| b.execute_write(Some(db), &sql.replace("= 0", "= 1")));
     let after = b.execute_query(Some(db), "SELECT id FROM informes.pares");
-    // Cada una se elimina con su sentencia
+    // Each one is dropped with its own statement
     let as_table = b.drop_table(db, "guardada", TableKind::Table);
     b.drop_table(db, "guardada", TableKind::MaterializedView)
         .unwrap();

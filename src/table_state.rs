@@ -4,18 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui::results_grid::SortSpec;
 
-/// Estado persistido por tabla: ordenación activa, filtro WHERE e historial.
+/// Persisted per-table state: active sort, WHERE filter and history.
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct TableState {
     pub sort_specs: Vec<SortSpec>,
     pub filter_text: String,
-    /// Historial de filtros, más reciente primero. Máximo 20 entradas.
+    /// Filter history, most recent first. At most 20 entries.
     pub filter_history: Vec<String>,
 }
 
 pub type TableStates = HashMap<String, TableState>;
 
-/// Clave «bd/tabla» de una tabla: la del estado guardado y la de los favoritos.
+/// "db/table" key of a table: that of the saved state and of favourites.
 pub fn table_key(db: &str, table: &str) -> String {
     format!("{db}/{table}")
 }

@@ -8,8 +8,8 @@ use crate::table_state::table_key;
 use crate::ui::icons::*;
 use crate::ui::{CMD, ellipsize, theme};
 
-/// Si `db` tiene alguna tabla favorita. Los favoritos son claves «bd/tabla»:
-/// no hace falta haber cargado las tablas de la BBDD para saberlo.
+/// Whether `db` has any favourite table. Favourites are "db/table" keys:
+/// the database's tables do not need to be loaded to know it.
 fn has_favorite(fav_tables: &HashSet<String>, db: &str) -> bool {
     fav_tables.iter().any(|key| {
         key.strip_prefix(db)
@@ -69,21 +69,21 @@ pub enum SidebarAction {
         db: String,
         table: String,
     },
-    /// Abrir la definición de una vista en el editor SQL.
+    /// Open the definition of a view in the SQL editor.
     ViewDefinition {
         db: String,
         table: String,
     },
 }
 
-/// Lo que el sidebar pide a la sesión: la acción del usuario y los datos
-/// que le faltan para dibujar el árbol (los carga la sesión en segundo plano).
+/// What the sidebar asks of the session: the user's action and the data
+/// it is missing to draw the tree (the session loads it in the background).
 #[derive(Default)]
 pub struct SidebarOutput {
     pub action: SidebarAction,
-    /// BBDD desplegadas cuyas tablas aún no se han pedido.
+    /// Expanded databases whose tables have not been requested yet.
     pub load_tables: Vec<String>,
-    /// El buscador necesita las tablas de todas las BBDD.
+    /// The search needs the tables of every database.
     pub load_all_tables: bool,
 }
 
@@ -94,29 +94,30 @@ fn loading_label(ui: &mut egui::Ui) {
     });
 }
 
-/// Lo que el sidebar enseña: el esquema cargado hasta ahora y qué está
-/// seleccionado.
+/// What the sidebar shows: the schema loaded so far and what is
+/// selected.
 pub struct SidebarView<'a> {
     pub databases: &'a Loadable<Vec<String>>,
-    /// Tablas de cada BBDD, según se van pidiendo.
+    /// Tables of each database, as they are requested.
     pub tables: &'a HashMap<String, Loadable<Vec<String>>>,
-    /// De cada BBDD, las que son vistas.
+    /// For each database, the entries that are views.
     pub kinds: &'a HashMap<String, HashMap<String, TableKind>>,
     pub selected_db: Option<&'a str>,
     pub selected_table: Option<&'a str>,
-    /// Claves «bd/tabla» de las tablas favoritas.
+    /// "db/table" keys of the favourite tables.
     pub favorites: &'a HashSet<String>,
     pub server_name: &'a str,
-    /// Color de la conexión: tiñe la raíz del árbol y la selección.
+    /// Connection colour: tints the tree root and the selection.
     pub conn_color: Option<egui::Color32>,
-    /// La conexión se limita a una BBDD: sale desplegada, y ni se crean
-    /// otras ni se elimina esa (el árbol no podría enseñar el resultado).
+    /// The connection is limited to one database: it comes expanded, and
+    /// neither are others created nor is that one dropped (the tree could not
+    /// show the result).
     pub single_database: bool,
 }
 
-/// Muestra el panel izquierdo con buscador y árbol servidor/databases/tablas.
-/// El texto del buscador y el filtro de favoritos son estado suyo, que
-/// cambia él mismo; lo demás lo pide con `SidebarOutput`.
+/// Shows the left panel with the search box and the server/databases/tables tree.
+/// The search text and the favourites filter are its own state, which
+/// it changes itself; everything else it asks for with `SidebarOutput`.
 pub fn show(
     ui: &mut egui::Ui,
     view: &SidebarView,
@@ -159,7 +160,7 @@ pub fn show(
     out
 }
 
-/// Filtro de favoritos, recargar y buscador.
+/// Favourites filter, reload and search box.
 fn toolbar(
     ui: &mut egui::Ui,
     table_search: &mut String,
@@ -189,7 +190,7 @@ fn toolbar(
         }
         refresh_btn.on_hover_text("Recargar esquema");
 
-        // Buscador tipo pill
+        // Pill-style search box
         egui::Frame::NONE
             .fill(p.bg_surface)
             .stroke(egui::Stroke::new(1.0, p.border_subtle))
@@ -210,7 +211,7 @@ fn toolbar(
     });
 }
 
-/// Opción de un menú contextual: al elegirla, el menú se cierra.
+/// Context menu option: choosing it closes the menu.
 fn menu_item(ui: &mut egui::Ui, label: String) -> bool {
     let clicked = ui.button(label).clicked();
     if clicked {
@@ -219,7 +220,7 @@ fn menu_item(ui: &mut egui::Ui, label: String) -> bool {
     clicked
 }
 
-/// Como `menu_item`, para lo que destruye algo.
+/// Like `menu_item`, for whatever destroys something.
 fn danger_item(ui: &mut egui::Ui, label: String) -> bool {
     let clicked = theme::danger_button(ui, label).clicked();
     if clicked {
@@ -228,20 +229,20 @@ fn danger_item(ui: &mut egui::Ui, label: String) -> bool {
     clicked
 }
 
-/// Lo que el árbol enseña bajo una BBDD.
+/// What the tree shows under a database.
 #[derive(Debug, PartialEq)]
 enum Listing<'a> {
-    /// La BBDD no pasa los filtros: no sale en el árbol.
+    /// The database does not pass the filters: it is not shown in the tree.
     Hidden,
     Tables(Vec<&'a String>),
-    /// Sus tablas aún no se han pedido al servidor.
+    /// Its tables have not been requested from the server yet.
     NotRequested,
     Loading,
     Failed(&'a str),
 }
 
-/// El árbol con sus filtros: el texto buscado (en minúsculas) y si solo se
-/// ven los favoritos.
+/// The tree with its filters: the search text (in lowercase) and whether
+/// only favourites are shown.
 struct Tree<'a> {
     view: &'a SidebarView<'a>,
     filter: String,
@@ -257,10 +258,10 @@ impl Tree<'_> {
         self.view.favorites.contains(&table_key(db, table))
     }
 
-    /// Raíz del árbol: el servidor, con sus BBDD dentro.
+    /// Root of the tree: the server, with its databases inside.
     fn server(&self, ui: &mut egui::Ui, dbs: &[String], out: &mut SidebarOutput) {
         let label = format!("{} {}", PLUG, ellipsize(self.view.server_name, 28));
-        // Hueco para el fondo de la raíz: se rellena al conocer su rect.
+        // Slot for the root background: filled once its rect is known.
         let background = ui.painter().add(egui::Shape::Noop);
         let header = egui::CollapsingHeader::new(&label)
             .id_salt("server_root")
@@ -298,9 +299,9 @@ impl Tree<'_> {
         });
     }
 
-    /// Lo que hay bajo `db` con los filtros puestos. Al buscar solo salen
-    /// las BBDD con alguna tabla que coincida; con el filtro de favoritos,
-    /// las que tienen alguno.
+    /// What is under `db` with the filters applied. When searching, only the
+    /// databases with a matching table are shown; with the favourites filter,
+    /// those that have one.
     fn listing(&self, db: &str) -> Listing<'_> {
         let view = self.view;
         if self.only_fav && !has_favorite(view.favorites, db) {
@@ -332,10 +333,10 @@ impl Tree<'_> {
         Listing::Tables(tables)
     }
 
-    /// Una BBDD con sus tablas dentro.
+    /// A database with its tables inside.
     fn database(&self, ui: &mut egui::Ui, db: &String, out: &mut SidebarOutput) {
         let p = theme::get(ui);
-        // El buscador mira en las tablas de todas las BBDD
+        // The search looks at the tables of every database
         let cached = self.view.tables.get(db);
         if self.filtering() && cached.is_none_or(Loadable::needs_load) {
             out.load_all_tables = true;
@@ -346,9 +347,9 @@ impl Tree<'_> {
         }
 
         let header = egui::CollapsingHeader::new(egui::RichText::new(ellipsize(db, 24)).strong())
-            // Al buscar, las BBDD con coincidencias salen desplegadas: lo
-            // que se busca son tablas. Con otro id, para que al borrar la
-            // búsqueda el árbol vuelva a estar como estaba.
+            // When searching, databases with matches come expanded: what is
+            // searched for is tables. With another id, so that clearing the
+            // search leaves the tree as it was.
             .id_salt((db, self.filtering()))
             .default_open(self.filtering() || self.view.single_database)
             .show(ui, |ui| match listing {
@@ -357,7 +358,7 @@ impl Tree<'_> {
                     ui.colored_label(p.danger, format!("Error: {e}"));
                 }
                 Listing::Loading => loading_label(ui),
-                // Se piden al desplegarla por primera vez
+                // Requested when first expanded
                 Listing::NotRequested => {
                     out.load_tables.push(db.clone());
                     loading_label(ui);
@@ -400,8 +401,8 @@ impl Tree<'_> {
         });
     }
 
-    /// Fila de una tabla: la estrella de favorito a la izquierda y el nombre,
-    /// recortado al ancho del panel.
+    /// Row of a table: the favourite star on the left and the name, truncated
+    /// to the panel width.
     fn table_row(&self, ui: &mut egui::Ui, db: &str, table: &str, out: &mut SidebarOutput) {
         let p = theme::get(ui);
         let view = self.view;
@@ -413,7 +414,7 @@ impl Tree<'_> {
             .and_then(|kinds| kinds.get(table))
             .copied()
             .unwrap_or_default();
-        // Las acciones se llevan sus nombres
+        // Actions take their names with them
         let names = || (db.to_string(), table.to_string());
 
         let row_height = ui.spacing().interact_size.y;
@@ -438,7 +439,7 @@ impl Tree<'_> {
             egui::Sense::click(),
         );
 
-        // Fondo hover/selected
+        // Hover/selected background
         let bg = if is_selected {
             view.conn_color
                 .map_or(p.grid_sel_row_bg, |c| c.gamma_multiply(0.3))
@@ -472,7 +473,7 @@ impl Tree<'_> {
         } else {
             ui.visuals().text_color()
         };
-        // Una vista lleva su icono delante del nombre
+        // A view carries its icon before the name
         let font = egui::TextStyle::Body.resolve(ui.style());
         let mut job = egui::text::LayoutJob::default();
         if kind.is_view() {
@@ -490,7 +491,7 @@ impl Tree<'_> {
         } else {
             job.append(table, 0.0, egui::TextFormat::simple(font, text_color));
         }
-        // Recortado al ancho del panel, no a un número fijo de caracteres
+        // Truncated to the panel width, not to a fixed number of characters
         job.break_on_newline = false;
         job.wrap = egui::text::TextWrapping::truncate_at_width(label_rect.width() - 4.0);
         let galley = ui.painter().layout_job(job);
@@ -512,7 +513,7 @@ impl Tree<'_> {
             let (db, table) = names();
             out.action = SidebarAction::SelectTable { db, table };
         }
-        // Nombre completo si no cabe
+        // Full name if it does not fit
         let resp = if name_cut {
             resp.on_hover_text(table)
         } else {
@@ -545,8 +546,8 @@ impl Tree<'_> {
             item(ui, format!("{COPY} Copiar nombre"), |_, table| {
                 SidebarAction::CopyTableName(table)
             });
-            // Una vista no tiene datos propios: ni se clona ni se vacía, y
-            // lo suyo es su definición
+            // A view has no data of its own: it is neither cloned nor emptied,
+            // and what matters is its definition
             if kind.is_view() {
                 item(ui, format!("{VIEW} Ver definición"), |db, table| {
                     SidebarAction::ViewDefinition { db, table }
@@ -591,7 +592,7 @@ mod tests {
         assert!(!has_favorite(&favs, "otra"));
     }
 
-    /// Esquema de prueba y el sidebar dibujado con eventos reales.
+    /// Test schema and the sidebar drawn with real events.
     struct Fixture {
         ctx: egui::Context,
         databases: Loadable<Vec<String>>,
@@ -603,7 +604,7 @@ mod tests {
     }
 
     impl Fixture {
-        /// BBDD `tienda` (tablas cargadas) y `otra` (sin pedir).
+        /// Database `tienda` (tables loaded) and `otra` (not requested).
         fn new() -> Self {
             let tables = vec!["clientes".to_string(), "pedidos".to_string()];
             Self {
@@ -648,10 +649,9 @@ mod tests {
             out
         }
 
-        /// Acciones que salen al hacer clic a la altura `x` en cada fila del
-        /// panel, de arriba abajo, sin repetir las consecutivas. Los nombres
-        /// de las BBDD quedan a la izquierda; las filas de las tablas ocupan
-        /// todo el ancho.
+        /// Actions produced by clicking at height `x` on each row of the panel,
+        /// top to bottom, without repeating consecutive ones. Database names sit
+        /// on the left; table rows take up the whole width.
         fn click_down_the_tree(&mut self, x: f32) -> Vec<String> {
             let mut seen: Vec<String> = Vec::new();
             for y in (60..400).step_by(6) {
@@ -681,7 +681,7 @@ mod tests {
         let out = f.frame(Vec::new());
         assert!(out.load_all_tables, "«otra» aún no tiene sus tablas");
 
-        // Solo queda la BBDD con coincidencias, ya desplegada
+        // Only the database with matches is left, already expanded
         f.tables
             .insert("otra".into(), Loadable::Ready(vec!["facturas".into()]));
         assert!(!f.frame(Vec::new()).load_all_tables);
@@ -717,7 +717,7 @@ mod tests {
                 filter: filter.into(),
                 only_fav,
             };
-            // Como texto: el resultado toma prestado de `view`
+            // As text: the result borrows from `view`
             ["tienda", "otra", "rota"].map(|db| format!("{:?}", tree.listing(db)))
         };
 
@@ -729,12 +729,12 @@ mod tests {
                 r#"Failed("sin permiso")"#
             ]
         );
-        // Buscando: solo las BBDD con alguna tabla que coincida
+        // Searching: only the databases with a matching table
         assert_eq!(
             tree(&f, "cli", false),
             [r#"Tables(["clientes"])"#, "Hidden", "Hidden"]
         );
-        // Solo favoritos: fuera las BBDD sin ninguno y las tablas que no lo son
+        // Favourites only: out go the databases with none and the tables that are not
         assert_eq!(
             tree(&f, "", true),
             [r#"Tables(["pedidos"])"#, "Hidden", "Hidden"]

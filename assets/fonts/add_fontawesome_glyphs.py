@@ -1,11 +1,11 @@
-"""Añade a rustql.ttf glifos de Font Awesome 4.7 (SIL OFL 1.1).
+"""Adds Font Awesome 4.7 glyphs (SIL OFL 1.1) to rustql.ttf.
 
-rustql.ttf salió de fontello, que toma los glifos de Font Awesome 4 con sus
-mismos códigos y los escala de 1792 a 1000 unidades por em, bajándolos para
-que el descendente quede en -150. Este script hace lo mismo con los que
-faltan, para que el resultado sea coherente con los que ya había.
+rustql.ttf came from fontello, which takes Font Awesome 4 glyphs with the
+same code points and scales them from 1792 to 1000 units per em, lowering
+them so the descender sits at -150. This script does the same with the
+missing ones, so the result matches the glyphs already there.
 
-Uso (fontTools; Font Awesome 4.7 en Fedora: paquete fontawesome4-fonts):
+Usage (fontTools; Font Awesome 4.7 on Fedora: package fontawesome4-fonts):
     python3 add_fontawesome_glyphs.py /usr/share/fonts/fontawesome/fontawesome-webfont.ttf
 """
 
@@ -16,7 +16,7 @@ from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
 
-# código → nombre del glifo en rustql.ttf (el uso, en src/ui/icons.rs)
+# code point → glyph name in rustql.ttf (its use, in src/ui/icons.rs)
 GLYPHS = {
     0xF093: "upload",  # EXPORT
     0xF002: "search",  # SEARCH
@@ -41,7 +41,7 @@ def main(fontawesome_path: str) -> None:
     order = list(font.getGlyphOrder())
     for code, name in GLYPHS.items():
         if code in font.getBestCmap():
-            print(f"{code:#x} ya está, se deja")
+            print(f"{code:#x} already there, left as is")
             continue
         source = fa_cmap[code]
         pen = TTGlyphPen(None)
@@ -55,7 +55,7 @@ def main(fontawesome_path: str) -> None:
         for table in font["cmap"].tables:
             if table.isUnicode():
                 table.cmap[code] = name
-        print(f"{code:#x} ← {source} como {name}")
+        print(f"{code:#x} ← {source} as {name}")
     font.setGlyphOrder(order)
     font["glyf"].setGlyphOrder(order)
     font.save(FONT)

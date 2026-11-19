@@ -14,22 +14,23 @@ publish = false
 [dependencies]
 eframe = "0.37"
 egui_extras = "0.37"
-# TLS de los dos motores en Rust puro (rustls + ring): sin openssl, para el
-# build portable con glibc antigua, igual que el llavero.
+# TLS for both engines in pure Rust (rustls + ring): no openssl, for the
+# portable build with an old glibc, like the keyring.
 mysql = { version = "28", features = ["rustls-tls-ring"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-# Autoridades para verificar el certificado del servidor: las instaladas en
-# el sistema (donde estará la de una empresa) y, por si el sistema no trae
-# ninguna, las públicas de Mozilla (las mismas que usa el crate de MySQL).
+# Authorities to verify the server certificate: those installed on the
+# system (where a company's own will be) and, in case the system has none,
+# Mozilla's public ones (the same the MySQL crate uses).
 rustls-native-certs = "0.8"
 webpki-roots = "1"
-# Para pasarle al crate de MySQL las del sistema, que solo admite un fichero PEM
+# To hand the system ones to the MySQL crate, which only accepts one PEM file
 base64 = "0.22"
-# `std` explícito: en Linux lo activa de rebote el llavero, pero en Windows y
-# macOS nadie, y sin él no existen los streams con concurrencia (`buffered`).
+# Explicit `std`: on Linux the keyring enables it indirectly, but on Windows
+# and macOS nothing does, and without it the concurrent streams (`buffered`)
+# do not exist.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -42,8 +43,8 @@ env_logger = "0.11"
 log = "0.4"
 keyring-core = "1"
 
-# Almacén de contraseñas del sistema (ver src/secrets.rs). Solo Rust puro en
-# Linux: sin libdbus ni openssl, para el build portable con glibc antigua.
+# System password store (see src/secrets.rs). Pure Rust only on Linux: no
+# libdbus or openssl, for the portable build with an old glibc.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
 

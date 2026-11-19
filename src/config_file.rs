@@ -1,11 +1,11 @@
-//! Ficheros JSON de configuración en ~/.config/rustql (ajustes, perfiles y
-//! estado de las tablas).
+//! JSON configuration files in ~/.config/rustql (settings, profiles and
+//! table state).
 //!
-//! Se escriben en un temporal que luego se renombra encima del fichero: un
-//! corte a mitad de escritura no lo deja truncado. Si uno no se puede
-//! interpretar, se aparta como copia de seguridad antes de usar los valores
-//! por defecto; si no, el siguiente guardado lo sobrescribiría y se perdería
-//! (por ejemplo, todos los perfiles).
+//! They are written to a temporary file that is then renamed over the
+//! real one: a crash mid-write cannot leave it truncated. If one cannot be
+//! parsed, it is set aside as a backup before falling back to the
+//! defaults; otherwise the next save would overwrite it and it would be
+//! lost (all the profiles, for instance).
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Directorio de configuración. En los tests, uno temporal: ningún test
-/// debe tocar la configuración real.
+/// Configuration directory. In tests, a temporary one: no test may touch
+/// the real configuration.
 fn dir() -> Option<PathBuf> {
     if cfg!(test) {
         Some(std::env::temp_dir().join("rustql-tests"))
@@ -24,8 +24,8 @@ fn dir() -> Option<PathBuf> {
     }
 }
 
-/// Lee `name`. Si no existe o no se puede leer, devuelve el valor por
-/// defecto; si no es un JSON válido, además lo aparta como `.bak`.
+/// Reads `name`. If it does not exist or cannot be read, returns the
+/// default value; if it is not valid JSON, it is also set aside as `.bak`.
 pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
     let Some(path) = dir().map(|d| d.join(name)) else {
         return T::default();
@@ -58,8 +58,8 @@ pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
     }
 }
 
-/// Guarda `value` en `name`. Con `private`, el fichero solo es legible por
-/// el usuario (0600) y el directorio, 0700 (en Unix).
+/// Saves `value` to `name`. With `private`, only the user can read the
+/// file (0600) and the directory (0700), on Unix.
 pub fn save<T: Serialize>(name: &str, value: &T, private: bool) {
     if let Err(e) = try_save(name, value, private) {
         log::warn!("No se pudo guardar {name}: {e}");
@@ -80,7 +80,7 @@ fn try_save<T: Serialize>(name: &str, value: &T, private: bool) -> io::Result<()
     }
     let data = serde_json::to_string_pretty(value)?;
 
-    // Nombre único: dos guardados a la vez no comparten temporal.
+    // Unique name: two simultaneous saves never share a temporary file.
     static NEXT_TMP: AtomicUsize = AtomicUsize::new(0);
     let tmp = dir.join(format!(
         ".{name}.{}.{}.tmp",
@@ -116,7 +116,7 @@ fn backup_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// Fichero de prueba con nombre propio, que se borra al terminar.
+    /// Test file with its own name, deleted when the test ends.
     struct TestFile(&'static str);
 
     impl TestFile {
@@ -126,7 +126,7 @@ mod tests {
 
         fn backups(&self) -> Vec<PathBuf> {
             let prefix = format!("{}.", self.0);
-            // El directorio no existe hasta el primer guardado
+            // The directory does not exist until the first save
             let Ok(entries) = std::fs::read_dir(dir().unwrap()) else {
                 return Vec::new();
             };

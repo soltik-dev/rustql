@@ -1,4 +1,4 @@
-//! Diálogos modales de la sesión: formularios, confirmaciones y errores.
+//! Modal dialogs of the session: forms, confirmations and errors.
 
 mod export;
 
@@ -14,7 +14,7 @@ use crate::ui::icons::*;
 use crate::ui::results_grid::SortSpec;
 use crate::ui::theme;
 
-// ── Tipos de datos para formularios ─────────────────────────────────────────
+// ── Data types for forms ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
 pub struct NewColumnDef {
@@ -65,11 +65,11 @@ impl FilterOperator {
     }
 }
 
-/// Lo que se elimina o se vacía: una base de datos entera o una tabla.
+/// What gets dropped or emptied: a whole database or a table.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DbObject {
     Database(String),
-    /// Una tabla o una vista.
+    /// A table or a view.
     Table {
         db: String,
         table: String,
@@ -77,25 +77,25 @@ pub enum DbObject {
     },
 }
 
-/// Recarga de la tabla abierta. Con cambios pendientes espera a que el
-/// usuario decida qué hacer con ellos: se refieren a las filas por posición
-/// y con los datos nuevos apuntarían a otras.
+/// Reload of the open table. With pending changes it waits for the user
+/// to decide what to do with them: they refer to rows by position and
+/// with the new data they would point to others.
 #[derive(Debug, Clone)]
 pub enum Reload {
-    /// Ordenación nueva; el grid mantiene la anterior hasta confirmar.
+    /// New sort order; the grid keeps the previous one until confirmed.
     Sort(Vec<SortSpec>),
-    /// Filtro WHERE nuevo (vacío = sin filtro).
+    /// New WHERE filter (empty = no filter).
     Filter(String),
-    /// F5: volver a leer los datos y la estructura.
+    /// F5: read the data and the structure again.
     Refresh,
-    /// Otra página de la tabla (0 = la primera).
+    /// Another page of the table (0 = the first).
     Page(usize),
 }
 
-// ── Estado de modal ──────────────────────────────────────────────────────────
+// ── Modal state ──────────────────────────────────────────────────────────────
 
-/// Hay uno por sesión: que la exportación ocupe más que las demás variantes
-/// no compensa la indirección de una Box.
+/// There is one per session: the export taking more space than the other
+/// variants is not worth the indirection of a Box.
 #[derive(Debug, Default)]
 #[allow(clippy::large_enum_variant)]
 pub enum ModalState {
@@ -114,10 +114,10 @@ pub enum ModalState {
     },
     ConfirmDrop {
         target: DbObject,
-        /// Nombre que el usuario teclea para confirmar (solo una BBDD).
+        /// Name the user types to confirm (only for a database).
         typed: String,
     },
-    /// Vaciar una tabla o, con una BBDD, todas las suyas.
+    /// Empty a table or, with a database, all of its tables.
     ConfirmTruncate {
         target: DbObject,
     },
@@ -126,37 +126,37 @@ pub enum ModalState {
         value: String,
         operator: FilterOperator,
     },
-    /// Hay cambios sin guardar en la tabla actual y el usuario intenta cambiar a otra.
+    /// There are unsaved changes in the current table and the user tries to switch to another.
     ConfirmSwitchTable {
         new_db: String,
         new_table: String,
         pending_count: usize,
         current_table: String,
     },
-    /// Hay cambios sin guardar y el usuario reordena, filtra o recarga la tabla.
+    /// There are unsaved changes and the user sorts, filters or reloads the table.
     ConfirmReload {
         reload: Reload,
         pending_count: usize,
         current_table: String,
     },
-    /// Hay cambios sin guardar y el usuario cierra la pestaña de la conexión.
+    /// There are unsaved changes and the user closes the connection tab.
     ConfirmCloseSession {
         title: String,
         pending_count: usize,
     },
-    /// El usuario elimina el favorito seleccionado en el formulario.
+    /// The user deletes the favourite selected in the form.
     ConfirmDeleteProfile {
         name: String,
     },
-    /// El usuario cierra una pestaña SQL que tiene texto.
+    /// The user closes a SQL tab that has text.
     ConfirmCloseSqlTab {
         idx: usize,
-        /// Título de la pestaña.
+        /// Title of the tab.
         title: String,
-        /// Principio de la consulta, para reconocerla.
+        /// Start of the query, to recognise it.
         preview: String,
     },
-    /// El usuario pulsa «Limpiar» en una pestaña SQL que tiene texto.
+    /// The user presses "Clear" in a SQL tab that has text.
     ConfirmClearSql {
         idx: usize,
         title: String,
@@ -187,7 +187,7 @@ pub enum ModalState {
     },
 }
 
-// ── Acciones devueltas al caller ──────────────────────────────────────────────
+// ── Actions returned to the caller ────────────────────────────────────────────
 
 pub enum ModalAction {
     None,
@@ -214,27 +214,27 @@ pub enum ModalAction {
         sql_fragment: String,
     },
     Cancel,
-    /// Guardar cambios y luego cambiar a la nueva tabla.
+    /// Save changes and then switch to the new table.
     ApplyAndSwitch {
         new_db: String,
         new_table: String,
     },
-    /// Descartar cambios y cambiar a la nueva tabla.
+    /// Discard changes and switch to the new table.
     DiscardAndSwitch {
         new_db: String,
         new_table: String,
     },
-    /// Guardar cambios y luego recargar la tabla.
+    /// Save changes and then reload the table.
     ApplyAndReload(Reload),
-    /// Descartar cambios y recargar la tabla.
+    /// Discard changes and reload the table.
     DiscardAndReload(Reload),
-    /// Cerrar la pestaña de conexión descartando los cambios pendientes.
+    /// Close the connection tab discarding the pending changes.
     CloseSession,
-    /// Eliminar el favorito seleccionado en el formulario.
+    /// Delete the favourite selected in the form.
     DeleteProfile,
-    /// Cerrar la pestaña SQL y descartar su consulta.
+    /// Close the SQL tab and discard its query.
     CloseSqlTab(usize),
-    /// Borrar la consulta de la pestaña SQL.
+    /// Clear the SQL tab's query.
     ClearSql(usize),
     CloneTable {
         db: String,
@@ -242,7 +242,7 @@ pub enum ModalAction {
         new_name: String,
         copy_data: bool,
     },
-    /// Lanza la exportación: app.rs crea la conexión y el hilo.
+    /// Starts the export: app.rs creates the connection and the thread.
     StartExport {
         source_db: String,
         tables: Vec<String>,
@@ -259,12 +259,12 @@ fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
     theme::danger_button(ui, text).clicked()
 }
 
-// ── Función principal ─────────────────────────────────────────────────────────
+// ── Main function ─────────────────────────────────────────────────────────────
 
-/// Diálogo modal: oscurece y bloquea el resto de la interfaz hasta que se
-/// cierra. Con `open`, Escape o la × lo ponen a false (equivale a Cancelar);
-/// sin él (una exportación en marcha) solo se cierra con sus botones. Un clic
-/// fuera no lo cierra: perdería lo escrito en un formulario.
+/// Modal dialog: dims and blocks the rest of the interface until it is
+/// closed. With `open`, Escape or the × set it to false (same as Cancel);
+/// without it (an export running) it only closes with its buttons. A
+/// click outside does not close it: it would lose what was typed in a form.
 fn dialog(
     ctx: &egui::Context,
     title: &str,
@@ -301,8 +301,8 @@ fn dialog(
     }
 }
 
-/// Fila de botones de un formulario. Con `busy` (una escritura en curso) se
-/// desactiva y muestra un spinner: así no se envía dos veces.
+/// Button row of a form. With `busy` (a write in progress) it is disabled
+/// and shows a spinner: that way nothing is sent twice.
 fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!busy, add_buttons);
@@ -313,9 +313,9 @@ fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egu
     });
 }
 
-/// Renderiza el modal activo sobre todo lo demás.
-/// Debe llamarse desde `update()` después de todos los paneles, pasando `ctx`.
-/// `busy`: hay una escritura en curso (los formularios esperan su resultado).
+/// Renders the active modal on top of everything else.
+/// Must be called from `update()` after every panel, passing `ctx`.
+/// `busy`: a write is in progress (the forms wait for its result).
 pub fn show(
     ctx: &egui::Context,
     modal: &mut ModalState,
@@ -416,7 +416,7 @@ pub fn show(
     }
 }
 
-// ── Formulario: crear BBDD ────────────────────────────────────────────────────
+// ── Form: create database ─────────────────────────────────────────────────────
 
 fn show_create_database(
     ctx: &egui::Context,
@@ -442,7 +442,7 @@ fn show_create_database(
                 );
                 ui.end_row();
 
-                // Solo en los motores con charset por BBDD
+                // Only for engines with a per-database charset
                 let charsets = engine.database_charsets();
                 if !charsets.is_empty() {
                     ui.label("Charset:");
@@ -485,7 +485,7 @@ fn show_create_database(
     action
 }
 
-// ── Formulario: crear tabla ───────────────────────────────────────────────────
+// ── Form: create table ────────────────────────────────────────────────────────
 
 fn show_create_table(
     ctx: &egui::Context,
@@ -499,7 +499,7 @@ fn show_create_table(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    // Siempre hay al menos una fila de columna que rellenar
+    // There is always at least one column row to fill in
     if columns.is_empty() {
         columns.push(NewColumnDef::new());
     }
@@ -528,12 +528,12 @@ fn show_create_table(
         TableBuilder::new(ui)
             .resizable(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(160.0)) // nombre
-            .column(Column::exact(110.0)) // tipo
-            .column(Column::exact(70.0)) // longitud
+            .column(Column::exact(160.0)) // name
+            .column(Column::exact(110.0)) // type
+            .column(Column::exact(70.0)) // length
             .column(Column::exact(60.0)) // not null
             .column(Column::exact(40.0)) // PK
-            .column(Column::exact(30.0)) // borrar
+            .column(Column::exact(30.0)) // delete
             .header(20.0, |mut header| {
                 for h in &["Nombre", "Tipo", "Longitud", "Not Null", "PK", ""] {
                     header.col(|ui| {
@@ -624,7 +624,7 @@ fn show_create_table(
     action
 }
 
-// ── Confirmación: eliminar ────────────────────────────────────────────────────
+// ── Confirmation: drop ────────────────────────────────────────────────────────
 
 fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String) -> ModalAction {
     let mut action = ModalAction::None;
@@ -651,7 +651,7 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
             theme::get(ui).warning,
             "⚠ Esta acción no se puede deshacer.",
         );
-        // Una base de datos entera no se elimina con un solo clic
+        // A whole database is not dropped with a single click
         let confirmed = match target {
             DbObject::Database(db) => {
                 ui.add_space(6.0);
@@ -685,7 +685,7 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
     action
 }
 
-// ── Confirmación: vaciar ──────────────────────────────────────────────────────
+// ── Confirmation: empty ───────────────────────────────────────────────────────
 
 fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction {
     let mut action = ModalAction::None;
@@ -726,7 +726,7 @@ fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction 
     action
 }
 
-// ── Filtro por texto ──────────────────────────────────────────────────────────
+// ── Text filter ───────────────────────────────────────────────────────────────
 
 const FILTER_OPERATORS: &[FilterOperator] = &[
     FilterOperator::Equals,
@@ -777,7 +777,7 @@ fn show_filter_input(
                             .desired_width(200.0)
                             .hint_text("valor a filtrar"),
                     );
-                    // Auto-foco en el campo de texto
+                    // Auto-focus the text field
                     resp.request_focus();
                     ui.end_row();
                 });
@@ -830,7 +830,7 @@ fn build_filter_fragment(
     }
 }
 
-// ── Helpers para construir CREATE TABLE SQL ───────────────────────────────────
+// ── Helpers to build CREATE TABLE SQL ─────────────────────────────────────────
 
 pub fn build_create_table_sql(
     engine: Engine,
@@ -845,7 +845,7 @@ pub fn build_create_table_sql(
         if col.name.trim().is_empty() {
             continue;
         }
-        // Un tipo que no es de la lista (no debería llegar) se deja como venga
+        // A type not in the list (should not happen) is left as it comes
         let takes_length = engine
             .column_types()
             .iter()
@@ -881,7 +881,7 @@ pub fn build_create_table_sql(
     )
 }
 
-// ── Confirmación: cambiar tabla con cambios pendientes ────────────────────────
+// ── Confirmation: switch table with pending changes ───────────────────────────
 
 fn show_confirm_switch_table(
     ctx: &egui::Context,
@@ -938,7 +938,7 @@ fn show_confirm_reload(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    // Los cambios van por posición de fila: con otros datos no valen
+    // Changes go by row position: with other data they are not valid
     let (lost, save, discard) = match reload {
         Reload::Page(_) => (
             "Al cambiar de página se perderían.",
@@ -1035,8 +1035,8 @@ fn show_confirm_delete_profile(ctx: &egui::Context, name: &str) -> ModalAction {
     action
 }
 
-/// Cerrar o limpiar una pestaña SQL con texto: en los dos casos la consulta
-/// se pierde. `confirm` es el texto del botón y `confirmed` lo que devuelve.
+/// Close or clear a SQL tab with text: in both cases the query is lost.
+/// `confirm` is the button text and `confirmed` what it returns.
 fn show_confirm_discard_sql(
     ctx: &egui::Context,
     title: &str,
@@ -1069,7 +1069,7 @@ fn show_confirm_discard_sql(
     action
 }
 
-// ── Clonar tabla ─────────────────────────────────────────────────────────────
+// ── Clone table ──────────────────────────────────────────────────────────────
 
 fn show_clone_table(
     ctx: &egui::Context,
@@ -1140,7 +1140,7 @@ fn show_clone_table(
     action
 }
 
-// ── Error genérico ────────────────────────────────────────────────────────────
+// ── Generic error ─────────────────────────────────────────────────────────────
 
 fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
     let mut open = true;
@@ -1180,7 +1180,7 @@ mod tests {
             fragment(Engine::Postgres, FilterOperator::GreaterOrEqual),
             "\"no`m\"\"bre\" >= 'O''Brien'"
         );
-        // En PostgreSQL, sin distinguir mayúsculas y sobre cualquier tipo
+        // In PostgreSQL, case-insensitive and over any type
         assert_eq!(
             fragment(Engine::Postgres, FilterOperator::StartsWith),
             "\"no`m\"\"bre\"::text ILIKE 'O''Brien%'"
@@ -1205,7 +1205,7 @@ mod tests {
             "CREATE TABLE `bd`.`t` (\n  `id` INT NOT NULL,\n  `nombre` VARCHAR(50),\n  \
              PRIMARY KEY (`id`)\n)"
         );
-        // Los tipos sin longitud la ignoran aunque el campo traiga una
+        // Types without a length ignore it even if the field has one
         let columns = [
             column("id", "SERIAL", "11", true),
             column("nombre", "VARCHAR", "50", false),

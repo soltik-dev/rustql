@@ -1,18 +1,18 @@
-//! Estado de un dato que se lee del servidor en segundo plano.
+//! State of a piece of data read from the server in the background.
 
 use crate::db::DbResult;
 
-/// Dato que se lee del servidor en segundo plano.
+/// Data read from the server in the background.
 #[derive(Debug, Clone, Default)]
 pub enum Loadable<T> {
-    /// Sin pedir todavía, o invalidado: se pedirá cuando haga falta.
+    /// Not requested yet, or invalidated: it will be requested when needed.
     #[default]
     NotLoaded,
-    /// Pedido. El número identifica la petición: si el dato se invalida
-    /// entretanto, la respuesta de la anterior se descarta.
+    /// Requested. The number identifies the request: if the data is
+    /// invalidated meanwhile, the previous request's answer is discarded.
     Loading(u64),
     Ready(T),
-    /// Falló. No se reintenta solo: Refrescar o F5 lo vuelven a pedir.
+    /// Failed. It is not retried on its own: Refresh or F5 request it again.
     Failed(String),
 }
 
@@ -28,7 +28,7 @@ impl<T> Loadable<T> {
         matches!(self, Self::NotLoaded)
     }
 
-    /// Aplica la respuesta a la petición `ticket` si sigue siendo la vigente.
+    /// Applies the answer to request `ticket` if it is still the current one.
     pub fn settle(&mut self, ticket: u64, result: DbResult<T>) {
         if matches!(self, Self::Loading(t) if *t == ticket) {
             *self = match result {

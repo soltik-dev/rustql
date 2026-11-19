@@ -4,7 +4,7 @@ use egui_extras::{Column, TableBuilder};
 use crate::db::ColumnInfo;
 use crate::ui::theme;
 
-/// Panel "Tabla": lista de columnas con información de estructura.
+/// "Table" panel: list of columns with structure information.
 pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
     ui.horizontal(|ui| {
         ui.strong(format!("{db}.{table}"));
@@ -16,7 +16,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
     ui.separator();
 
     if columns.is_empty() {
-        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        // Already loaded and with nothing to list (while loading it never gets here)
         ui.label(egui::RichText::new("(sin columnas)").color(theme::get(ui).text_muted));
         return;
     }
@@ -25,11 +25,11 @@ pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(120.0).clip(true)) // nombre
-        .column(Column::auto().at_least(120.0).clip(true)) // tipo
+        .column(Column::auto().at_least(120.0).clip(true)) // name
+        .column(Column::auto().at_least(120.0).clip(true)) // type
         .column(Column::auto().at_least(60.0)) // nullable
         .column(Column::auto().at_least(100.0).clip(true)) // default
-        .column(Column::auto().at_least(50.0)) // clave
+        .column(Column::auto().at_least(50.0)) // key
         .column(Column::remainder().at_least(100.0).clip(true)) // extra
         .header(24.0, |mut header| {
             for name in &["Columna", "Tipo", "Nullable", "Default", "Clave", "Extra"] {

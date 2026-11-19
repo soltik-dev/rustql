@@ -7,7 +7,7 @@ use crate::ui::theme;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Barra inferior estilo VSCode con botones de panel, versión y estado de conexión.
+/// VSCode-style bottom bar with panel buttons, version and connection status.
 pub fn show(
     ui: &mut egui::Ui,
     show_sidebar: &mut bool,
@@ -24,10 +24,10 @@ pub fn show(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.toggle_value(show_settings, "Ajustes");
             ui.separator();
-            // Versión
+            // Version
             ui.label(egui::RichText::new(format!("v{APP_VERSION}")).color(p.text_disabled));
             ui.separator();
-            // Estado de conexión (texto primero: en RTL queda a la derecha del punto)
+            // Connection status (text first: in RTL it ends up to the right of the dot)
             match &status.host {
                 Some(h) => {
                     let label = if let Some(db) = &status.database {
@@ -36,7 +36,7 @@ pub fn show(
                         h.clone()
                     };
                     ui.label(egui::RichText::new(label).color(p.text_muted));
-                    // Candado: cerrado si la conexión va cifrada
+                    // Padlock: closed if the connection is encrypted
                     if let Some((security, mode)) = status.security {
                         let (icon, color) = match security {
                             Security::Encrypted => (LOCK, p.success),

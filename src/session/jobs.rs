@@ -1,9 +1,9 @@
-//! Trabajos contra la BD en hilos aparte: la UI nunca espera al servidor.
+//! Database jobs on separate threads: the UI never waits for the server.
 //!
-//! Cada trabajo recibe una copia del backend y devuelve un `JobResult` por
-//! el canal de la sesión, que lo aplica en `Session::poll`. Los resultados de
-//! una conexión anterior (desconectar, reconectar a otro servidor) se
-//! descartan: llevan la época en la que se lanzaron.
+//! Each job gets a copy of the backend and returns a `JobResult` through
+//! the session's channel, which applies it in `Session::poll`. Results from
+//! a previous connection (disconnecting, reconnecting to another server)
+//! are discarded: they carry the epoch they were started in.
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -14,10 +14,10 @@ use super::schema::SchemaResult;
 use super::writes::WriteResult;
 use crate::db::{DbBackend, DbResult, QueryResult};
 
-/// Resultado de un trabajo, con lo necesario para aplicarlo a la sesión.
+/// Result of a job, with what is needed to apply it to the session.
 pub enum JobResult {
-    /// Datos de la tabla abierta. `generation` descarta los de consultas
-    /// que otra posterior ya ha sustituido.
+    /// Data of the open table. `generation` discards that of queries already
+    /// replaced by a later one.
     TableData {
         generation: u64,
         sql: String,
@@ -26,21 +26,21 @@ pub enum JobResult {
     },
     Schema(SchemaResult),
     Write(WriteResult),
-    /// Resultado del editor SQL para la pestaña que lanzó `token`.
+    /// SQL editor result for the tab that started `token`.
     Editor {
         token: u64,
         sql: String,
         elapsed_ms: u64,
         result: DbResult<QueryResult>,
     },
-    /// Definición de una vista, para abrirla en una pestaña SQL.
+    /// Definition of a view, to open it in a SQL tab.
     ViewDefinition {
         db: String,
         view: String,
         result: DbResult<String>,
     },
-    /// Se pidió al servidor cancelar una ejecución del editor. Si lo
-    /// consigue, quien termina (con error) es su `Editor`.
+    /// The server was asked to cancel an editor run. If it succeeds, the one
+    /// that ends (with an error) is its `Editor`.
     EditorCancel(DbResult<()>),
 }
 
@@ -48,9 +48,9 @@ pub struct Jobs {
     tx: Sender<(u64, JobResult)>,
     rx: Receiver<(u64, JobResult)>,
     epoch: u64,
-    /// Lanzados en esta época y aún sin recoger.
+    /// Started in this epoch and not collected yet.
     pending: usize,
-    /// Para repintar en cuanto termina un trabajo (se actualiza en cada poll).
+    /// To repaint as soon as a job finishes (updated on every poll).
     repaint: egui::Context,
 }
 
@@ -68,7 +68,7 @@ impl Default for Jobs {
 }
 
 impl Jobs {
-    /// Lanza `job` en un hilo con su propia referencia al backend.
+    /// Runs `job` on a thread with its own reference to the backend.
     pub fn spawn(
         &mut self,
         backend: &Arc<dyn DbBackend>,
@@ -86,7 +86,7 @@ impl Jobs {
         });
     }
 
-    /// Siguiente resultado de la época actual, si hay alguno.
+    /// Next result of the current epoch, if there is one.
     pub fn try_recv(&mut self, ctx: &egui::Context) -> Option<JobResult> {
         self.repaint = ctx.clone();
         loop {
@@ -98,14 +98,14 @@ impl Jobs {
         }
     }
 
-    /// Descarta los resultados de los trabajos ya lanzados (al conectar o
-    /// desconectar).
+    /// Discards the results of the jobs already started (when connecting or
+    /// disconnecting).
     pub fn new_epoch(&mut self) {
         self.epoch += 1;
         self.pending = 0;
     }
 
-    /// Trabajos de esta época aún sin terminar.
+    /// Jobs of this epoch not finished yet.
     #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.pending

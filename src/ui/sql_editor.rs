@@ -8,37 +8,36 @@ use crate::settings::{CopyFormat, SavedSqlTab};
 use crate::ui::results_grid::{self, GridAction, GridSelection};
 use crate::ui::{CMD, sql_highlight, theme};
 
-/// Alto mínimo del editor y del resultado al arrastrar el borde entre ambos.
+/// Minimum height of the editor and the result when dragging the border between them.
 const MIN_EDITOR_HEIGHT: f32 = 60.0;
 const MIN_RESULT_HEIGHT: f32 = 120.0;
-/// Alto de la franja que se arrastra para cambiar el alto del editor.
+/// Height of the strip dragged to change the editor height.
 const HANDLE_HEIGHT: f32 = 9.0;
 
-/// Una pestaña del editor SQL: la consulta, su contexto y el último
-/// resultado.
+/// A SQL editor tab: the query, its context and the last result.
 pub struct SqlTab {
-    /// Único en la aplicación: separa el estado de sus widgets (cursor del
-    /// editor, deshacer, scroll) del de las demás pestañas.
+    /// Unique in the application: keeps its widgets' state (editor cursor,
+    /// undo, scroll) apart from the other tabs'.
     uid: u64,
-    /// Nombre que le dio el usuario; sin él se llama «SQL n».
+    /// Name the user gave it; without one it is called "SQL n".
     pub name: Option<String>,
     pub db_context: String,
     pub sql_text: String,
     pub result: Option<Result<QueryResult, String>>,
-    /// Ejecución en curso (su número), si la hay.
+    /// Run in progress (its number), if any.
     pub running: Option<u64>,
-    /// Señal para cancelar la ejecución en curso; activada, ya se ha pedido.
+    /// Signal to cancel the run in progress; when set, it has already been requested.
     pub cancel: Option<CancelFlag>,
-    /// Ejecución que dio `result`: distingue un resultado del siguiente.
+    /// Run that produced `result`: tells one result from the next.
     pub result_run: u64,
-    /// Lo que tardó la consulta de `result`.
+    /// How long the query of `result` took.
     pub elapsed_ms: Option<u64>,
-    /// Cursor y filas seleccionadas en el grid del resultado.
+    /// Cursor and selected rows in the result grid.
     pub selection: GridSelection,
-    /// Texto seleccionado en el editor: se ejecuta eso en vez de la consulta
-    /// entera. Solo cuenta mientras se ve, con el foco en el editor.
+    /// Text selected in the editor: that runs instead of the whole query.
+    /// It only counts while visible, with the focus on the editor.
     pub selected_sql: Option<String>,
-    /// Alto del editor elegido arrastrando su borde; `None`, el inicial.
+    /// Editor height chosen by dragging its border; `None`, the initial one.
     pub editor_height: Option<f32>,
 }
 
@@ -63,7 +62,7 @@ impl Default for SqlTab {
 }
 
 impl SqlTab {
-    /// Pestaña nueva con esa consulta.
+    /// New tab with that query.
     pub fn new(db_context: String, sql_text: String) -> Self {
         Self {
             db_context,
@@ -72,7 +71,7 @@ impl SqlTab {
         }
     }
 
-    /// Pestaña guardada en los ajustes, sin resultado.
+    /// Tab saved in the settings, without a result.
     pub fn restore(saved: &SavedSqlTab) -> Self {
         Self {
             name: saved.name.clone(),
@@ -81,7 +80,7 @@ impl SqlTab {
         }
     }
 
-    /// Lo que se guarda de la pestaña en los ajustes.
+    /// What is saved of the tab in the settings.
     pub fn saved(&self) -> SavedSqlTab {
         SavedSqlTab {
             name: self.name.clone(),
@@ -91,15 +90,15 @@ impl SqlTab {
         }
     }
 
-    /// Título de la pestaña que ocupa la posición `idx`.
+    /// Title of the tab at position `idx`.
     pub fn title(&self, idx: usize) -> String {
         self.name
             .clone()
             .unwrap_or_else(|| format!("SQL {}", idx + 1))
     }
 
-    /// Lo que ejecutaría la pestaña ahora: la selección del editor si la hay
-    /// y, si no, la consulta entera. `None` si no hay nada que ejecutar.
+    /// What the tab would run now: the editor selection if there is one and,
+    /// if not, the whole query. `None` if there is nothing to run.
     pub fn sql_to_run(&self) -> Option<String> {
         let sql = self
             .selected_sql
@@ -119,18 +118,18 @@ pub enum SqlEditorAction {
         sql: String,
         db_context: String,
     },
-    /// Borrar la consulta (la sesión pregunta antes).
+    /// Clear the query (the session asks first).
     Clear,
-    /// Cancelar la consulta que se está ejecutando.
+    /// Cancel the query being run.
     Cancel,
-    /// Copiar las filas seleccionadas del resultado (`None`: en el formato
-    /// de los ajustes).
+    /// Copy the selected rows of the result (`None`: in the format from the
+    /// settings).
     CopyRows(Option<CopyFormat>),
 }
 
-/// Panel "SQL": editor de consultas libre. Mientras la consulta anterior no
-/// termina no se puede lanzar otra. `run_pressed`: el atajo de ejecutar
-/// (Ctrl+Enter, o F9 como en HeidiSQL).
+/// "SQL" panel: free query editor. While the previous query has not
+/// finished, another cannot be started. `run_pressed`: the run shortcut
+/// (Ctrl+Enter, or F9 as in HeidiSQL).
 pub fn show(
     ui: &mut egui::Ui,
     tab: &mut SqlTab,
@@ -161,8 +160,8 @@ pub fn show(
     .inner
 }
 
-/// Barra de controles: BBDD de contexto, ejecutar, limpiar y cancelar.
-/// Devuelve también si se está pulsando el botón de ejecutar.
+/// Control bar: context database, run, clear and cancel. Also returns
+/// whether the run button is being pressed.
 fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEditorAction, bool) {
     let mut action = SqlEditorAction::None;
     let mut execute_held = false;
@@ -198,7 +197,7 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
 
         ui.separator();
         ui.label("SQL libre:");
-        // Con texto seleccionado en el editor se ejecuta solo eso
+        // With text selected in the editor, only that runs
         let has_selection = tab
             .selected_sql
             .as_deref()
@@ -251,8 +250,8 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
     (action, execute_held)
 }
 
-/// Editor con resaltado de sintaxis y, debajo, la franja con la que se
-/// cambia su alto. Si la consulta no cabe, el editor se desplaza.
+/// Editor with syntax highlighting and, below it, the strip that changes
+/// its height. If the query does not fit, the editor scrolls.
 fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engine) {
     let p = theme::get(ui);
     let available = ui.available_height();
@@ -278,8 +277,8 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engin
         .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            // Barra a la vista (la de egui solo aparece al pasar el ratón):
-            // dice que la consulta sigue más abajo
+            // Bar always visible (egui's only shows on hover): it says that
+            // the query continues further down
             ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
             egui::ScrollArea::vertical()
                 .id_salt("sql_editor_scroll")
@@ -292,8 +291,8 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engin
                         .frame(egui::Frame::NONE)
                         .hint_text("SELECT * FROM tabla LIMIT 100")
                         .desired_width(f32::INFINITY)
-                        // Todo el recuadro es editor: un clic en su parte
-                        // vacía también le da el foco
+                        // The whole box is the editor: a click on its empty
+                        // part also gives it focus
                         .min_size(egui::vec2(0.0, height))
                         .show(ui);
                     if output.response.has_focus() {
@@ -302,16 +301,16 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engin
                             .filter(|range| !range.is_empty())
                             .map(|range| range.slice_str(&tab.sql_text).to_string());
                     } else if !execute_held {
-                        // Sin el foco la selección no se ve: ejecutarla
-                        // sería ejecutar a ciegas un trozo de la consulta.
-                        // Pulsar «Ejecutar» quita el foco, pero ahí se
-                        // conserva hasta que el clic termina
+                        // Without focus the selection is not visible: running it
+                        // would run a piece of the query blindly.
+                        // Clicking "Run" takes the focus away, but there it is
+                        // kept until the click ends
                         tab.selected_sql = None;
                     }
                 });
         });
 
-    // Franja para arrastrar el alto; doble clic vuelve al inicial
+    // Strip to drag the height; double click restores the initial one
     let (rect, handle) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), HANDLE_HEIGHT),
         egui::Sense::click_and_drag(),
@@ -330,7 +329,7 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engin
     let center = rect.center();
     ui.painter()
         .hline(rect.x_range(), center.y, egui::Stroke::new(1.0, color));
-    // Agarre en el centro: indica que la línea se puede mover
+    // Grip in the middle: shows that the line can be moved
     ui.painter().rect_filled(
         egui::Rect::from_center_size(center, egui::vec2(36.0, 3.0)),
         egui::CornerRadius::same(2),
@@ -338,8 +337,8 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engin
     );
 }
 
-/// Resultado de la última ejecución. Devuelve el formato si el usuario pide
-/// copiar las filas seleccionadas (`Some(None)`: el de los ajustes).
+/// Result of the last run. Returns the format if the user asks to copy
+/// the selected rows (`Some(None)`: the one from the settings).
 fn result(ui: &mut egui::Ui, tab: &mut SqlTab) -> Option<Option<CopyFormat>> {
     let p = theme::get(ui);
     let muted = |ui: &mut egui::Ui, text: String| {
@@ -357,10 +356,10 @@ fn result(ui: &mut egui::Ui, tab: &mut SqlTab) -> Option<Option<CopyFormat>> {
                 );
             });
         }
-        // Cancelarla fue cosa del usuario: no es un error
+        // Cancelling it was the user's doing: it is not an error
         Some(Err(e)) if e == QUERY_CANCELLED => muted(ui, format!("Consulta cancelada{took}")),
         Some(Err(e)) => theme::error_card(ui, &format!("Error: {e}")),
-        // INSERT, UPDATE, DDL…: no hay nada que mostrar
+        // INSERT, UPDATE, DDL…: nothing to show
         Some(Ok(data)) if data.columns.is_empty() => {
             muted(ui, format!("Ejecutada, sin resultado que mostrar{took}"));
         }
@@ -386,7 +385,7 @@ fn result(ui: &mut egui::Ui, tab: &mut SqlTab) -> Option<Option<CopyFormat>> {
             });
             ui.separator();
 
-            // El mismo grid que el de las tablas, en solo lectura
+            // The same grid as for tables, read-only
             let grid_action =
                 results_grid::show_read_only(ui, tab.result_run, data, &mut tab.selection);
             if let GridAction::CopyRows(fmt) = grid_action {
@@ -407,7 +406,7 @@ mod tests {
         assert_eq!(tab.sql_to_run().as_deref(), Some("SELECT 1;\nSELECT 2"));
         tab.selected_sql = Some("\nSELECT 2 ".into());
         assert_eq!(tab.sql_to_run().as_deref(), Some("SELECT 2"));
-        // Una selección de solo espacios no cuenta
+        // A selection of only whitespace does not count
         tab.selected_sql = Some("  \n".into());
         assert_eq!(tab.sql_to_run().as_deref(), Some("SELECT 1;\nSELECT 2"));
         tab.sql_text = "   ".into();
@@ -419,7 +418,7 @@ mod tests {
         assert_ne!(SqlTab::default().uid, SqlTab::default().uid);
     }
 
-    /// El editor dibujado en una ventana de 900×600, con eventos reales.
+    /// The editor drawn in a 900×600 window, with real events.
     struct Fixture {
         ctx: egui::Context,
         tab: SqlTab,
@@ -483,8 +482,8 @@ mod tests {
             );
         }
 
-        /// Clic en el editor (lo enfoca) y selección de sus últimos `n`
-        /// caracteres.
+        /// Click on the editor (focuses it) and select its last `n`
+        /// characters.
         fn select_last(&mut self, n: usize) {
             self.frame(false, Vec::new());
             self.click(egui::pos2(300.0, 100.0));
@@ -547,7 +546,7 @@ mod tests {
     fn sin_el_foco_en_el_editor_no_hay_seleccion_que_ejecutar() {
         let mut f = Fixture::new("SELECT 1;\nSELECT 22");
         f.select_last(9);
-        // Clic fuera del editor (en la zona del resultado)
+        // Click outside the editor (in the result area)
         f.click(egui::pos2(300.0, 550.0));
         assert_eq!(f.tab.selected_sql, None);
         assert_eq!(
@@ -558,8 +557,8 @@ mod tests {
 
     #[test]
     fn deshacer_no_trae_el_texto_de_otra_pestana() {
-        // Las dos pestañas se dibujan en el mismo sitio: sin identidad
-        // propia compartirían el historial de deshacer del editor
+        // Both tabs are drawn in the same place: without their own
+        // identity they would share the editor's undo history
         let mut f = Fixture::new("primera");
         f.frame(false, Vec::new());
         f.click(egui::pos2(300.0, 100.0));

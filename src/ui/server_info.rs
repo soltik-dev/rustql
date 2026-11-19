@@ -4,9 +4,10 @@ use egui_extras::{Column, TableBuilder};
 use crate::db::DatabaseInfo;
 use crate::ui::{format_bytes, theme};
 
-/// Panel "Servidor": lista de bases de datos con estadísticas. `known_tables`
-/// dice cuántas tablas tiene una BBDD si ya se han leído (al desplegarla en
-/// el árbol): completa el recuento que el servidor no haya podido dar.
+/// "Server" panel: list of databases with statistics. `known_tables` says
+/// how many tables a database has if they have already been read (when
+/// expanding it in the tree): it completes the count the server could
+/// not give.
 pub fn show(
     ui: &mut egui::Ui,
     host: &str,
@@ -26,7 +27,7 @@ pub fn show(
     ui.separator();
 
     if databases.is_empty() {
-        // Ya cargado y sin nada que listar (mientras carga no se llega aquí)
+        // Already loaded and with nothing to list (while loading it never gets here)
         ui.label(egui::RichText::new("(sin bases de datos)").color(theme::get(ui).text_muted));
         return;
     }
@@ -35,11 +36,11 @@ pub fn show(
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(150.0).clip(true)) // nombre
+        .column(Column::auto().at_least(150.0).clip(true)) // name
         .column(Column::auto().at_least(90.0)) // charset
         .column(Column::auto().at_least(160.0)) // collation
-        .column(Column::auto().at_least(60.0)) // tablas
-        .column(Column::auto().at_least(80.0)) // tamaño
+        .column(Column::auto().at_least(60.0)) // tables
+        .column(Column::auto().at_least(80.0)) // size
         .header(24.0, |mut header| {
             for name in &["Base de datos", "Charset", "Collation", "Tablas", "Tamaño"] {
                 header.col(|ui| {
@@ -60,7 +61,7 @@ pub fn show(
                     ui.add(egui::Label::new(&db.collation).truncate());
                 });
                 row.col(|ui| {
-                    // Hay motores que no pueden contarlas sin entrar en la BBDD
+                    // Some engines cannot count them without entering the database
                     match db.table_count.or_else(|| known_tables(&db.name)) {
                         Some(count) => ui.label(count.to_string()),
                         None => ui.label("—"),

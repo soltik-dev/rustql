@@ -1,5 +1,5 @@
-//! Estado y tipos del grid: ordenación, cambios pendientes, edición y
-//! selección, y las acciones que devuelve.
+//! Grid state and types: sorting, pending changes, editing and selection,
+//! and the actions it returns.
 
 use std::collections::BTreeSet;
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::QueryResult;
 use crate::settings::CopyFormat;
 
-// ── Tipos de ordenación ───────────────────────────────────────────────────────
+// ── Sort types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SortDir {
@@ -24,30 +24,30 @@ pub struct SortSpec {
     pub dir: SortDir,
 }
 
-// ── Tipos de edición ─────────────────────────────────────────────────────────
+// ── Edit types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct PendingEdit {
-    /// Índice real en `QueryResult.rows` (no el índice de visualización con sort).
+    /// Real index in `QueryResult.rows` (not the display index with sorting).
     pub row_idx: usize,
     pub col_idx: usize,
     pub new_value: String,
-    /// Si true, el UPDATE usa `= NULL` en lugar de `= 'valor'`.
+    /// If true, the UPDATE uses `= NULL` instead of `= 'value'`.
     pub is_null: bool,
 }
 
-/// Identifica una fila del grid: una de los datos o una nueva sin guardar.
+/// Identifies a grid row: one of the data or a new unsaved one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowRef {
-    /// Índice en `QueryResult.rows`.
+    /// Index in `QueryResult.rows`.
     Existing(usize),
-    /// Índice en `pending_inserts`.
+    /// Index in `pending_inserts`.
     Insert(usize),
 }
 
 impl RowRef {
-    /// Fila que ocupa la posición `display` del grid: primero van las
-    /// `existing` filas de los datos y, debajo, las nuevas.
+    /// Row at position `display` of the grid: the `existing` rows of the data
+    /// come first and, below them, the new ones.
     pub fn from_display(display: usize, existing: usize) -> Self {
         if display < existing {
             Self::Existing(display)
@@ -56,7 +56,7 @@ impl RowRef {
         }
     }
 
-    /// Posición de la fila en el grid (inversa de `from_display`).
+    /// Position of the row in the grid (inverse of `from_display`).
     pub fn display(self, existing: usize) -> usize {
         match self {
             Self::Existing(i) => i,
@@ -65,18 +65,18 @@ impl RowRef {
     }
 }
 
-/// Una celda del grid, de una fila existente o de una nueva.
+/// A grid cell, of an existing row or a new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellRef {
     pub row: RowRef,
     pub col: usize,
 }
 
-/// Valor de una celda de una fila nueva.
+/// Value of a cell of a new row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InsertValue {
-    /// Se omite del INSERT: el servidor pone el DEFAULT de la columna (o el
-    /// siguiente AUTO_INCREMENT).
+    /// Left out of the INSERT: the server sets the column's DEFAULT (or the
+    /// next AUTO_INCREMENT).
     Default,
     Null,
     Value(String),
@@ -88,31 +88,31 @@ impl From<Option<String>> for InsertValue {
     }
 }
 
-/// Fila nueva, al final del grid, pendiente de insertar.
+/// New row, at the end of the grid, waiting to be inserted.
 #[derive(Debug, Clone)]
 pub struct PendingInsert {
-    /// Valor por columna; las no tocadas, `Default`.
+    /// Value per column; untouched ones are `Default`.
     pub values: Vec<InsertValue>,
-    /// Columnas AUTO_INCREMENT: se muestran como «(AUTO)» y no se editan.
+    /// AUTO_INCREMENT columns: shown as "(AUTO)" and not edited.
     pub auto_cols: Vec<bool>,
 }
 
-/// Celda que se está editando.
+/// Cell being edited.
 #[derive(Debug, Clone)]
 pub struct EditingCell {
     pub cell: CellRef,
-    /// Texto del editor mientras el usuario escribe.
+    /// Editor text while the user types.
     pub buffer: String,
-    /// Texto que tenía la celda al empezar. Confirmar sin haberlo cambiado
-    /// no es una edición: NULL y DEFAULT se editan como texto vacío, y pasar
-    /// por ellos con Tab los convertiría en ''.
+    /// Text the cell had when editing started. Confirming without changing it
+    /// is not an edit: NULL and DEFAULT are edited as empty text, and tabbing
+    /// through them would turn them into ''.
     pub original: String,
-    /// Pedir el foco para el editor en su primer frame.
+    /// Request focus for the editor on its first frame.
     pub needs_focus: bool,
 }
 
 impl EditingCell {
-    /// Editor que arranca con el texto de la celda.
+    /// Editor that starts with the cell's text.
     pub fn new(cell: CellRef, text: String) -> Self {
         Self {
             cell,
@@ -122,8 +122,8 @@ impl EditingCell {
         }
     }
 
-    /// Editor que arranca con lo que el usuario acaba de teclear sobre la
-    /// celda, en lugar de su texto (`original`).
+    /// Editor that starts with what the user just typed over the cell,
+    /// instead of its text (`original`).
     pub fn replacing(cell: CellRef, original: String, typed: String) -> Self {
         Self {
             cell,
@@ -134,26 +134,26 @@ impl EditingCell {
     }
 }
 
-/// Lo que el usuario pide hacer con los datos. La selección, el cursor y la
-/// celda en edición son estado del propio grid y los cambia él.
+/// What the user asks to do with the data. The selection, the cursor and
+/// the cell being edited are the grid's own state and it changes them.
 #[derive(Debug, Default)]
 pub enum GridAction {
     #[default]
     None,
-    /// La ordenación que pide el usuario (aún sin aplicar).
+    /// The sort order the user asks for (not applied yet).
     SortChanged(Vec<SortSpec>),
-    /// Valor nuevo de una celda; `None` es NULL.
+    /// New value of a cell; `None` is NULL.
     CellEdited {
         row: RowRef,
         col_idx: usize,
         value: Option<String>,
     },
-    /// Celda de una fila nueva de vuelta a DEFAULT.
+    /// Cell of a new row back to DEFAULT.
     CellSetDefault {
         insert_idx: usize,
         col_idx: usize,
     },
-    // Filtrado desde el menú contextual
+    // Filtering from the context menu
     FilterBy {
         sql_fragment: String,
     },
@@ -163,7 +163,7 @@ pub enum GridAction {
     FilterUserInput {
         col_name: String,
     },
-    /// Marca para eliminar las filas que no lo estén y desmarca las que sí.
+    /// Marks for deletion the rows that are not marked and unmarks those that are.
     ToggleDeleteRows(Vec<usize>),
     InsertRow,
     CloneRow {
@@ -172,70 +172,70 @@ pub enum GridAction {
     RemoveInsertRow {
         insert_idx: usize,
     },
-    /// Copia las filas seleccionadas; sin formato, en el de los ajustes.
+    /// Copies the selected rows; without a format, in the one from the settings.
     CopyRows(Option<CopyFormat>),
-    /// Ir a otra página de la tabla (0 = la primera).
+    /// Go to another page of the table (0 = the first).
     PageChanged(usize),
 }
 
-// ── Selección ────────────────────────────────────────────────────────────────
+// ── Selection ────────────────────────────────────────────────────────────────
 
-/// Cursor y filas seleccionadas del grid, y lo que necesita para llevar la
-/// vista hasta el cursor cuando se mueve con el teclado.
+/// Cursor and selected rows of the grid, and what it needs to bring the
+/// view to the cursor when it moves with the keyboard.
 #[derive(Debug, Default)]
 pub struct GridSelection {
-    /// Celda del cursor: la que reciben las teclas.
+    /// Cursor cell: the one that receives the keys.
     pub cell: Option<CellRef>,
-    /// Filas existentes seleccionadas enteras (para copiarlas o eliminarlas).
+    /// Existing rows selected as a whole (to copy or delete them).
     pub rows: BTreeSet<usize>,
-    /// Desde dónde se extiende la selección con Mayús+clic.
+    /// Where the selection extends from with Shift+click.
     anchor_row: Option<usize>,
-    /// Fila en la que empezó el arrastre que selecciona un rango.
+    /// Row where the drag that selects a range started.
     pub(super) drag_from: Option<usize>,
-    /// El cursor se movió sin el ratón: hay que desplazar el grid hasta él.
+    /// The cursor moved without the mouse: the grid has to scroll to it.
     pub(super) reveal: bool,
-    /// Veces que se ha intentado ya (ver `table::show`).
+    /// Times it has already been tried (see `table::show`).
     pub(super) reveal_tries: u8,
-    /// Volver arriba (datos nuevos con otro orden o filtro).
+    /// Go back to the top (new data with another order or filter).
     pub(super) scroll_top: bool,
-    /// Desplazamiento vertical pedido con la barra del grid.
+    /// Vertical scroll requested with the grid's bar.
     pub(super) scroll_to_y: Option<f32>,
-    /// Dónde quedó cada cosa en el frame anterior.
+    /// Where everything was in the previous frame.
     pub(super) layout: Option<GridLayout>,
-    /// Id con el que el grid recibe el foco del teclado.
+    /// Id the grid receives keyboard focus with.
     pub focus_id: Option<egui::Id>,
 }
 
-/// Geometría del grid en el último frame dibujado. Las posiciones de las
-/// filas se miden sobre lo dibujado en lugar de suponerlas: pedir un
-/// desplazamiento unos puntos más allá del máximo real hace que egui lo trate
-/// como un rebote y lo devuelva con una animación.
+/// Grid geometry in the last frame drawn. Row positions are measured on
+/// what was drawn instead of assumed: asking for a scroll a few points
+/// past the real maximum makes egui treat it as a bounce and bring it
+/// back with an animation.
 #[derive(Debug, Clone, Default)]
 pub(super) struct GridLayout {
-    /// Desplazamiento horizontal y vertical.
+    /// Horizontal and vertical scroll.
     pub offset: egui::Vec2,
-    /// Tamaño de la zona visible de las filas.
+    /// Size of the visible area of the rows.
     pub size: egui::Vec2,
-    /// Desplazamiento máximo en cada eje.
+    /// Maximum scroll on each axis.
     pub max_offset: egui::Vec2,
-    /// Dónde empieza la fila 0, medido desde el principio del contenido.
+    /// Where row 0 starts, measured from the start of the content.
     pub row_origin: f32,
-    /// Distancia entre el comienzo de una fila y el de la siguiente.
+    /// Distance between the start of a row and the start of the next.
     pub row_pitch: f32,
     pub row_h: f32,
     pub col_widths: Vec<f32>,
-    /// Separación entre columnas.
+    /// Spacing between columns.
     pub col_gap: f32,
 }
 
 impl GridLayout {
-    /// Tramo vertical que ocupa la fila mostrada en la posición `display`.
+    /// Vertical span of the row shown at position `display`.
     pub fn row_span(&self, display: usize) -> (f32, f32) {
         let top = self.row_origin + display as f32 * self.row_pitch;
         (top, top + self.row_h)
     }
 
-    /// Tramo horizontal de la columna `col`, si existe.
+    /// Horizontal span of column `col`, if it exists.
     pub fn col_span(&self, col: usize) -> Option<(f32, f32)> {
         let width = *self.col_widths.get(col)?;
         let left: f32 = self.col_widths[..col]
@@ -245,8 +245,8 @@ impl GridLayout {
         Some((left, left + width))
     }
 
-    /// Desplazamiento (x, y) con el que la celda queda a la vista, sin
-    /// pasar del máximo; `None` en el eje que no hay que mover.
+    /// Scroll (x, y) that brings the cell into view, without going past the
+    /// maximum; `None` on an axis that does not need to move.
     pub fn reveal(&self, display: usize, col: usize) -> (Option<f32>, Option<f32>) {
         let axis = |span: (f32, f32), offset: f32, viewport: f32, max: f32| {
             scroll_into_view(span.0, span.1, offset, viewport)
@@ -267,23 +267,24 @@ impl GridLayout {
 }
 
 impl GridSelection {
-    /// Pone el cursor en `cell` (un clic): deja de haber filas seleccionadas.
+    /// Puts the cursor on `cell` (a click): no rows stay selected.
     pub fn select_cell(&mut self, cell: CellRef) {
         self.cell = Some(cell);
         self.rows.clear();
         self.anchor_row = None;
     }
 
-    /// Como `select_cell`, y además el grid se desplaza hasta la celda
-    /// (teclado, o una fila recién añadida).
+    /// Like `select_cell`, and the grid also scrolls to the cell (keyboard,
+    /// or a freshly added row).
     pub fn move_to(&mut self, cell: CellRef) {
         self.select_cell(cell);
         self.reveal = true;
         self.reveal_tries = 0;
     }
 
-    /// Selecciona filas enteras: solo `row`, el rango desde la anterior
-    /// (Mayús) o la añade o quita (Ctrl). El cursor queda en la celda pulsada.
+    /// Selects whole rows: only `row`, the range from the previous one
+    /// (Shift), or adds or removes it (Ctrl). The cursor stays on the clicked
+    /// cell.
     pub fn select_row(&mut self, row: usize, col: usize, shift: bool, ctrl: bool) {
         if shift {
             let cursor_row = match self.cell {
@@ -311,14 +312,14 @@ impl GridSelection {
         });
     }
 
-    /// Quita el cursor y la selección, y vuelve al principio: los datos que
-    /// vienen (otro orden, otro filtro) ya no son los mismos.
+    /// Removes the cursor and the selection, and goes back to the top: the
+    /// incoming data (another order, another filter) is no longer the same.
     pub fn clear(&mut self) {
         self.deselect();
         self.scroll_top = true;
     }
 
-    /// Quita el cursor y la selección (Escape).
+    /// Removes the cursor and the selection (Escape).
     pub fn deselect(&mut self) {
         self.cell = None;
         self.rows.clear();
@@ -327,8 +328,8 @@ impl GridSelection {
         self.reveal = false;
     }
 
-    /// Ajusta la selección a las filas y columnas que hay ahora: tras
-    /// recargar o quitar una fila nueva pueden haber dejado de existir.
+    /// Fits the selection to the rows and columns there are now: after a
+    /// reload or removing a new row they may no longer exist.
     pub(super) fn clamp(&mut self, existing: usize, inserts: usize, cols: usize) {
         self.rows.retain(|&r| r < existing);
         self.cell = self.cell.and_then(|cell| {
@@ -345,24 +346,24 @@ impl GridSelection {
     }
 }
 
-/// Nuevo desplazamiento con el que el tramo `start..end` queda dentro de una
-/// ventana de tamaño `viewport` que ahora empieza en `offset`. `None` si ya
-/// se ve entero.
+/// New scroll that keeps span `start..end` inside a window of size
+/// `viewport` that now starts at `offset`. `None` if it is already fully
+/// visible.
 pub(super) fn scroll_into_view(start: f32, end: f32, offset: f32, viewport: f32) -> Option<f32> {
     if start < offset {
         Some(start)
     } else if end > offset + viewport {
-        // Si el tramo no cabe, manda su principio
+        // If the span does not fit, its start wins
         Some((end - viewport).min(start))
     } else {
         None
     }
 }
 
-// ── Estado de la tabla abierta ───────────────────────────────────────────────
+// ── State of the open table ──────────────────────────────────────────────────
 
-/// Estado de la tabla abierta: datos, ordenación y filtro, cambios
-/// pendientes, edición y selección.
+/// State of the open table: data, sort and filter, pending changes,
+/// editing and selection.
 #[derive(Default)]
 pub struct TableViewState {
     pub table_data: Option<QueryResult>,
@@ -377,24 +378,24 @@ pub struct TableViewState {
     pub pending_inserts: Vec<PendingInsert>,
     pub selection: GridSelection,
     pub query_loading: bool,
-    /// Guardando los cambios pendientes: el grid no admite más hasta saber
-    /// el resultado.
+    /// Saving the pending changes: the grid accepts no more until the result
+    /// is known.
     pub saving: bool,
-    /// Se incrementa con cada consulta de la tabla: los resultados de una
-    /// anterior que lleguen tarde se descartan.
+    /// Incremented with each query of the table: late results of an earlier
+    /// one are discarded.
     pub data_generation: u64,
-    /// Página de la tabla que se muestra (0 = la primera).
+    /// Page of the table being shown (0 = the first).
     pub page: usize,
-    /// Filas por página con las que se pidieron los datos.
+    /// Rows per page the data was requested with.
     pub page_size: usize,
-    /// Hay más filas después de esta página.
+    /// There are more rows after this page.
     pub has_more: bool,
 }
 
 impl TableViewState {
-    /// Vacía la vista (otra tabla, otra conexión, tabla borrada). La
-    /// generación avanza: los datos de consultas anteriores que sigan en
-    /// camino se descartan.
+    /// Empties the view (another table, another connection, table dropped).
+    /// The generation moves on: data from earlier queries still on its way is
+    /// discarded.
     pub fn reset(&mut self) {
         *self = Self {
             data_generation: self.data_generation + 1,
@@ -426,7 +427,7 @@ mod tests {
         sel.select_row(1, 2, true, false);
         assert_eq!(sel.rows, BTreeSet::from([1, 2, 3, 4]));
         assert_eq!(sel.cell, Some(cell(RowRef::Existing(1), 2)));
-        // Otro Mayús+clic parte del mismo origen
+        // Another Shift+click starts from the same origin
         sel.select_row(6, 0, true, false);
         assert_eq!(sel.rows, BTreeSet::from([4, 5, 6]));
     }
@@ -458,7 +459,7 @@ mod tests {
         assert!(sel.rows.is_empty());
         assert_eq!(sel.cell, None, "la fila 5 ya no existe");
 
-        // Al quitar la última fila nueva, el cursor pasa a la anterior
+        // When the last new row is removed, the cursor moves to the previous one
         sel.select_cell(cell(RowRef::Insert(2), 1));
         sel.clamp(3, 2, 2);
         assert_eq!(sel.cell, Some(cell(RowRef::Insert(1), 1)));
@@ -468,11 +469,11 @@ mod tests {
 
     #[test]
     fn desplazar_solo_lo_necesario() {
-        // Ventana de 100 que empieza en 50: se ve 50..150
+        // Window of 100 starting at 50: 50..150 is visible
         assert_eq!(scroll_into_view(60.0, 80.0, 50.0, 100.0), None);
         assert_eq!(scroll_into_view(30.0, 50.0, 50.0, 100.0), Some(30.0));
         assert_eq!(scroll_into_view(140.0, 160.0, 50.0, 100.0), Some(60.0));
-        // Más ancho que la ventana: se alinea su principio
+        // Wider than the window: its start is aligned
         assert_eq!(scroll_into_view(200.0, 400.0, 50.0, 100.0), Some(200.0));
     }
 }

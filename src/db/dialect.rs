@@ -1,7 +1,7 @@
-//! Motor de base de datos de una conexión y su dialecto SQL: cómo se
-//! escriben los identificadores, los literales y las sentencias que no son
-//! iguales en todos los motores. El resto del programa compone su SQL con
-//! esto y no asume ninguno.
+//! Database engine of a connection and its SQL dialect: how identifiers,
+//! literals and the statements that differ between engines are written.
+//! The rest of the program builds its SQL with this and assumes no
+//! particular engine.
 
 use std::borrow::Cow;
 
@@ -12,23 +12,22 @@ use super::TableKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
-    /// MySQL y MariaDB.
+    /// MySQL and MariaDB.
     #[default]
     Mysql,
     Postgres,
 }
 
-/// Esquema de PostgreSQL cuyas tablas salen en el árbol sin prefijo; las de
-/// los demás, como `esquema.tabla`.
+/// PostgreSQL schema whose tables appear in the tree without a prefix;
+/// those of other schemas appear as `schema.table`.
 pub const PG_DEFAULT_SCHEMA: &str = "public";
 
-/// Nombre con el que se enseña la tabla `table` del esquema `schema` de
-/// PostgreSQL: `tabla` o `esquema.tabla`. El esquema acaba en el primer
-/// punto, así que hay dos casos que se escriben de otra forma para que el
-/// nombre se pueda volver a leer:
-/// - una tabla del esquema por defecto con un punto en el nombre conserva
-///   el prefijo (`public.a.b`);
-/// - un esquema con un punto en el nombre va entre comillas (`"a.b".tabla`).
+/// Name under which table `table` of PostgreSQL schema `schema` is shown:
+/// `table` or `schema.table`. The schema ends at the first dot, so two
+/// cases are written differently so the name can be read back:
+/// - a table of the default schema with a dot in its name keeps the
+///   prefix (`public.a.b`);
+/// - a schema with a dot in its name is quoted (`"a.b".table`).
 pub fn pg_table_name(schema: &str, table: &str) -> String {
     if schema == PG_DEFAULT_SCHEMA && !table.contains('.') {
         table.to_string()
@@ -39,7 +38,7 @@ pub fn pg_table_name(schema: &str, table: &str) -> String {
     }
 }
 
-/// Esquema y tabla de un nombre dado por `pg_table_name`.
+/// Schema and table of a name produced by `pg_table_name`.
 pub fn pg_split_table(name: &str) -> (Cow<'_, str>, &str) {
     if let Some(split) = split_quoted_schema(name) {
         return split;
@@ -48,15 +47,15 @@ pub fn pg_split_table(name: &str) -> (Cow<'_, str>, &str) {
     (Cow::Borrowed(schema), table)
 }
 
-/// `"esquema".tabla`, con las comillas del esquema dobladas. `None` si el
-/// nombre no tiene esa forma (y entonces las comillas son parte del nombre).
+/// `"schema".table`, with the schema's quotes doubled. `None` if the name
+/// does not have that shape (and then the quotes are part of the name).
 fn split_quoted_schema(name: &str) -> Option<(Cow<'_, str>, &str)> {
     let rest = name.strip_prefix('"')?;
     let mut search_from = 0;
     loop {
         let quote = search_from + rest[search_from..].find('"')?;
         match rest[quote + 1..].chars().next()? {
-            // Comilla doblada: sigue siendo el esquema
+            // Doubled quote: still part of the schema
             '"' => search_from = quote + 2,
             '.' => {
                 let schema = rest[..quote].replace("\"\"", "\"");
@@ -84,7 +83,7 @@ impl Engine {
         }
     }
 
-    /// Usuario administrador habitual: el que propone el formulario.
+    /// Usual administrator user: the one the form suggests.
     pub fn default_user(self) -> &'static str {
         match self {
             Engine::Mysql => "root",
@@ -92,8 +91,8 @@ impl Engine {
         }
     }
 
-    /// Charsets que ofrece el diálogo de crear una BBDD. Vacío si el motor
-    /// no los tiene por BBDD (se crea con la codificación del servidor).
+    /// Charsets offered by the create-database dialog. Empty if the engine
+    /// has no per-database charset (it is created with the server encoding).
     pub fn database_charsets(self) -> &'static [&'static str] {
         match self {
             Engine::Mysql => &["utf8mb4", "utf8", "latin1", "ascii", "binary"],
@@ -101,8 +100,8 @@ impl Engine {
         }
     }
 
-    /// Tipos de columna que ofrece el diálogo de crear una tabla, y si
-    /// admiten longitud (`VARCHAR(50)`).
+    /// Column types offered by the create-table dialog, and whether they
+    /// take a length (`VARCHAR(50)`).
     pub fn column_types(self) -> &'static [(&'static str, bool)] {
         match self {
             Engine::Mysql => &[
@@ -150,7 +149,7 @@ impl Engine {
         }
     }
 
-    /// Identificador entre las comillas del motor: `` `nombre` `` o `"nombre"`.
+    /// Identifier inside the engine's quotes: `` `name` `` or `"name"`.
     pub fn quote_ident(self, s: &str) -> String {
         match self {
             Engine::Mysql => format!("`{}`", s.replace('`', "``")),
@@ -158,7 +157,7 @@ impl Engine {
         }
     }
 
-    /// Tabla del árbol, sin su BBDD. En PostgreSQL lleva su esquema.
+    /// Tree table, without its database. In PostgreSQL it carries its schema.
     pub fn table_ref(self, table: &str) -> String {
         match self {
             Engine::Mysql => self.quote_ident(table),
@@ -169,9 +168,9 @@ impl Engine {
         }
     }
 
-    /// Tabla del árbol tal como se nombra en una sentencia. En MySQL va con
-    /// su BBDD (`` `bd`.`tabla` ``); en PostgreSQL la BBDD es la de la
-    /// conexión y no se puede nombrar: va con su esquema.
+    /// Tree table as it is named in a statement. In MySQL it goes with its
+    /// database (`` `db`.`table` ``); in PostgreSQL the database is the
+    /// connection's and cannot be named: it goes with its schema.
     pub fn qualified(self, db: &str, table: &str) -> String {
         match self {
             Engine::Mysql => format!("{}.{}", self.quote_ident(db), self.table_ref(table)),
@@ -179,14 +178,14 @@ impl Engine {
         }
     }
 
-    /// Literal de cadena, con sus comillas.
+    /// String literal, with its quotes.
     pub fn literal(self, s: &str) -> String {
         match self {
-            // La comilla se dobla (`''`) en vez de escaparse con `\'`: si el
-            // servidor tiene NO_BACKSLASH_ESCAPES en el sql_mode, `\'`
-            // cerraría la cadena y el resto del valor se ejecutaría como
-            // SQL. Con `''` lo peor que pasa en ese modo es que las barras se
-            // lean literalmente.
+            // The quote is doubled (`''`) instead of escaped as `\'`: if the
+            // server has NO_BACKSLASH_ESCAPES in its sql_mode, `\'` would
+            // close the string and the rest of the value would run as SQL.
+            // With `''` the worst that can happen in that mode is that
+            // backslashes are read literally.
             Engine::Mysql => format!(
                 "'{}'",
                 s.replace('\\', "\\\\")
@@ -196,10 +195,10 @@ impl Engine {
                     .replace('\x1a', "\\Z")
                     .replace('\'', "''")
             ),
-            // Las barras son literales o escapes según
-            // standard_conforming_strings: con una barra se usa la sintaxis
-            // E'…', que las trata siempre como escapes. Un valor con `\'`
-            // no puede así cerrar la cadena en ninguno de los dos modos.
+            // Backslashes are literals or escapes depending on
+            // standard_conforming_strings: with a backslash the E'…' syntax
+            // is used, which always treats them as escapes. That way a value
+            // with `\'` cannot close the string in either mode.
             Engine::Postgres => {
                 let quoted = s.replace('\'', "''");
                 if quoted.contains('\\') {
@@ -211,7 +210,7 @@ impl Engine {
         }
     }
 
-    /// Marca del parámetro número `n` (desde 1) de una sentencia.
+    /// Placeholder for parameter number `n` (from 1) of a statement.
     pub fn placeholder(self, n: usize) -> String {
         match self {
             Engine::Mysql => "?".to_string(),
@@ -219,22 +218,22 @@ impl Engine {
         }
     }
 
-    /// Condición «`column` se parece a `pattern`» (con los comodines de
-    /// LIKE), sin distinguir mayúsculas y para columnas de cualquier tipo.
+    /// Condition "`column` looks like `pattern`" (with LIKE wildcards),
+    /// case-insensitive and for columns of any type.
     pub fn like(self, column: &str, pattern: &str) -> String {
         let (column, pattern) = (self.quote_ident(column), self.literal(pattern));
         match self {
-            // LIKE convierte solo los números y las fechas a texto, y con
-            // las collations habituales no distingue mayúsculas
+            // LIKE converts only numbers and dates to text, and with the usual
+            // collations it is case-insensitive
             Engine::Mysql => format!("{column} LIKE {pattern}"),
-            // LIKE distingue mayúsculas y solo admite texto
+            // LIKE is case-sensitive and only accepts text
             Engine::Postgres => format!("{column}::text ILIKE {pattern}"),
         }
     }
 
-    /// INSERT en `target` de las columnas `columns` (ya entre comillas) con
-    /// un parámetro por cada una. Sin columnas, una fila con todos los
-    /// valores por defecto.
+    /// INSERT into `target` of the columns `columns` (already quoted) with
+    /// one parameter for each. With no columns, a row with every default
+    /// value.
     pub fn insert(self, target: &str, columns: &[String]) -> String {
         if columns.is_empty() {
             return match self {
@@ -250,13 +249,13 @@ impl Engine {
         )
     }
 
-    /// Elimina la tabla o vista `table` de `db`.
+    /// Drops table or view `table` of `db`.
     pub fn drop_table(self, db: &str, table: &str, kind: TableKind) -> String {
         format!("DROP {} {}", kind.keyword(), self.qualified(db, table))
     }
 
-    /// Crea la tabla `target` con la estructura de `source` (columnas,
-    /// claves, índices y valores por defecto), sin sus datos.
+    /// Creates table `target` with the structure of `source` (columns, keys,
+    /// indexes and default values), without its data.
     pub fn create_table_like(self, target: &str, source: &str) -> String {
         match self {
             Engine::Mysql => format!("CREATE TABLE {target} LIKE {source}"),
@@ -265,7 +264,7 @@ impl Engine {
     }
 }
 
-/// Parámetros de una sentencia, en el orden en que aparecen en ella.
+/// Parameters of a statement, in the order they appear in it.
 pub struct ParamList {
     engine: Engine,
     values: Vec<Option<String>>,
@@ -279,7 +278,7 @@ impl ParamList {
         }
     }
 
-    /// Añade un valor (`None` = NULL) y devuelve su marca en la sentencia.
+    /// Adds a value (`None` = NULL) and returns its placeholder.
     pub fn push(&mut self, value: Option<String>) -> String {
         self.values.push(value);
         self.engine.placeholder(self.values.len())
@@ -295,8 +294,8 @@ mod tests {
     use super::Engine::{Mysql, Postgres};
     use super::*;
 
-    /// Con NO_BACKSLASH_ESCAPES, escapando la comilla como `\'`, este valor
-    /// convertía `v = '…'` en `v = '\\\' OR 1=1 -- '`.
+    /// With NO_BACKSLASH_ESCAPES, escaping the quote as `\'`, this value
+    /// turned `v = '…'` into `v = '\\\' OR 1=1 -- '`.
     const ATTACK: &str = "\\' OR 1=1 -- ";
 
     #[test]
@@ -304,7 +303,7 @@ mod tests {
         assert_eq!(Mysql.quote_ident("a`b"), "`a``b`");
         assert_eq!(Mysql.qualified("bd", "ta`bla"), "`bd`.`ta``bla`");
         assert_eq!(Postgres.quote_ident("a\"b"), "\"a\"\"b\"");
-        // En MySQL un punto es parte del nombre de la tabla
+        // In MySQL a dot is part of the table name
         assert_eq!(Mysql.qualified("bd", "a.b"), "`bd`.`a.b`");
     }
 
@@ -329,15 +328,15 @@ mod tests {
         for (schema, table, shown) in [
             ("public", "pedidos", "pedidos"),
             ("ventas", "pedidos", "ventas.pedidos"),
-            // Sin el prefijo se leería como la tabla «b» del esquema «a»
+            // Without the prefix it would read as table "b" of schema "a"
             ("public", "a.b", "public.a.b"),
             ("ventas", "a.b", "ventas.a.b"),
-            // Un esquema con un punto va entre comillas
+            // A schema with a dot is quoted
             ("a.b", "t", "\"a.b\".t"),
             ("a.b", "t.u", "\"a.b\".t.u"),
             ("a\".b", "t", "\"a\"\".b\".t"),
             ("\"raro", "t", "\"\"\"raro\".t"),
-            // Unas comillas que no encierran un esquema son parte del nombre
+            // Quotes that do not enclose a schema are part of the name
             ("public", "\"x\"y", "\"x\"y"),
             ("public", "\"abierta", "\"abierta"),
             ("public", "\"x\".y", "public.\"x\".y"),
@@ -364,7 +363,7 @@ mod tests {
     #[test]
     fn literal_de_postgres_no_depende_de_como_se_lean_las_barras() {
         assert_eq!(Postgres.literal("it's"), "'it''s'");
-        // Sin barras, la forma estándar; los saltos de línea van tal cual
+        // Without backslashes, the standard form; line breaks go as they are
         assert_eq!(Postgres.literal("a\nb"), "'a\nb'");
         assert_eq!(Postgres.literal("a\\b"), "E'a\\\\b'");
         assert_eq!(Postgres.literal(ATTACK), "E'\\\\'' OR 1=1 -- '");

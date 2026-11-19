@@ -1,5 +1,5 @@
-//! Esquema del servidor (BBDD, tablas, información y estructura): se lee en
-//! segundo plano y se guarda en caché por sesión.
+//! Server schema (databases, tables, info and structure): read in the
+//! background and cached per session.
 
 use std::collections::HashMap;
 
@@ -12,7 +12,7 @@ use crate::loadable::Loadable;
 use crate::ui::tab_bar::ActiveTab;
 use crate::ui::theme;
 
-/// Resultado de un trabajo de esquema, con el número de su petición.
+/// Result of a schema job, with the number of its request.
 pub enum SchemaResult {
     Databases {
         ticket: u64,
@@ -23,7 +23,7 @@ pub enum SchemaResult {
         db: String,
         result: DbResult<Vec<TableEntry>>,
     },
-    /// Pares (BBDD, tabla) de todo el servidor.
+    /// (database, table) pairs of the whole server.
     AllTables {
         ticket: u64,
         result: DbResult<Vec<(String, TableEntry)>>,
@@ -45,13 +45,13 @@ pub enum SchemaResult {
     },
 }
 
-/// Árbol de esquema visible en el sidebar + cachés de info de servidor.
+/// Schema tree shown in the sidebar + server info caches.
 #[derive(Default)]
 pub struct SchemaCache {
     pub databases: Loadable<Vec<String>>,
     pub tables_cache: HashMap<String, Loadable<Vec<String>>>,
-    /// De cada BBDD, las que no son tablas (vistas) y qué son. Se rellena
-    /// con `tables_cache`.
+    /// For each database, the entries that are not tables (views) and what
+    /// they are. Filled in with `tables_cache`.
     pub kinds: HashMap<String, HashMap<String, TableKind>>,
     pub table_search: String,
     pub selected_node: Option<SelectedNode>,
@@ -67,15 +67,15 @@ impl SchemaCache {
         self.last_ticket
     }
 
-    /// Columnas de `db.table`, si ya están cargadas.
+    /// Columns of `db.table`, if already loaded.
     pub fn columns(&self, db: &str, table: &str) -> Option<&Vec<ColumnInfo>> {
         self.columns_info
             .get(&(db.to_string(), table.to_string()))
             .and_then(Loadable::ready)
     }
 
-    /// Si `db.table` es una tabla o una vista. Lo que no se conoce (su BBDD
-    /// aún no se ha leído) se trata como tabla.
+    /// Whether `db.table` is a table or a view. Anything unknown (its
+    /// database has not been read yet) is treated as a table.
     pub fn kind(&self, db: &str, table: &str) -> TableKind {
         self.kinds
             .get(db)
@@ -84,7 +84,7 @@ impl SchemaCache {
             .unwrap_or_default()
     }
 
-    /// Guarda las tablas de `db` recién leídas y devuelve sus nombres.
+    /// Stores the freshly read tables of `db` and returns their names.
     fn store_kinds(&mut self, db: &str, entries: Vec<TableEntry>) -> Vec<String> {
         let views = entries
             .iter()
@@ -95,23 +95,23 @@ impl SchemaCache {
         entries.into_iter().map(|entry| entry.name).collect()
     }
 
-    /// BBDD seleccionada (directamente o a través de una de sus tablas).
+    /// Selected database (directly or through one of its tables).
     pub fn selected_db(&self) -> Option<&str> {
         self.selected_node.as_ref()?.db()
     }
 
-    /// Tabla abierta, como (BBDD, tabla).
+    /// Open table, as (database, table).
     pub fn selected_table(&self) -> Option<(&str, &str)> {
         self.selected_node.as_ref()?.table()
     }
 
-    /// Columnas de la tabla abierta, si ya están cargadas.
+    /// Columns of the open table, if already loaded.
     pub fn open_table_columns(&self) -> Option<&Vec<ColumnInfo>> {
         let (db, table) = self.selected_table()?;
         self.columns(db, table)
     }
 
-    /// Descarta todo lo cargado (Refrescar). La selección se mantiene.
+    /// Discards everything loaded (Refresh). The selection is kept.
     pub fn clear(&mut self) {
         self.databases = Loadable::NotLoaded;
         self.tables_cache.clear();
@@ -122,7 +122,7 @@ impl SchemaCache {
     }
 }
 
-/// Spinner mientras se carga `value`, o el error si falló.
+/// Spinner while `value` loads, or the error if it failed.
 pub fn show_loading<T>(ui: &mut egui::Ui, value: &Loadable<T>) {
     match value {
         Loadable::Failed(e) => theme::error_card(ui, &format!("Error: {e}")),
@@ -135,8 +135,8 @@ pub fn show_loading<T>(ui: &mut egui::Ui, value: &Loadable<T>) {
     }
 }
 
-// ── Peticiones ───────────────────────────────────────────────────────────────
-// Cada una lanza el trabajo solo si el dato no está ya cargado o en camino.
+// ── Requests ─────────────────────────────────────────────────────────────────
+// Each one starts the job only if the data is not loaded or on its way.
 
 impl Session {
     fn spawn_schema_job(
@@ -181,8 +181,8 @@ impl Session {
         }
     }
 
-    /// Las tablas de todas las BBDD que falten, en una sola consulta (el
-    /// buscador del sidebar las necesita todas).
+    /// The missing tables of every database, in a single query (the sidebar
+    /// search needs them all).
     pub(super) fn request_all_tables(&mut self) {
         let Some(databases) = self.schema.databases.ready() else {
             return;
@@ -248,7 +248,7 @@ impl Session {
         }
     }
 
-    /// Columnas de la tabla, de las que salen también sus claves primarias.
+    /// Columns of the table, which also give its primary keys.
     pub(super) fn request_structure(&mut self, db: &str, table: &str) {
         let key = (db.to_string(), table.to_string());
         if !self
@@ -273,8 +273,8 @@ impl Session {
         }
     }
 
-    /// Lo que necesita la pestaña activa: se llama en cada frame y solo pide
-    /// lo que aún no está cargado.
+    /// What the active tab needs: called every frame, and only requests what
+    /// is not loaded yet.
     pub(super) fn request_tab_data(&mut self) {
         self.request_databases();
         match self.active_tab {
@@ -293,13 +293,13 @@ impl Session {
         }
     }
 
-    /// BBDD seleccionada (directamente o a través de una de sus tablas).
+    /// Selected database (directly or through one of its tables).
     pub(super) fn selected_db(&self) -> Option<&str> {
         self.schema.selected_db()
     }
 
-    /// Claves primarias de la tabla abierta, según su estructura (las
-    /// columnas con COLUMN_KEY = 'PRI'), si ya está cargada.
+    /// Primary keys of the open table, according to its structure (the
+    /// columns with COLUMN_KEY = 'PRI'), if already loaded.
     pub(super) fn sync_primary_keys(&mut self) {
         let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node else {
             return;
@@ -313,13 +313,13 @@ impl Session {
         }
     }
 
-    /// Aplica el resultado de un trabajo de esquema.
+    /// Applies the result of a schema job.
     pub(super) fn apply_schema_job(&mut self, result: SchemaResult) {
         let schema = &mut self.schema;
         match result {
             SchemaResult::Databases { ticket, result } => schema.databases.settle(ticket, result),
             SchemaResult::Tables { ticket, db, result } => {
-                // Solo si la respuesta sigue siendo la que se espera
+                // Only if the answer is still the one expected
                 let current = matches!(
                     schema.tables_cache.get(&db),
                     Some(Loadable::Loading(t)) if *t == ticket

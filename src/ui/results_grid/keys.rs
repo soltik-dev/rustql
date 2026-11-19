@@ -1,12 +1,12 @@
-//! Teclado del grid: mover el cursor, empezar a editar y los atajos sobre la
-//! celda o la fila del cursor. Solo se atiende con el foco en el grid y sin
-//! ninguna celda en edición.
+//! Grid keyboard: move the cursor, start editing and the shortcuts on the
+//! cursor's cell or row. Only handled with the focus on the grid and no
+//! cell being edited.
 
 use eframe::egui;
 
 use super::{CellRef, EditingCell, Grid, GridAction, GridSelection, RowRef, Shown};
 
-/// Movimiento del cursor.
+/// Cursor movement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Move {
     Up,
@@ -15,13 +15,13 @@ enum Move {
     Right,
     PageUp,
     PageDown,
-    /// Primera o última columna de la fila.
+    /// First or last column of the row.
     RowStart,
     RowEnd,
-    /// Primera o última celda del grid.
+    /// First or last cell of the grid.
     First,
     Last,
-    /// Siguiente o anterior en orden de lectura (Tab).
+    /// Next or previous in reading order (Tab).
     Next,
     Prev,
 }
@@ -32,7 +32,7 @@ fn read_move(i: &egui::InputState) -> Option<Move> {
     if m.alt {
         return None;
     }
-    // Ctrl+Tab cambia de pestaña: no es del grid
+    // Ctrl+Tab switches tabs: it does not belong to the grid
     if i.key_pressed(Key::Tab) && !m.command {
         return Some(if m.shift { Move::Prev } else { Move::Next });
     }
@@ -55,9 +55,9 @@ fn read_move(i: &egui::InputState) -> Option<Move> {
         .map(|&(_, mv)| mv)
 }
 
-/// Posición (fila mostrada, columna) tras mover el cursor desde `from` en un
-/// grid de `rows` × `cols`, sin salirse de él. `page` son las filas que
-/// caben en pantalla.
+/// Position (displayed row, column) after moving the cursor from `from` in
+/// a grid of `rows` × `cols`, without leaving it. `page` is the number of
+/// rows that fit on screen.
 fn apply_move(
     mv: Move,
     from: (usize, usize),
@@ -97,11 +97,11 @@ pub(super) fn handle(
     let ctrl = ui.input(|i| i.modifiers.command);
     let pressed = |key: egui::Key| ui.input(|i| i.key_pressed(key));
 
-    // Insertar no necesita cursor: es la forma de empezar en una tabla vacía
+    // Insert needs no cursor: it is the way to start on an empty table
     if g.editable && ctrl && pressed(egui::Key::Insert) {
         return GridAction::InsertRow;
     }
-    // Alt+Av Pág y Alt+Re Pág: página siguiente y anterior de la tabla
+    // Alt+Page Down and Alt+Page Up: next and previous page of the table
     if let Some(pager) = g.pager
         && ui.input(|i| i.modifiers.alt)
     {
@@ -123,7 +123,7 @@ pub(super) fn handle(
     if let Some(mv) = ui.input(read_move) {
         let target = match sel.cell {
             Some(cell) => {
-                // Filas que caben en pantalla, para Re Pág y Av Pág
+                // Rows that fit on screen, for Page Up and Page Down
                 let page = sel
                     .layout
                     .as_ref()
@@ -132,7 +132,7 @@ pub(super) fn handle(
                 let from = (cell.row.display(g.existing()), cell.col);
                 apply_move(mv, from, rows, cols, page)
             }
-            // Sin cursor, cualquier movimiento lo pone en la primera celda
+            // Without a cursor, any movement puts it on the first cell
             None => (0, 0),
         };
         sel.move_to(CellRef {
@@ -147,7 +147,7 @@ pub(super) fn handle(
     };
     let shown = g.shown(cell);
 
-    // Copiar: las filas seleccionadas o, si no hay, el valor de la celda
+    // Copy: the selected rows or, if there are none, the cell's value
     let copy = ui.input(|i| {
         i.events.iter().any(|e| matches!(e, egui::Event::Copy))
             || (i.modifiers.command && i.key_pressed(egui::Key::C))
@@ -170,8 +170,8 @@ pub(super) fn handle(
     }
 
     if g.editable {
-        // Ctrl+Supr: eliminar la fila (o las seleccionadas); una fila nueva
-        // simplemente se quita
+        // Ctrl+Delete: delete the row (or the selected ones); a new row is
+        // simply removed
         if ctrl && pressed(egui::Key::Delete) && g.can_change_row(cell.row) {
             return match cell.row {
                 RowRef::Existing(row) if sel.rows.is_empty() => {
@@ -203,8 +203,8 @@ pub(super) fn handle(
     if ctrl && pressed(egui::Key::N) {
         return edited(None);
     }
-    // Supr vacía la celda: NULL si la columna lo admite; en una fila nueva,
-    // de vuelta al valor por defecto
+    // Delete empties the cell: NULL if the column allows it; in a new row,
+    // back to the default value
     if !ctrl && pressed(egui::Key::Delete) {
         return match cell.row {
             RowRef::Insert(insert_idx) => GridAction::CellSetDefault {
@@ -226,7 +226,7 @@ pub(super) fn handle(
         return edited(Some(text));
     }
 
-    // Enter o F2 editan lo que hay; escribir lo sustituye
+    // Enter or F2 edit what is there; typing replaces it
     let enter = ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::Enter));
     if enter || pressed(egui::Key::F2) {
         *editing = Some(EditingCell::new(cell, g.edit_text(cell)));
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn el_cursor_no_se_sale_del_grid() {
-        // 3 filas × 2 columnas, 10 filas por página
+        // 3 rows × 2 columns, 10 rows per page
         let mv = |m, from| apply_move(m, from, 3, 2, 10);
         assert_eq!(mv(Move::Up, (0, 1)), (0, 1));
         assert_eq!(mv(Move::Down, (2, 0)), (2, 0));

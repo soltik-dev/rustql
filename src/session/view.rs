@@ -1,5 +1,5 @@
-//! Dibujo de la sesión según su estado. Aquí solo se recoge lo que hace el
-//! usuario (`FrameSignals`); `Session::show` lo aplica después.
+//! Drawing of the session according to its state. This only collects
+//! what the user does (`FrameSignals`); `Session::show` applies it later.
 
 use eframe::egui;
 
@@ -18,17 +18,17 @@ use crate::ui::{
     table_structure, theme,
 };
 
-/// Lo que ha hecho el usuario en este frame.
+/// What the user did in this frame.
 #[derive(Default)]
 pub(super) struct FrameSignals {
-    // Formulario de conexión
+    // Connection form
     pub connect: bool,
     pub cancel_connect: bool,
     pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
     pub profile_selected: Option<usize>,
     pub load_databases: bool,
-    // Conectado
+    // Connected
     pub sidebar: SidebarOutput,
     pub tab_bar: TabBarResult,
     pub filter: FilterAction,
@@ -39,8 +39,8 @@ pub(super) struct FrameSignals {
 }
 
 impl FrameSignals {
-    /// Solo lo que pide datos para dibujar (las tablas del árbol): lo demás
-    /// es una acción del usuario.
+    /// Only what requests data to draw (the tree's tables): everything else
+    /// is a user action.
     pub fn data_requests_only(self) -> Self {
         Self {
             sidebar: SidebarOutput {
@@ -72,10 +72,10 @@ impl Session {
         signals
     }
 
-    /// Formulario de conexión con los favoritos a la izquierda.
+    /// Connection form with the favourites on the left.
     fn draw_form(&mut self, ui: &mut egui::Ui, sh: &Shared, signals: &mut FrameSignals) {
-        // El contenido va bajo push_id(sid) para que el estado de los widgets
-        // (árbol expandido, scroll, cursores) sea propio de cada sesión.
+        // The content goes under push_id(sid) so that widget state (expanded
+        // tree, scroll, cursors) belongs to each session.
         let sid = self.id;
         egui::Panel::left("conn_favorites")
             .exact_size(200.0)
@@ -169,14 +169,14 @@ impl Session {
         let sid = self.id;
         let conn_color = self.color.map(|c| theme::get(ui).conn(c));
         let FrameKeys { f9, ctrl_enter, .. } = keys;
-        // Mientras carga la tabla, el grid se muestra sin aplicar sus
-        // acciones: irían por posición sobre los datos anteriores.
+        // While the table loads, the grid is shown without applying its
+        // actions: they would go by position over the previous data.
         let running = self.table_view.query_loading || self.table_view.saving;
 
         // ── Sidebar ───────────────────────────────────────────────
         if show_sidebar {
-            // Sobre el campo, no sobre el esquema entero: el buscador del
-            // sidebar lo toma prestado a la vez
+            // Over the field, not the whole schema: the sidebar search
+            // borrows it at the same time
             let selected = self.schema.selected_node.as_ref();
             let sel_db = selected.and_then(SelectedNode::db);
             let sel_table = selected.and_then(SelectedNode::table).map(|(_, t)| t);
@@ -208,8 +208,8 @@ impl Session {
                 });
             signals.sidebar = sidebar_panel.inner;
 
-            // Borde del árbol con el color de la conexión. Sube sobre la
-            // línea de las pestañas para no duplicar su grosor.
+            // Tree border in the connection's colour. It rises over the tab
+            // line so its thickness is not doubled.
             if let Some(c) = conn_color {
                 let r = sidebar_panel.response.rect;
                 ui.painter().rect_stroke(
@@ -248,12 +248,12 @@ impl Session {
                 });
         }
 
-        // ── Apply bar (solo en tab Datos con cambios pendientes) ──
+        // ── Apply bar (only in the Data tab with pending changes) ───
         let has_pending = !self.table_view.pending_edits.is_empty()
             || !self.table_view.pending_deletes.is_empty()
             || !self.table_view.pending_inserts.is_empty();
         if !running && self.active_tab == ActiveTab::Datos && has_pending {
-            // pk_missing solo bloquea si hay edits pendientes (DELETE e INSERT no requieren PK en la UI)
+            // pk_missing only blocks if there are pending edits (DELETE and INSERT need no PK in the UI)
             let pk_missing = self.schema.open_table_columns().is_some()
                 && self.table_view.primary_keys.is_empty()
                 && !self.table_view.pending_edits.is_empty();
@@ -276,7 +276,7 @@ impl Session {
                 });
         }
 
-        // ── Panel central ─────────────────────────────────────────
+        // ── Central panel ─────────────────────────────────────────
         egui::CentralPanel::default().show(ui, |ui| {
             ui.push_id(sid, |ui| match self.active_tab {
                 ActiveTab::Datos => {
@@ -306,7 +306,7 @@ impl Session {
                         selected_table
                             .map(|(db, table)| self.schema.kind(db, table))
                             .unwrap_or_default(),
-                        // Con query en curso: spinner en el grid
+                        // With a query running: spinner in the grid
                         running,
                     );
                     if !running {

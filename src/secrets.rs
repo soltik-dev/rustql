@@ -1,12 +1,12 @@
-//! Contraseñas de los perfiles en el almacén del sistema: Secret Service en
-//! Linux (gnome-keyring, KWallet…), Administrador de credenciales en Windows y
-//! Llavero en macOS. Cada perfil guarda la suya bajo su `id`.
+//! Profile passwords in the system store: Secret Service on Linux
+//! (gnome-keyring, KWallet…), Credential Manager on Windows and Keychain
+//! on macOS. Each profile keeps its own under its `id`.
 //!
-//! Todas las funciones pueden bloquear —el llavero puede pedir que se
-//! desbloquee y D-Bus no tiene timeout—, así que solo se llaman desde hilos de
-//! trabajo, nunca desde el de la UI.
+//! Every function may block (the keyring may ask to be unlocked and D-Bus
+//! has no timeout), so they are only called from worker threads, never
+//! from the UI thread.
 //!
-//! Flatpak: el manifiesto necesita `--talk-name=org.freedesktop.secrets`.
+//! Flatpak: the manifest needs `--talk-name=org.freedesktop.secrets`.
 
 use std::sync::OnceLock;
 
@@ -14,10 +14,10 @@ use keyring_core::{Entry, Error};
 
 const SERVICE: &str = "rustql";
 
-/// Resultado de inicializar el almacén (en Linux, conectar con D-Bus).
+/// Result of initializing the store (on Linux, connecting to D-Bus).
 static STORE: OnceLock<Result<(), String>> = OnceLock::new();
 
-/// Inicializa el almacén si aún no lo está y dice si está disponible.
+/// Initializes the store if it is not yet and says whether it is available.
 pub fn init() -> bool {
     STORE
         .get_or_init(|| {
@@ -41,7 +41,7 @@ fn open_store() -> Result<(), String> {
     Ok(())
 }
 
-/// Disponibilidad sin bloquear: `None` mientras no se ha comprobado.
+/// Availability without blocking: `None` until it has been checked.
 pub fn available() -> Option<bool> {
     STORE.get().map(Result::is_ok)
 }
@@ -50,7 +50,7 @@ fn entry(id: &str, label: &str) -> Result<Entry, String> {
     if !init() {
         return Err("no hay llavero del sistema disponible".into());
     }
-    // Solo Secret Service admite etiqueta (la que se ve en Seahorse/KWallet).
+    // Only Secret Service supports a label (the one shown in Seahorse/KWallet).
     #[cfg(all(unix, not(target_os = "macos")))]
     let entry = Entry::new_with_modifiers(
         SERVICE,
@@ -65,7 +65,7 @@ fn entry(id: &str, label: &str) -> Result<Entry, String> {
     entry.map_err(describe)
 }
 
-/// Contraseña guardada bajo `id`, o `None` si no hay ninguna.
+/// Password saved under `id`, or `None` if there is none.
 pub fn get(id: &str) -> Result<Option<String>, String> {
     match entry(id, SERVICE)?.get_password() {
         Ok(password) => Ok(Some(password)),
@@ -74,12 +74,12 @@ pub fn get(id: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Guarda (o sustituye) la contraseña de `id`. `label` solo se usa al crearla.
+/// Saves (or replaces) the password of `id`. `label` is only used when creating it.
 pub fn set(id: &str, label: &str, password: &str) -> Result<(), String> {
     entry(id, label)?.set_password(password).map_err(describe)
 }
 
-/// Borra la contraseña de `id`; no es un error que no exista.
+/// Deletes the password of `id`; it is not an error if it does not exist.
 pub fn delete(id: &str) -> Result<(), String> {
     match entry(id, SERVICE)?.delete_credential() {
         Ok(()) | Err(Error::NoEntry) => Ok(()),
@@ -87,7 +87,7 @@ pub fn delete(id: &str) -> Result<(), String> {
     }
 }
 
-/// `delete` en un hilo propio, para la UI: el fallo solo se registra.
+/// `delete` on its own thread, for the UI: a failure is only logged.
 pub fn delete_in_background(id: String) {
     std::thread::spawn(move || {
         if let Err(e) = delete(&id) {
@@ -109,7 +109,7 @@ fn describe(e: Error) -> String {
 mod tests {
     use super::*;
 
-    /// Usa el llavero real del sistema: `cargo test -- --ignored secrets`.
+    /// Uses the real system keyring: `cargo test -- --ignored secrets`.
     #[test]
     #[ignore]
     fn ida_y_vuelta_en_el_llavero() {

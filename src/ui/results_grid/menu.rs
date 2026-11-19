@@ -1,5 +1,5 @@
-//! Menú contextual de una celda: copiar, editar, filtrar por su valor y las
-//! operaciones sobre su fila.
+//! Context menu of a cell: copy, edit, filter by its value and the
+//! operations on its row.
 
 use eframe::egui;
 
@@ -8,7 +8,7 @@ use crate::settings::CopyFormat;
 use crate::ui::icons::{CLOCK, CLONE, COPY, EDIT, PLUS, SEARCH, TRASH, UNDO};
 use crate::ui::{CMD, ellipsize, theme};
 
-/// Opción del menú: devuelve true (y cierra el menú) al pulsarla.
+/// Menu option: returns true (and closes the menu) when clicked.
 fn item(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>) -> bool {
     let clicked = ui.button(label).clicked();
     if clicked {
@@ -17,7 +17,7 @@ fn item(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>) -> bool {
     clicked
 }
 
-/// Detecta si un texto parece una fecha (YYYY-MM-DD…).
+/// Detects whether a text looks like a date (YYYY-MM-DD…).
 fn looks_like_datetime(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 10
@@ -28,12 +28,13 @@ fn looks_like_datetime(s: &str) -> bool {
         && b[8..10].iter().all(u8::is_ascii_digit)
 }
 
-/// Fecha y hora local actual como «YYYY-MM-DD HH:MM:SS».
+/// Current local date and time as "YYYY-MM-DD HH:MM:SS".
 fn current_datetime() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// Si la columna guarda fechas, por su tipo o, sin estructura, por el valor.
+/// Whether the column stores dates, by its type or, without structure, by
+/// the value.
 fn is_datetime(g: &Grid, col: usize, shown: Shown) -> bool {
     let by_type = g.column_info.get(col).is_some_and(|c| {
         let ty = c.col_type.to_ascii_lowercase();
@@ -42,8 +43,8 @@ fn is_datetime(g: &Grid, col: usize, shown: Shown) -> bool {
     by_type || matches!(shown, Shown::Value(v) if looks_like_datetime(v))
 }
 
-/// Contenido del menú de `cell`. Devuelve la acción elegida, si la hay; la
-/// de editar la celda se aplica aquí mismo.
+/// Content of the menu of `cell`. Returns the chosen action, if any; the
+/// cell edit one is applied right here.
 pub(super) fn cell(
     ui: &mut egui::Ui,
     g: &Grid,
@@ -60,7 +61,7 @@ pub(super) fn cell(
         value,
     };
 
-    // ── Copiar ───────────────────────────────────────────────────────────
+    // ── Copy ─────────────────────────────────────────────────────────────
     if sel.rows.is_empty() {
         if item(ui, format!("{COPY}  Copiar valor")) {
             let text = match shown {
@@ -81,7 +82,7 @@ pub(super) fn cell(
         }
     }
 
-    // ── Valor de la celda ────────────────────────────────────────────────
+    // ── Cell value ───────────────────────────────────────────────────────
     if g.can_edit(cell) {
         ui.separator();
         if item(ui, format!("{EDIT}  Editar celda  F2")) {
@@ -109,7 +110,7 @@ pub(super) fn cell(
                 col_idx: col,
             });
         }
-        // Volver al valor guardado quita el cambio pendiente
+        // Going back to the saved value removes the pending change
         if let RowRef::Existing(row) = cell.row
             && g.pending_edit(row, col).is_some()
             && item(ui, format!("{UNDO}  Deshacer el cambio"))
@@ -118,7 +119,7 @@ pub(super) fn cell(
         }
     }
 
-    // ── Filtrar por el valor guardado ────────────────────────────────────
+    // ── Filter by the saved value ────────────────────────────────────────
     if g.queryable
         && let RowRef::Existing(row) = cell.row
     {
@@ -157,7 +158,7 @@ pub(super) fn cell(
         }
     }
 
-    // ── Fila ─────────────────────────────────────────────────────────────
+    // ── Row ──────────────────────────────────────────────────────────────
     if g.editable {
         ui.separator();
         if item(ui, format!("{PLUS}  Insertar fila  {CMD}Ins")) {
@@ -168,7 +169,7 @@ pub(super) fn cell(
                 if item(ui, format!("{CLONE}  Clonar fila  {CMD}D")) {
                     action = Some(GridAction::CloneRow { row_idx });
                 }
-                // Dentro de una selección de filas, se eliminan todas
+                // Inside a row selection, all of them are deleted
                 let rows: Vec<usize> = if sel.rows.contains(&row_idx) {
                     sel.rows.iter().copied().collect()
                 } else {
@@ -181,7 +182,7 @@ pub(super) fn cell(
                 } else {
                     format!("{TRASH}  Eliminar fila  {CMD}Supr")
                 };
-                // Sin clave primaria no se sabría qué fila eliminar
+                // Without a primary key there would be no way to know which row to delete
                 if g.can_change_row(cell.row) && theme::danger_button(ui, label).clicked() {
                     action = Some(GridAction::ToggleDeleteRows(rows));
                     ui.close();

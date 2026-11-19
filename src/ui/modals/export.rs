@@ -1,5 +1,5 @@
-//! Diálogo de exportación: configurar el destino, seguir el progreso tabla a
-//! tabla y mostrar el resultado.
+//! Export dialog: configure the destination, follow the progress table by
+//! table and show the result.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -28,8 +28,8 @@ pub enum TableExportState {
     Error(String),
 }
 
-/// Datos en vuelo cuando la exportación está en marcha.
-/// Receiver<ExportEvent> no implementa Debug, por lo que usamos un wrapper.
+/// In-flight data while the export is running.
+/// Receiver<ExportEvent> does not implement Debug, so a wrapper is used.
 pub struct ExportRunning {
     pub receiver: std::sync::mpsc::Receiver<ExportEvent>,
     pub cancel_flag: Arc<AtomicBool>,
@@ -57,7 +57,7 @@ pub enum ExportPhase {
         elapsed_ms: u64,
     },
     Cancelled,
-    /// Error fatal que abortó la exportación completa.
+    /// Fatal error that aborted the whole export.
     Failed(String),
 }
 
@@ -80,13 +80,13 @@ pub(super) fn show_export_data(
     let mut open = true;
 
     let title = format!("{EXPORT}  Exportar datos — {source_db}");
-    // En marcha solo se cierra con Cancelar: cerrarlo dejaría la exportación
-    // corriendo sin nada que la muestre
+    // While running it only closes with Cancel: closing it would leave the
+    // export running with nothing showing it
     let closable = !matches!(phase, ExportPhase::Running(_));
 
     dialog(ctx, &title, 620.0, closable.then_some(&mut open), |ui| {
-        // Ancho fijo: sin esto, las fases con StripBuilder pueden recibir
-        // un ancho no acotado del auto-size y propagar NaN al layout.
+        // Fixed width: without it, the phases with StripBuilder may get an
+        // unbounded width from auto-size and propagate NaN to the layout.
         ui.set_width(600.0);
         match phase {
             ExportPhase::Configuring => {
@@ -151,9 +151,9 @@ fn render_export_config(
     let mut action = ModalAction::None;
     let selected_count = tables.iter().filter(|t| t.selected).count();
 
-    // ── Layout 2 columnas ──────────────────────────────────────────────────
-    // Altura acotada: el strip llenaría toda la altura disponible y, con el
-    // footer debajo, la ventana auto-crecería en cada frame sin límite.
+    // ── Two-column layout ──────────────────────────────────────────────────
+    // Bounded height: the strip would fill all the available height and,
+    // with the footer below, the window would auto-grow every frame forever.
     ui.scope(|ui| {
         ui.set_max_height(350.0);
         egui_extras::StripBuilder::new(ui)
@@ -161,7 +161,7 @@ fn render_export_config(
             .size(egui_extras::Size::exact(8.0))
             .size(egui_extras::Size::remainder())
             .horizontal(|mut strip| {
-                // ── Columna izquierda: lista de tablas ─────────────────────────
+                // ── Left column: table list ────────────────────────────────────
                 strip.cell(|ui| {
                     ui.heading(format!("Tablas ({selected_count}/{})", tables.len()));
                     ui.add_space(2.0);
@@ -183,17 +183,17 @@ fn render_export_config(
                         });
                 });
 
-                // ── Separador ──────────────────────────────────────────────────
+                // ── Separator ──────────────────────────────────────────────────
                 strip.cell(|ui| {
                     ui.separator();
                 });
 
-                // ── Columna derecha: destino + opciones ────────────────────────
+                // ── Right column: destination + options ────────────────────────
                 strip.cell(|ui| {
                     ui.heading("Destino");
                     ui.add_space(4.0);
 
-                    // Botones de radio para el tipo de destino
+                    // Radio buttons for the destination type
                     let is_sqlfile = matches!(destination, ExportDestination::SqlFile { .. });
                     let is_folder = matches!(destination, ExportDestination::Folder { .. });
                     let is_samedb = matches!(destination, ExportDestination::SameServerDb { .. });
@@ -253,7 +253,7 @@ fn render_export_config(
                         .clicked()
                         && !is_samedb
                     {
-                        // Preseleccionar la primera BBDD distinta si existe
+                        // Preselect the first different database if there is one
                         let first_other = databases
                             .iter()
                             .find(|d| d.as_str() != source_db)
@@ -333,7 +333,7 @@ fn render_export_config(
                     ui.checkbox(&mut options.include_create, "Incluir CREATE TABLE");
                     ui.checkbox(&mut options.include_data, "Incluir datos (INSERT INTO)");
                     ui.checkbox(&mut options.drop_if_exists, "DROP TABLE IF EXISTS");
-                    // Lo que no entra, donde se decide qué exportar
+                    // What does not fit, where what to export is chosen
                     if engine == Engine::Postgres {
                         ui.add_space(6.0);
                         ui.label(
@@ -387,8 +387,8 @@ fn render_export_config(
     action
 }
 
-/// Sin perfiles, el destino remoto no apunta a ningún servidor elegido (sus
-/// parámetros serían los por defecto, root@127.0.0.1).
+/// Without profiles, the remote destination points to no chosen server
+/// (its parameters would be the defaults, root@127.0.0.1).
 fn is_destination_valid(dest: &ExportDestination, has_profiles: bool) -> bool {
     match dest {
         ExportDestination::SqlFile { path } => !path.is_empty(),
@@ -423,7 +423,7 @@ fn render_export_running(
         0.0
     };
 
-    // Barra de progreso
+    // Progress bar
     ui.add(
         egui::ProgressBar::new(fraction).text(format!("{}/{} tablas", running.done_count, total)),
     );
@@ -436,7 +436,7 @@ fn render_export_running(
             .size(egui_extras::Size::exact(8.0))
             .size(egui_extras::Size::remainder())
             .horizontal(|mut strip| {
-                // Lista de tablas con estado
+                // Table list with status
                 strip.cell(|ui| {
                     egui::ScrollArea::vertical()
                         .max_height(240.0)
@@ -481,7 +481,7 @@ fn render_export_running(
                     ui.separator();
                 });
 
-                // Panel derecho: estadísticas
+                // Right panel: statistics
                 strip.cell(|ui| {
                     ui.label(egui::RichText::new("Destino:").strong());
                     ui.label(destination_label(destination));

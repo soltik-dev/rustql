@@ -1,8 +1,8 @@
-//! Avisos no modales: mensajes breves en la esquina inferior derecha que
-//! confirman lo que se acaba de hacer («cambios guardados», «3 filas
-//! copiadas») o cuentan un fallo leve, sin interrumpir. Desaparecen solos;
-//! un clic los quita antes. Lo que exige una decisión o leerse con calma
-//! sigue yendo en un diálogo.
+//! Non-modal notifications: short messages in the bottom right corner
+//! that confirm what was just done ("changes saved", "3 rows copied") or
+//! report a minor failure, without interrupting. They go away on their
+//! own; a click dismisses them sooner. Anything that needs a decision or
+//! a careful read still goes in a dialog.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use eframe::egui;
 
 use crate::ui::theme;
 
-/// Avisos a la vez en pantalla: con más, se van los más antiguos.
+/// Notifications on screen at once: with more, the oldest go.
 const MAX_VISIBLE: usize = 4;
 const MAX_WIDTH: f32 = 380.0;
 
@@ -23,7 +23,7 @@ pub enum ToastKind {
 }
 
 impl ToastKind {
-    /// Segundos que el aviso está a la vista: un error se lee más despacio.
+    /// Seconds the notification stays visible: an error is read more slowly.
     fn seconds(self) -> f64 {
         match self {
             Self::Success | Self::Info => 4.0,
@@ -36,12 +36,12 @@ impl ToastKind {
 struct Toast {
     kind: ToastKind,
     text: String,
-    /// Instante (del reloj de egui) en que desaparece. Se fija la primera
-    /// vez que se dibuja: lo que tarde en llegar a pantalla no cuenta.
+    /// Moment (on egui's clock) when it disappears. Set the first time it is
+    /// drawn: however long it takes to reach the screen does not count.
     expires_at: Option<f64>,
 }
 
-/// Cola de avisos de la aplicación, del más antiguo al más reciente.
+/// Queue of the application's notifications, from oldest to newest.
 #[derive(Debug, Default)]
 pub struct Toasts {
     items: VecDeque<Toast>,
@@ -61,8 +61,8 @@ impl Toasts {
     }
 
     fn push(&mut self, kind: ToastKind, text: String) {
-        // Repetir la acción (Ctrl+C varias veces) renueva el aviso en vez
-        // de apilar copias
+        // Repeating the action (Ctrl+C several times) renews the
+        // notification instead of stacking copies
         self.items.retain(|t| !(t.kind == kind && t.text == text));
         self.items.push_back(Toast {
             kind,
@@ -74,9 +74,9 @@ impl Toasts {
         }
     }
 
-    /// Dibuja los avisos vigentes, el más reciente abajo, a `bottom_margin`
-    /// del borde inferior de la ventana. Llamar una vez por frame, después
-    /// de todo lo demás.
+    /// Draws the current notifications, the newest at the bottom, at
+    /// `bottom_margin` from the window's bottom edge. Call once per frame,
+    /// after everything else.
     pub fn show(&mut self, ctx: &egui::Context, bottom_margin: f32) {
         let now = ctx.input(|i| i.time);
         self.items
@@ -101,7 +101,7 @@ impl Toasts {
                         if resp.clicked() {
                             dismissed = Some(idx);
                         } else if resp.hovered() {
-                            // Mientras se lee no se va
+                            // It does not go away while being read
                             toast.expires_at = Some(expires_at.max(now + 1.5));
                         }
                         ui.add_space(6.0);
@@ -112,7 +112,7 @@ impl Toasts {
             self.items.remove(idx);
         }
 
-        // Sin entrada del usuario egui no repinta: despertar al caducar
+        // Without user input egui does not repaint: wake up on expiry
         let next = self
             .items
             .iter()
@@ -123,7 +123,7 @@ impl Toasts {
         }
     }
 
-    /// Textos de los avisos vigentes, del más antiguo al más reciente.
+    /// Texts of the current notifications, from oldest to newest.
     #[cfg(test)]
     pub fn texts(&self) -> Vec<&str> {
         self.items.iter().map(|t| t.text.as_str()).collect()
@@ -135,7 +135,7 @@ impl Toasts {
     }
 }
 
-/// Un aviso: tarjeta con un punto del color de su tipo y el texto.
+/// A notification: a card with a dot in its kind's colour and the text.
 fn draw(ui: &mut egui::Ui, toast: &Toast) -> egui::Response {
     let p = theme::get(ui);
     let color = match toast.kind {
@@ -143,7 +143,7 @@ fn draw(ui: &mut egui::Ui, toast: &Toast) -> egui::Response {
         ToastKind::Info => p.accent,
         ToastKind::Error => p.danger,
     };
-    // El punto va en el margen izquierdo, a la altura de la primera línea
+    // The dot goes in the left margin, level with the first line
     let dot_space = 16;
     let frame = egui::Frame::NONE
         .fill(p.bg_raised)
@@ -157,9 +157,9 @@ fn draw(ui: &mut egui::Ui, toast: &Toast) -> egui::Response {
         })
         .shadow(ui.visuals().popup_shadow)
         .show(ui, |ui| {
-            // Texto maquetado a mano: la tarjeta se ciñe a él y, aunque el
-            // aviso se alinee a la derecha de la ventana, se lee de izquierda
-            // a derecha
+            // Text laid out by hand: the card hugs it and, even though the
+            // notification is aligned to the right of the window, it reads left
+            // to right
             let font = egui::TextStyle::Body.resolve(ui.style());
             let galley = ui
                 .painter()
@@ -185,7 +185,7 @@ fn draw(ui: &mut egui::Ui, toast: &Toast) -> egui::Response {
 mod tests {
     use super::*;
 
-    /// Un frame en el instante `time` (segundos).
+    /// A frame at instant `time` (seconds).
     fn frame(toasts: &mut Toasts, ctx: &egui::Context, time: f64) {
         let input = egui::RawInput {
             time: Some(time),
@@ -214,7 +214,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut toasts = Toasts::default();
         toasts.info("hola");
-        // Tarda en dibujarse (otra sesión, ventana minimizada…)
+        // It takes a while to be drawn (another session, minimized window…)
         frame(&mut toasts, &ctx, 50.0);
         frame(&mut toasts, &ctx, 53.0);
         assert_eq!(toasts.texts(), ["hola"]);
@@ -229,7 +229,7 @@ mod tests {
         toasts.success("otro");
         toasts.success("1 fila copiada");
         assert_eq!(toasts.texts(), ["otro", "1 fila copiada"]);
-        // El renovado vuelve a tener su tiempo entero
+        // The renewed one gets its full time again
         frame(&mut toasts, &ctx, 13.0);
         frame(&mut toasts, &ctx, 16.0);
         assert_eq!(toasts.texts(), ["otro", "1 fila copiada"]);
