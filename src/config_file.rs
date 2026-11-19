@@ -67,6 +67,10 @@ pub fn save<T: Serialize>(name: &str, value: &T, private: bool) {
 }
 
 fn try_save<T: Serialize>(name: &str, value: &T, private: bool) -> io::Result<()> {
+    // File modes only exist on Unix; on Windows the user's profile folder is
+    // already private to them.
+    #[cfg(not(unix))]
+    let _ = private;
     let dir = dir().ok_or_else(|| io::Error::other("sin directorio de configuración"))?;
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]

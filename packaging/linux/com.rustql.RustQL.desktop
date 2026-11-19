@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=RustQL
+GenericName=Database Client
+GenericName[es]=Cliente de bases de datos
+GenericName[fr]=Client de bases de données
+GenericName[it]=Client per database
+GenericName[pt]=Cliente de bases de dados
+GenericName[pt_BR]=Cliente de banco de dados
+Comment=Fast, native client for MySQL, MariaDB and PostgreSQL
+Comment[es]=Cliente nativo y rápido para MySQL, MariaDB y PostgreSQL
+Comment[fr]=Client natif et rapide pour MySQL, MariaDB et PostgreSQL
+Comment[it]=Client nativo e veloce per MySQL, MariaDB e PostgreSQL
+Comment[pt]=Cliente nativo e rápido para MySQL, MariaDB e PostgreSQL
+Comment[pt_BR]=Cliente nativo e rápido para MySQL, MariaDB e PostgreSQL
+Exec=rustql
+Icon=com.rustql.RustQL
+Terminal=false
+Categories=Development;Database;
+Keywords=SQL;MySQL;MariaDB;PostgreSQL;Postgres;database;
+StartupNotify=true
+StartupWMClass=com.rustql.RustQL

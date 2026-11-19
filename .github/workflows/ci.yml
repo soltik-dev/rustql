@@ -1,40 +1,47 @@
 name: CI
 
-# Solo en los PR: la protección de rama de master exige que pase
-# («CI / check (pull_request)») y que el PR esté al día con master, así que
-# lo que se mergea es exactamente lo que se ha probado. Volver a ejecutarla
-# sobre el commit de merge sería repetir lo mismo.
+# On pull requests: the main branch ruleset requires these jobs to pass and
+# the PR to be up to date with main, so what gets merged is exactly what was
+# tested. Running again on the merge commit would only repeat it.
+# Manually (workflow_dispatch) to test a branch without opening a PR.
 on:
   pull_request:
+  workflow_dispatch:
+
+# A new push to the PR (or branch) cancels the previous run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  # Formatting, clippy and every test, including the integration tests.
+  linux:
+    runs-on: ubuntu-24.04
+    # Inside a container to run as root: the integration tests install and
+    # start throwaway MariaDB and PostgreSQL servers in it.
+    container: ubuntu:24.04
     env:
-      CARGO_TERM_COLOR: always
+      DEBIAN_FRONTEND: noninteractive
     steps:
-      - uses: actions/checkout@v4
-
-      # La imagen no trae Rust; egui 0.37 exige Rust ≥ 1.95.
-      - name: Rust
+      - name: Packages
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential pkg-config zlib1g-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --component rustfmt,clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config zlib1g-dev
 
-      # Solo acelera: si el servidor de caché del runner falla, se compila igual.
-      - uses: actions/cache@v4
-        continue-on-error: true
+      - uses: actions/checkout@v5
+
+      # egui 0.37 needs Rust ≥ 1.95 (rust-version in Cargo.toml).
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
+          components: rustfmt, clippy
 
-      - name: Formato
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
         run: cargo fmt --check
 
       - name: Clippy
@@ -43,21 +50,21 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
-      # Los tests marcados #[ignore] usan servidores reales (RUSTQL_TEST_MYSQL
-      # y RUSTQL_TEST_POSTGRES, con TLS). Se arrancan desechables dentro del
-      # propio contenedor.
-      - name: Tests de integración (MariaDB y PostgreSQL)
+      # The #[ignore] tests use real servers (RUSTQL_TEST_MYSQL and
+      # RUSTQL_TEST_POSTGRES, over TLS), started as throwaway instances inside
+      # the container itself.
+      - name: Integration tests (MariaDB and PostgreSQL)
         run: |
-          # Sin el cluster que el paquete de PostgreSQL crea y arranca solo
+          # Without the cluster the PostgreSQL package creates and starts on its own
           apt-get install -y --no-install-recommends postgresql-common openssl
           sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' \
             /etc/postgresql-common/createcluster.conf
           apt-get install -y --no-install-recommends \
             mariadb-server mariadb-client postgresql
 
-          # Certificado de los dos servidores, firmado por una autoridad
-          # propia y válido para 127.0.0.1: los tests de TLS comprueban que
-          # se verifica con ella y que sin ella no se acepta
+          # Certificate for both servers, signed by a private CA and valid for
+          # 127.0.0.1: the TLS tests check that it verifies with that CA and is
+          # rejected without it
           tls="$(mktemp -d /tmp/rustql-tls.XXXXXX)"
           openssl req -new -x509 -days 2 -nodes -subj "/CN=RustQL CI CA" \
             -keyout "$tls/ca.key" -out "$tls/ca.crt" 2> /dev/null
@@ -81,9 +88,10 @@ jobs:
           mariadb --no-defaults --skip-ssl -S "$data.sock" -uroot \
             -e "CREATE USER 'ci'@'127.0.0.1' IDENTIFIED BY 'ci'; GRANT ALL ON *.* TO 'ci'@'127.0.0.1';"
 
-          # PostgreSQL no arranca como root: va con el usuario del paquete,
-          # en un cluster propio y en otro puerto (el runner comparte la red
-          # del anfitrión, donde el 5432 puede estar ocupado).
+          # PostgreSQL refuses to run as root: it runs as the package's user,
+          # in its own cluster and on another port (when the CI runs locally
+          # with act_runner the container shares the host network, where 5432
+          # may be taken).
           pg="$(mktemp -d /tmp/rustql-pg.XXXXXX)"
           chown postgres "$pg"
           su postgres -c "
@@ -101,3 +109,27 @@ jobs:
           RUSTQL_TEST_MYSQL='ci:ci@127.0.0.1:33306' \
           RUSTQL_TEST_POSTGRES='ci:ci@127.0.0.1:55432' \
             cargo test --locked -- --ignored --skip secrets
+
+  # Windows and macOS: build without warnings and pass the unit tests.
+  # There are no test servers or unlocked keyring here.
+  other:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked -- --skip secrets

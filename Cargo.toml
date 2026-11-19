@@ -2,6 +2,14 @@
 name = "rustql"
 version = "0.1.0"
 edition = "2024"
+# Required by egui 0.37, the most demanding dependency.
+rust-version = "1.95"
+description = "A fast, native client for MySQL, MariaDB and PostgreSQL"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/soltik-dev/rustql"
+homepage = "https://rustql.com"
+# An application, not a library: never published to crates.io.
+publish = false
 
 [dependencies]
 eframe = "0.37"
