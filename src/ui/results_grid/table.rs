@@ -44,6 +44,7 @@ pub(super) fn show(
     let header_h = row_h + 2.0;
     let revealing = sel.reveal;
     let (scroll_x, scroll_y) = pending_scroll(ui, g, sel);
+    let highlight = g.highlighted_value(sel.cell);
 
     let mut col_widths = Vec::new();
     // Primera y última fila dibujadas: (posición en el grid, y en pantalla)
@@ -110,7 +111,17 @@ pub(super) fn show(
                                 drawn_rows =
                                     Some((drawn_rows.map_or(here, |(first, _)| first), here));
                             }
-                            show_cell(ui, g, sel, editing, &mut out, &mut drag_row, focused, cell);
+                            show_cell(
+                                ui,
+                                g,
+                                sel,
+                                editing,
+                                &mut out,
+                                &mut drag_row,
+                                focused,
+                                highlight,
+                                cell,
+                            );
                         });
                     }
                 });
@@ -357,7 +368,8 @@ fn header_cell(ui: &mut egui::Ui, g: &Grid, col: usize) -> bool {
 }
 
 /// Una celda: fondo según el estado de su fila, texto, cursor y la
-/// interacción con el ratón.
+/// interacción con el ratón. `highlight` es el valor de la celda del cursor:
+/// las demás que lo muestran se resaltan.
 #[allow(clippy::too_many_arguments)]
 fn show_cell(
     ui: &mut egui::Ui,
@@ -367,6 +379,7 @@ fn show_cell(
     out: &mut TableOut,
     drag_row: &mut Option<usize>,
     focused: bool,
+    highlight: Option<&str>,
     cell: CellRef,
 ) {
     let rect = ui.available_rect_before_wrap();
@@ -379,6 +392,9 @@ fn show_cell(
         _ => None,
     };
     let is_cursor = sel.cell == Some(cell);
+    let shown = g.shown(cell);
+    // Las filas eliminadas no se resaltan: su fondo rojo es lo que avisa
+    let same_value = !is_cursor && !deleted && highlight.is_some_and(|v| shown == Shown::Value(v));
 
     // Fondo de la fila (opaco: no se mezcla con el rayado)
     let row_bg = if deleted {
@@ -400,18 +416,9 @@ fn show_cell(
     }
 
     if edit.is_some() {
-        // Celda con un cambio pendiente: fondo y esquina marcada
+        // Celda con un cambio pendiente: fondo y esquina marcada (esta, sobre
+        // el resaltado)
         ui.painter().rect_filled(rect, 0.0, p.grid_edit_bg);
-        let corner = vec![
-            rect.right_top(),
-            rect.right_top() - egui::vec2(8.0, 0.0),
-            rect.right_top() + egui::vec2(0.0, 8.0),
-        ];
-        ui.painter().add(egui::Shape::convex_polygon(
-            corner,
-            p.warning,
-            egui::Stroke::NONE,
-        ));
     } else if let RowRef::Existing(r) = cell.row
         && !deleted
     {
@@ -424,6 +431,21 @@ fn show_cell(
             ui.painter()
                 .rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
         }
+    }
+    if same_value {
+        ui.painter().rect_filled(rect, 0.0, p.grid_match_bg);
+    }
+    if edit.is_some() {
+        let corner = vec![
+            rect.right_top(),
+            rect.right_top() - egui::vec2(8.0, 0.0),
+            rect.right_top() + egui::vec2(0.0, 8.0),
+        ];
+        ui.painter().add(egui::Shape::convex_polygon(
+            corner,
+            p.warning,
+            egui::Stroke::NONE,
+        ));
     }
     if is_cursor {
         // El borde se ve sobre cualquier fondo; apagado si el grid no
@@ -444,7 +466,7 @@ fn show_cell(
     } else {
         p.null_text
     };
-    let (text, color) = match g.shown(cell) {
+    let (text, color) = match shown {
         Shown::Value(v) if deleted => (v, p.grid_delete_fg),
         Shown::Value(v) if edit.is_some() => (v, p.grid_edit_fg),
         Shown::Value(v) if inserted => (v, p.grid_insert_fg),

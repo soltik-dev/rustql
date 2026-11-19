@@ -7,11 +7,12 @@ use std::time::Instant;
 
 use eframe::egui;
 
+use super::jobs::JobResult;
 use super::view::FrameSignals;
 use super::writes::AfterCommit;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::db::QueryResult;
-use crate::db::{connect_mysql_progress, escape_sql, qualified, quote_ident};
+use crate::db::{Engine, connect_with_progress};
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
@@ -41,6 +42,9 @@ impl Session {
     ) {
         if signals.cancel_connect {
             self.state = ConnState::Disconnected;
+        }
+        if signals.load_databases {
+            self.load_database_list(ctx);
         }
         self.handle_tab_bar(sh, signals.tab_bar, keys);
         self.handle_grid_action(ctx, sh, signals.grid);
@@ -241,9 +245,12 @@ impl Session {
             GridAction::FilterByClipboard { col_name } => {
                 match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                     Ok(text) => {
-                        let esc_col = quote_ident(&col_name);
-                        let esc_val = escape_sql(&text);
-                        let filter = format!("{esc_col} = '{esc_val}'");
+                        let engine = self.engine();
+                        let filter = format!(
+                            "{} = {}",
+                            engine.quote_ident(&col_name),
+                            engine.literal(&text)
+                        );
                         self.request_reload(sh, Reload::Filter(filter));
                     }
                     // En un aviso: como error de la tabla tapaba el grid
@@ -280,7 +287,7 @@ impl Session {
                 if let Some(data) = &self.table_view.table_data {
                     let table = self.schema.selected_table().map(|(_, table)| table);
                     let rows = &self.table_view.selection.rows;
-                    copy_rows(ctx, sh, data, rows, &fmt, table);
+                    copy_rows(ctx, sh, data, rows, &fmt, table, self.engine());
                 }
             }
             GridAction::PageChanged(page) => self.request_reload(sh, Reload::Page(page)),
@@ -307,7 +314,7 @@ impl Session {
     }
 
     /// Devuelve true si el usuario pidió desconectar.
-    fn handle_sidebar_action(
+    pub(super) fn handle_sidebar_action(
         &mut self,
         ctx: &egui::Context,
         sh: &mut Shared,
@@ -353,16 +360,19 @@ impl Session {
                 };
             }
             SidebarAction::DropTable { db, table } => {
+                let kind = self.schema.kind(&db, &table);
                 self.modal = ModalState::ConfirmDrop {
-                    target: DbObject::Table { db, table },
+                    target: DbObject::Table { db, table, kind },
                     typed: String::new(),
                 };
             }
             SidebarAction::TruncateTable { db, table } => {
+                let kind = self.schema.kind(&db, &table);
                 self.modal = ModalState::ConfirmTruncate {
-                    target: DbObject::Table { db, table },
+                    target: DbObject::Table { db, table, kind },
                 };
             }
+            SidebarAction::ViewDefinition { db, table } => self.open_view_definition(db, table),
             SidebarAction::CopyTableName(name) => {
                 sh.toasts.info(format!("«{name}» copiado al portapapeles"));
                 ctx.copy_text(name);
@@ -382,7 +392,10 @@ impl Session {
                 self.switch_to_table(sh, db, table, ActiveTab::Tabla);
             }
             SidebarAction::OpenInSql { db, table } => {
-                let sql_text = format!("SELECT * FROM {} WHERE ", qualified(&db, &table));
+                let sql_text = format!(
+                    "SELECT * FROM {} WHERE ",
+                    self.engine().qualified(&db, &table)
+                );
                 self.open_sql_tab(sh, Some(db), sql_text);
             }
             SidebarAction::CloneTable { db, table } => {
@@ -440,7 +453,15 @@ impl Session {
                 if let Some(tab) = self.sql_tabs.get(tab_idx)
                     && let Some(Ok(data)) = &tab.result
                 {
-                    copy_rows(ctx, sh, data, &tab.selection.rows, &fmt, None);
+                    copy_rows(
+                        ctx,
+                        sh,
+                        data,
+                        &tab.selection.rows,
+                        &fmt,
+                        None,
+                        self.engine(),
+                    );
                 }
             }
             // Limpiar no se puede deshacer: se pregunta antes
@@ -500,7 +521,7 @@ impl Session {
             // hasta saber el resultado; las confirmaciones se cierran ya.
             ModalAction::CreateDatabase { name, charset } => self.create_database(name, charset),
             ModalAction::CreateTable { db, name, columns } => {
-                let sql = modals::build_create_table_sql(&db, &name, &columns);
+                let sql = modals::build_create_table_sql(self.engine(), &db, &name, &columns);
                 self.create_table(db, name, sql);
             }
             ModalAction::DropDatabase(db) => {
@@ -590,6 +611,8 @@ impl Session {
             self.color = profile.color;
             self.selected_profile_idx = Some(idx);
             self.error_message = None;
+            // La lista era la del servidor del perfil anterior
+            self.db_picker = Default::default();
         }
 
         if let Some(mode) = save {
@@ -641,9 +664,13 @@ impl Session {
         let profile = ConnectionProfile {
             id: previous.map_or_else(profiles::new_id, |p| p.id.clone()),
             name,
+            engine: self.params.engine,
             host: self.params.host.clone(),
             port: self.params.port,
             user: self.params.user.clone(),
+            database: self.params.database.trim().to_string(),
+            tls: self.params.tls,
+            tls_ca: self.params.tls_ca.trim().to_string(),
             // Una contraseña nueva se marca cuando el llavero la confirma
             // (poll_keyring). Con el campo vacío se conserva la que había.
             password_in_keyring: had_keyring && self.save_password,
@@ -694,6 +721,38 @@ impl Session {
         }
     }
 
+    /// Lee la definición de una vista y la abre en una pestaña SQL, lista
+    /// para verla o cambiarla.
+    fn open_view_definition(&mut self, db: String, view: String) {
+        self.spawn_job(move |b| JobResult::ViewDefinition {
+            result: b.view_definition(&db, &view),
+            db,
+            view,
+        });
+    }
+
+    /// Lee en segundo plano las BBDD del servidor del formulario, con sus
+    /// credenciales, para elegir una. Cada petición sustituye a la anterior.
+    pub(super) fn load_database_list(&mut self, ctx: &egui::Context) {
+        if self.params.host.trim().is_empty() {
+            self.db_picker.list = Loadable::Failed("Indica el host del servidor.".into());
+            return;
+        }
+        if !self.read_port() {
+            self.db_picker.list = Loadable::Failed(self.error_message.take().unwrap_or_default());
+            return;
+        }
+        let params = self.params.clone();
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::db::list_server_databases(&params));
+            ctx.request_repaint();
+        });
+        self.db_picker.list = Loadable::Loading(0);
+        self.db_picker.receiver = Some(rx);
+    }
+
     /// Lanza la conexión en segundo plano con los parámetros del formulario.
     pub(super) fn start_connect(&mut self, sh: &Shared) {
         if self.params.host.trim().is_empty() {
@@ -712,7 +771,7 @@ impl Session {
         let host = self.params.host.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            connect_mysql_progress(&params, &tx);
+            connect_with_progress(&params, &tx);
         });
         self.state = ConnState::Connecting {
             receiver: rx,
@@ -733,8 +792,9 @@ fn copy_rows(
     rows: &BTreeSet<usize>,
     fmt: &CopyFormat,
     table: Option<&str>,
+    engine: Engine,
 ) {
-    let copied = results_grid::copy_rows(ctx, data, rows, fmt, table);
+    let copied = results_grid::copy_rows(ctx, data, rows, fmt, table, engine);
     let format = match fmt {
         CopyFormat::Csv => "CSV",
         CopyFormat::Tsv => "TSV",

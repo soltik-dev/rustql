@@ -36,19 +36,33 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
 
     let mut clicked_table: Option<String> = None;
 
-    TableBuilder::new(ui)
+    // Motor y collation solo si el servidor los tiene por tabla (MySQL)
+    let has_engine = tables.iter().any(|t| !t.engine.is_empty());
+    let has_collation = tables.iter().any(|t| !t.collation.is_empty());
+    let mut headers = vec!["Tabla"];
+    let mut builder = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(150.0).clip(true)) // tabla
-        .column(Column::auto().at_least(70.0)) // motor
-        .column(Column::auto().at_least(80.0)) // filas
-        .column(Column::auto().at_least(80.0)) // tamaño
-        .column(Column::remainder().at_least(140.0).clip(true)) // collation
+        .column(Column::auto().at_least(150.0).clip(true));
+    if has_engine {
+        headers.push("Motor");
+        builder = builder.column(Column::auto().at_least(70.0));
+    }
+    headers.extend(["Filas", "Tamaño"]);
+    builder = builder
+        .column(Column::auto().at_least(80.0))
+        .column(Column::auto().at_least(80.0));
+    if has_collation {
+        headers.push("Collation");
+        builder = builder.column(Column::remainder().at_least(140.0).clip(true));
+    }
+
+    builder
         .header(24.0, |mut header| {
-            for name in &["Tabla", "Motor", "Filas", "Tamaño", "Collation"] {
+            for name in headers {
                 header.col(|ui| {
-                    ui.label(egui::RichText::new(*name).color(theme::get(ui).text_muted));
+                    ui.label(egui::RichText::new(name).color(theme::get(ui).text_muted));
                 });
             }
         })
@@ -66,18 +80,22 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
                     }
                     resp.on_hover_text("Doble click para abrir tabla");
                 });
-                row.col(|ui| {
-                    ui.label(&t.engine);
-                });
+                if has_engine {
+                    row.col(|ui| {
+                        ui.label(&t.engine);
+                    });
+                }
                 row.col(|ui| {
                     ui.label(t.row_count.to_string());
                 });
                 row.col(|ui| {
                     ui.label(format_bytes(t.size_bytes));
                 });
-                row.col(|ui| {
-                    ui.add(egui::Label::new(&t.collation).truncate());
-                });
+                if has_collation {
+                    row.col(|ui| {
+                        ui.add(egui::Label::new(&t.collation).truncate());
+                    });
+                }
             });
         });
 

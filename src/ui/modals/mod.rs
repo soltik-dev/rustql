@@ -8,7 +8,7 @@ use self::export::show_export_data;
 pub use self::export::{ExportPhase, ExportRunning, TableExportEntry, TableExportState};
 
 use crate::db::export::{ExportDestination, ExportOptions};
-use crate::db::{qualified, quote_ident};
+use crate::db::{Engine, TableKind};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
 use crate::ui::results_grid::SortSpec;
@@ -69,7 +69,12 @@ impl FilterOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DbObject {
     Database(String),
-    Table { db: String, table: String },
+    /// Una tabla o una vista.
+    Table {
+        db: String,
+        table: String,
+        kind: TableKind,
+    },
 }
 
 /// Recarga de la tabla abierta. Con cambios pendientes espera a que el
@@ -250,29 +255,6 @@ pub enum ModalAction {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const CHARSETS: &[&str] = &["utf8mb4", "utf8", "latin1", "ascii", "binary"];
-const COL_TYPES: &[&str] = &[
-    "INT",
-    "BIGINT",
-    "SMALLINT",
-    "TINYINT",
-    "VARCHAR",
-    "TEXT",
-    "MEDIUMTEXT",
-    "LONGTEXT",
-    "CHAR",
-    "DECIMAL",
-    "FLOAT",
-    "DOUBLE",
-    "DATE",
-    "DATETIME",
-    "TIMESTAMP",
-    "TIME",
-    "BOOLEAN",
-    "JSON",
-    "BLOB",
-];
-
 fn red_btn(ui: &mut egui::Ui, text: &str) -> bool {
     theme::danger_button(ui, text).clicked()
 }
@@ -334,27 +316,32 @@ fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egu
 /// Renderiza el modal activo sobre todo lo demás.
 /// Debe llamarse desde `update()` después de todos los paneles, pasando `ctx`.
 /// `busy`: hay una escritura en curso (los formularios esperan su resultado).
-pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAction {
+pub fn show(
+    ctx: &egui::Context,
+    modal: &mut ModalState,
+    engine: Engine,
+    busy: bool,
+) -> ModalAction {
     match modal {
         ModalState::None => ModalAction::None,
         ModalState::CreateDatabase {
             name,
             charset,
             error,
-        } => show_create_database(ctx, name, charset, error, busy),
+        } => show_create_database(ctx, engine, name, charset, error, busy),
         ModalState::CreateTable {
             db,
             name,
             columns,
             error,
-        } => show_create_table(ctx, db, name, columns, error, busy),
+        } => show_create_table(ctx, engine, db, name, columns, error, busy),
         ModalState::ConfirmDrop { target, typed } => show_confirm_drop(ctx, target, typed),
         ModalState::ConfirmTruncate { target } => show_confirm_truncate(ctx, target),
         ModalState::FilterInput {
             col_name,
             value,
             operator,
-        } => show_filter_input(ctx, col_name, value, operator),
+        } => show_filter_input(ctx, engine, col_name, value, operator),
         ModalState::ConfirmSwitchTable {
             new_db,
             new_table,
@@ -414,6 +401,7 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
             phase,
         } => show_export_data(
             ctx,
+            engine,
             source_db,
             source_table,
             tables,
@@ -432,6 +420,7 @@ pub fn show(ctx: &egui::Context, modal: &mut ModalState, busy: bool) -> ModalAct
 
 fn show_create_database(
     ctx: &egui::Context,
+    engine: Engine,
     name: &mut String,
     charset: &mut String,
     error: &mut Option<String>,
@@ -453,15 +442,19 @@ fn show_create_database(
                 );
                 ui.end_row();
 
-                ui.label("Charset:");
-                egui::ComboBox::from_id_salt("charset_combo")
-                    .selected_text(charset.as_str())
-                    .show_ui(ui, |ui| {
-                        for &cs in CHARSETS {
-                            ui.selectable_value(charset, cs.to_string(), cs);
-                        }
-                    });
-                ui.end_row();
+                // Solo en los motores con charset por BBDD
+                let charsets = engine.database_charsets();
+                if !charsets.is_empty() {
+                    ui.label("Charset:");
+                    egui::ComboBox::from_id_salt("charset_combo")
+                        .selected_text(charset.as_str())
+                        .show_ui(ui, |ui| {
+                            for &cs in charsets {
+                                ui.selectable_value(charset, cs.to_string(), cs);
+                            }
+                        });
+                    ui.end_row();
+                }
             });
 
         if let Some(e) = error {
@@ -496,6 +489,7 @@ fn show_create_database(
 
 fn show_create_table(
     ctx: &egui::Context,
+    engine: Engine,
     db: &str,
     name: &mut String,
     columns: &mut Vec<NewColumnDef>,
@@ -564,7 +558,7 @@ fn show_create_table(
                             .selected_text(&col.col_type)
                             .width(100.0)
                             .show_ui(ui, |ui| {
-                                for &t in COL_TYPES {
+                                for &(t, _) in engine.column_types() {
                                     ui.selectable_value(&mut col.col_type, t.to_string(), t);
                                 }
                             });
@@ -638,7 +632,14 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
 
     let (title, what, name) = match target {
         DbObject::Database(db) => ("Eliminar base de datos", "la base de datos", db.clone()),
-        DbObject::Table { db, table } => ("Eliminar tabla", "la tabla", format!("{db}.{table}")),
+        DbObject::Table { db, table, kind } => {
+            let title = if kind.is_view() {
+                "Eliminar vista"
+            } else {
+                "Eliminar tabla"
+            };
+            (title, kind.label(), format!("{db}.{table}"))
+        }
     };
 
     dialog(ctx, title, 300.0, Some(&mut open), |ui| {
@@ -668,7 +669,7 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
             if delete {
                 action = match target.clone() {
                     DbObject::Database(db) => ModalAction::DropDatabase(db),
-                    DbObject::Table { db, table } => ModalAction::DropTable { db, table },
+                    DbObject::Table { db, table, .. } => ModalAction::DropTable { db, table },
                 };
             }
             if ui.button("Cancelar").clicked() {
@@ -692,7 +693,7 @@ fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction 
 
     let (what, name) = match target {
         DbObject::Database(db) => ("todas las tablas de", db.clone()),
-        DbObject::Table { db, table } => ("la tabla", format!("{db}.{table}")),
+        DbObject::Table { db, table, .. } => ("la tabla", format!("{db}.{table}")),
     };
 
     dialog(ctx, "Vaciar datos", 280.0, Some(&mut open), |ui| {
@@ -709,7 +710,7 @@ fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction 
             if red_btn(ui, "Vaciar") {
                 action = match target.clone() {
                     DbObject::Database(db) => ModalAction::TruncateAllTables(db),
-                    DbObject::Table { db, table } => ModalAction::TruncateTable { db, table },
+                    DbObject::Table { db, table, .. } => ModalAction::TruncateTable { db, table },
                 };
             }
             if ui.button("Cancelar").clicked() {
@@ -741,6 +742,7 @@ const FILTER_OPERATORS: &[FilterOperator] = &[
 
 fn show_filter_input(
     ctx: &egui::Context,
+    engine: Engine,
     col_name: &mut String,
     value: &mut String,
     operator: &mut FilterOperator,
@@ -785,7 +787,7 @@ fn show_filter_input(
                 let apply_clicked = theme::primary_button(ui, "Aplicar").clicked();
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if apply_clicked || enter_pressed {
-                    let frag = build_filter_fragment(col_name, operator, value);
+                    let frag = build_filter_fragment(engine, col_name, operator, value);
                     action = ModalAction::ApplyFilter { sql_fragment: frag };
                 }
                 if ui.button("Cancelar").clicked() {
@@ -802,25 +804,40 @@ fn show_filter_input(
     action
 }
 
-fn build_filter_fragment(col_name: &str, operator: &FilterOperator, value: &str) -> String {
-    let esc_col = quote_ident(col_name);
-    let esc_val = crate::db::escape_sql(value);
+fn build_filter_fragment(
+    engine: Engine,
+    col_name: &str,
+    operator: &FilterOperator,
+    value: &str,
+) -> String {
+    let compare = |op: &str| {
+        format!(
+            "{} {op} {}",
+            engine.quote_ident(col_name),
+            engine.literal(value)
+        )
+    };
     match operator {
-        FilterOperator::Equals => format!("{esc_col} = '{esc_val}'"),
-        FilterOperator::NotEquals => format!("{esc_col} != '{esc_val}'"),
-        FilterOperator::Contains => format!("{esc_col} LIKE '%{esc_val}%'"),
-        FilterOperator::StartsWith => format!("{esc_col} LIKE '{esc_val}%'"),
-        FilterOperator::EndsWith => format!("{esc_col} LIKE '%{esc_val}'"),
-        FilterOperator::GreaterThan => format!("{esc_col} > '{esc_val}'"),
-        FilterOperator::LessThan => format!("{esc_col} < '{esc_val}'"),
-        FilterOperator::GreaterOrEqual => format!("{esc_col} >= '{esc_val}'"),
-        FilterOperator::LessOrEqual => format!("{esc_col} <= '{esc_val}'"),
+        FilterOperator::Equals => compare("="),
+        FilterOperator::NotEquals => compare("!="),
+        FilterOperator::Contains => engine.like(col_name, &format!("%{value}%")),
+        FilterOperator::StartsWith => engine.like(col_name, &format!("{value}%")),
+        FilterOperator::EndsWith => engine.like(col_name, &format!("%{value}")),
+        FilterOperator::GreaterThan => compare(">"),
+        FilterOperator::LessThan => compare("<"),
+        FilterOperator::GreaterOrEqual => compare(">="),
+        FilterOperator::LessOrEqual => compare("<="),
     }
 }
 
 // ── Helpers para construir CREATE TABLE SQL ───────────────────────────────────
 
-pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) -> String {
+pub fn build_create_table_sql(
+    engine: Engine,
+    db: &str,
+    name: &str,
+    columns: &[NewColumnDef],
+) -> String {
     let mut parts = Vec::new();
     let mut pks = Vec::new();
 
@@ -828,20 +845,13 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
         if col.name.trim().is_empty() {
             continue;
         }
-        let type_part = if col.length.trim().is_empty()
-            || matches!(
-                col.col_type.as_str(),
-                "TEXT"
-                    | "MEDIUMTEXT"
-                    | "LONGTEXT"
-                    | "BLOB"
-                    | "JSON"
-                    | "BOOLEAN"
-                    | "DATE"
-                    | "DATETIME"
-                    | "TIMESTAMP"
-                    | "TIME"
-            ) {
+        // Un tipo que no es de la lista (no debería llegar) se deja como venga
+        let takes_length = engine
+            .column_types()
+            .iter()
+            .find(|(name, _)| *name == col.col_type)
+            .is_none_or(|(_, takes_length)| *takes_length);
+        let type_part = if col.length.trim().is_empty() || !takes_length {
             col.col_type.clone()
         } else {
             format!("{}({})", col.col_type, col.length.trim())
@@ -850,13 +860,13 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
         let null_part = if col.not_null { " NOT NULL" } else { "" };
         parts.push(format!(
             "  {} {}{}",
-            quote_ident(col.name.trim()),
+            engine.quote_ident(col.name.trim()),
             type_part,
             null_part
         ));
 
         if col.primary_key {
-            pks.push(quote_ident(col.name.trim()));
+            pks.push(engine.quote_ident(col.name.trim()));
         }
     }
 
@@ -866,7 +876,7 @@ pub fn build_create_table_sql(db: &str, name: &str, columns: &[NewColumnDef]) ->
 
     format!(
         "CREATE TABLE {} (\n{}\n)",
-        qualified(db, name),
+        engine.qualified(db, name),
         parts.join(",\n")
     )
 }
@@ -1148,5 +1158,62 @@ fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
         ModalAction::Cancel
     } else {
         ModalAction::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtros_del_dialogo_en_cada_dialecto() {
+        let fragment = |engine, op| build_filter_fragment(engine, "no`m\"bre", &op, "O'Brien");
+        assert_eq!(
+            fragment(Engine::Mysql, FilterOperator::Equals),
+            "`no``m\"bre` = 'O''Brien'"
+        );
+        assert_eq!(
+            fragment(Engine::Mysql, FilterOperator::Contains),
+            "`no``m\"bre` LIKE '%O''Brien%'"
+        );
+        assert_eq!(
+            fragment(Engine::Postgres, FilterOperator::GreaterOrEqual),
+            "\"no`m\"\"bre\" >= 'O''Brien'"
+        );
+        // En PostgreSQL, sin distinguir mayúsculas y sobre cualquier tipo
+        assert_eq!(
+            fragment(Engine::Postgres, FilterOperator::StartsWith),
+            "\"no`m\"\"bre\"::text ILIKE 'O''Brien%'"
+        );
+    }
+
+    #[test]
+    fn crear_tabla_en_cada_dialecto() {
+        let column = |name: &str, col_type: &str, length: &str, key: bool| NewColumnDef {
+            name: name.into(),
+            col_type: col_type.into(),
+            length: length.into(),
+            not_null: key,
+            primary_key: key,
+        };
+        let columns = [
+            column("id", "INT", "", true),
+            column("nombre", "VARCHAR", "50", false),
+        ];
+        assert_eq!(
+            build_create_table_sql(Engine::Mysql, "bd", "t", &columns),
+            "CREATE TABLE `bd`.`t` (\n  `id` INT NOT NULL,\n  `nombre` VARCHAR(50),\n  \
+             PRIMARY KEY (`id`)\n)"
+        );
+        // Los tipos sin longitud la ignoran aunque el campo traiga una
+        let columns = [
+            column("id", "SERIAL", "11", true),
+            column("nombre", "VARCHAR", "50", false),
+        ];
+        assert_eq!(
+            build_create_table_sql(Engine::Postgres, "bd", "ventas.t", &columns),
+            "CREATE TABLE \"ventas\".\"t\" (\n  \"id\" SERIAL NOT NULL,\n  \"nombre\" VARCHAR(50),\n  \
+             PRIMARY KEY (\"id\")\n)"
+        );
     }
 }

@@ -1,12 +1,18 @@
+pub mod dialect;
 pub mod export;
 pub mod mysql;
+pub mod postgres;
+pub mod tls;
 
 use std::sync::Arc;
 
+pub use dialect::{Engine, ParamList};
 pub use export::{ExportDestination, ExportEvent, ExportOptions};
+pub use tls::{Security, TlsMode};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {
+    pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -14,6 +20,14 @@ pub struct ConnectionParams {
     /// Perfil con la contraseña en el llavero del sistema: si `password` está
     /// vacía, se lee de ahí al conectar.
     pub keyring_id: Option<String>,
+    /// Base de datos a la que se limita la conexión: el árbol solo enseña
+    /// esa. Vacía = todas las del servidor.
+    pub database: String,
+    /// Si la conexión va cifrada y si se comprueba el certificado.
+    pub tls: TlsMode,
+    /// Fichero PEM con la autoridad que firma el certificado del servidor,
+    /// para `TlsMode::Verify`. Vacío = solo las autoridades públicas.
+    pub tls_ca: String,
 }
 
 impl ConnectionParams {
@@ -25,6 +39,18 @@ impl ConnectionParams {
 
     /// La contraseña escrita o, si está vacía, la del llavero. Puede bloquear
     /// (el llavero puede pedir desbloqueo): solo desde hilos de trabajo.
+    /// El fichero de CA con el que verificar al servidor, si se indicó.
+    pub fn ca_file(&self) -> Option<&str> {
+        let path = self.tls_ca.trim();
+        (!path.is_empty()).then_some(path)
+    }
+
+    /// La base de datos a la que se limita la conexión, si se indicó alguna.
+    pub fn only_database(&self) -> Option<&str> {
+        let database = self.database.trim();
+        (!database.is_empty()).then_some(database)
+    }
+
     pub fn resolve_password(&self) -> DbResult<String> {
         match &self.keyring_id {
             Some(id) if self.password.is_empty() => crate::secrets::get(id)
@@ -41,12 +67,17 @@ impl ConnectionParams {
 
 impl Default for ConnectionParams {
     fn default() -> Self {
+        let engine = Engine::default();
         Self {
+            engine,
             host: "127.0.0.1".into(),
-            port: 3306,
-            user: "root".into(),
+            port: engine.default_port(),
+            user: engine.default_user().into(),
             password: String::new(),
             keyring_id: None,
+            database: String::new(),
+            tls: TlsMode::default(),
+            tls_ca: String::new(),
         }
     }
 }
@@ -60,7 +91,7 @@ pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
 /// Error con el que termina una ejecución del editor cancelada.
 pub const QUERY_CANCELLED: &str = "Consulta cancelada.";
 
-/// Sentencia con parámetros posicionales (`?`). Los valores viajan aparte
+/// Sentencia con parámetros (ver `ParamList`). Los valores viajan aparte
 /// del SQL: no hace falta escaparlos y llegan intactos (`None` = NULL).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
@@ -85,8 +116,63 @@ pub struct DatabaseInfo {
     pub name: String,
     pub charset: String,
     pub collation: String,
-    pub table_count: usize,
+    /// `None` si el motor no puede contarlas sin entrar en la BBDD.
+    pub table_count: Option<usize>,
     pub size_bytes: u64,
+}
+
+/// Qué es lo que el árbol enseña como una tabla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableKind {
+    #[default]
+    Table,
+    View,
+    /// Vista con sus datos guardados (PostgreSQL).
+    MaterializedView,
+}
+
+impl TableKind {
+    /// Una vista no tiene datos propios: no se vacía, no se clona ni se
+    /// editan sus filas.
+    pub fn is_view(self) -> bool {
+        self != TableKind::Table
+    }
+
+    /// Cómo se llama, con su artículo: «la tabla», «la vista».
+    pub fn label(self) -> &'static str {
+        match self {
+            TableKind::Table => "la tabla",
+            TableKind::View => "la vista",
+            TableKind::MaterializedView => "la vista materializada",
+        }
+    }
+
+    /// Palabra con la que SQL la nombra en `DROP …`.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            TableKind::Table => "TABLE",
+            TableKind::View => "VIEW",
+            TableKind::MaterializedView => "MATERIALIZED VIEW",
+        }
+    }
+}
+
+/// Una tabla (o vista) de una BBDD.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableEntry {
+    pub name: String,
+    pub kind: TableKind,
+}
+
+/// En los tests, una tabla (no una vista) con ese nombre.
+#[cfg(test)]
+impl From<&str> for TableEntry {
+    fn from(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            kind: TableKind::Table,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -104,38 +190,18 @@ pub struct ColumnInfo {
     pub col_type: String,
     pub is_nullable: bool,
     pub default_val: Option<String>,
+    /// Tipo de clave de la que forma parte: «PRI», «UNI», «MUL» o nada.
     pub column_key: String,
     pub extra: String,
+    /// El servidor le da valor al insertar (AUTO_INCREMENT, serial,
+    /// identidad): en una fila nueva no se escribe.
+    pub is_auto: bool,
 }
 
-/// Escapa un valor para uso dentro de comillas simples en SQL.
-/// Cubre todas las secuencias de escape requeridas por MySQL. La comilla se
-/// dobla (`''`) en vez de escaparse con `\'`: si el servidor tiene
-/// NO_BACKSLASH_ESCAPES en el sql_mode, `\'` cerraría la cadena y el resto
-/// del valor se ejecutaría como SQL. Con `''` lo peor que pasa en ese modo es
-/// que las barras se lean literalmente.
-pub fn escape_sql(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\0', "\\0")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\x1a', "\\Z")
-        .replace('\'', "''")
-}
-
-/// Escapa un identificador para uso dentro de backticks en SQL.
-pub fn escape_ident(s: &str) -> String {
-    s.replace('`', "``")
-}
-
-/// Identificador entre backticks: `` `nombre` ``.
-pub fn quote_ident(s: &str) -> String {
-    format!("`{}`", escape_ident(s))
-}
-
-/// Tabla cualificada con su BBDD: `` `bd`.`tabla` ``.
-pub fn qualified(db: &str, table: &str) -> String {
-    format!("{}.{}", quote_ident(db), quote_ident(table))
+impl ColumnInfo {
+    pub fn is_primary(&self) -> bool {
+        self.column_key == "PRI"
+    }
 }
 
 /// Valida que un nombre de charset MySQL solo contenga caracteres seguros.
@@ -153,16 +219,30 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
 /// Backend de una conexión. Es `Sync` y todos sus métodos toman `&self`: se
 /// comparte (`Arc`) entre la UI y los hilos de trabajo, que piden conexiones
 /// a su pool cuando las necesitan.
+///
+/// Los métodos con `db: Option<&str>` ejecutan SQL en esa BBDD. MySQL ve
+/// todas desde cualquier conexión y no la necesita (las tablas van
+/// cualificadas con su BBDD); en PostgreSQL decide a cuál se conecta. Sin
+/// ella, en la BBDD con la que se abrió la conexión.
 pub trait DbBackend: Send + Sync {
+    fn engine(&self) -> Engine;
+
+    /// Si la conexión va cifrada, según el servidor al conectar.
+    fn security(&self) -> Security;
+
     // ── Lectura (no modifican el estado del backend) ───────────────────────────
 
     fn list_databases(&self) -> DbResult<Vec<String>>;
-    fn list_tables(&self, database: &str) -> DbResult<Vec<String>>;
-    /// Pares (BBDD, tabla) de todo el servidor, en una sola consulta.
-    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>>;
+    /// Tablas y vistas de una BBDD.
+    fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>>;
+    /// Pares (BBDD, tabla) de todo el servidor.
+    fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>>;
+    /// Sentencia que vuelve a crear la vista `view` con su definición
+    /// actual, para verla o cambiarla.
+    fn view_definition(&self, db: &str, view: &str) -> DbResult<String>;
 
     /// Ejecuta SQL arbitrario de lectura y devuelve el resultado.
-    fn execute_query(&self, sql: &str) -> DbResult<QueryResult>;
+    fn execute_query(&self, db: Option<&str>, sql: &str) -> DbResult<QueryResult>;
 
     /// SQL del editor, en una conexión propia que se mantiene entre
     /// ejecuciones: transacciones abiertas, variables (`SET @x`), `USE` y
@@ -191,17 +271,19 @@ pub trait DbBackend: Send + Sync {
     // ── Escritura (modifican datos en el servidor) ─────────────────────────────
 
     /// Ejecuta SQL de escritura (INSERT/UPDATE/DELETE/DDL). Devuelve filas afectadas.
-    fn execute_write(&self, sql: &str) -> DbResult<u64>;
+    fn execute_write(&self, db: Option<&str>, sql: &str) -> DbResult<u64>;
 
     fn create_database(&self, name: &str, charset: &str) -> DbResult<()>;
     fn drop_database(&self, name: &str) -> DbResult<()>;
-    fn drop_table(&self, db: &str, table: &str) -> DbResult<()>;
+    /// Elimina una tabla o una vista (`kind` dice cuál: se eliminan con
+    /// sentencias distintas).
+    fn drop_table(&self, db: &str, table: &str, kind: TableKind) -> DbResult<()>;
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()>;
 
     /// Ejecuta una lista de sentencias dentro de una transacción.
     /// Si alguna falla, o una `single_row` no encuentra su fila, se hace
     /// ROLLBACK y se devuelve el error.
-    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()>;
+    fn execute_transaction(&self, db: Option<&str>, stmts: &[Statement]) -> DbResult<()>;
 }
 
 pub enum ConnectEvent {
@@ -209,42 +291,115 @@ pub enum ConnectEvent {
     Done(DbResult<Arc<dyn DbBackend>>),
 }
 
-pub fn connect_mysql_progress(
+/// Conecta con el servidor de `params`, con el backend de su motor.
+pub fn connect(
+    params: &ConnectionParams,
+    on_status: impl Fn(&str),
+) -> DbResult<Arc<dyn DbBackend>> {
+    Ok(match params.engine {
+        Engine::Mysql => Arc::new(mysql::MysqlBackend::connect_with_progress(
+            params, on_status,
+        )?),
+        Engine::Postgres => Arc::new(postgres::PostgresBackend::connect_with_progress(
+            params, on_status,
+        )?),
+    })
+}
+
+/// Como `connect`, contando el progreso y el resultado por `tx`.
+pub fn connect_with_progress(
     params: &ConnectionParams,
     tx: &std::sync::mpsc::Sender<ConnectEvent>,
 ) {
     let send_status = |msg: &str| {
         let _ = tx.send(ConnectEvent::Status(msg.to_string()));
     };
-    let result = mysql::MysqlBackend::connect_with_progress(params, send_status)
-        .map(|b| -> Arc<dyn DbBackend> { Arc::new(b) });
+    let result = connect(params, send_status);
     let _ = tx.send(ConnectEvent::Done(result));
 }
 
-/// Servidor real para los tests marcados `#[ignore]`:
-/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto cargo test -- --ignored`.
+/// Las BBDD del servidor de `params`, para elegir una en el formulario de
+/// conexión: se conecta, las lista todas y desconecta.
+pub fn list_server_databases(params: &ConnectionParams) -> DbResult<Vec<String>> {
+    match params.engine {
+        // Sin limitarse a la BBDD que haya en el formulario
+        Engine::Mysql => {
+            let all = ConnectionParams {
+                database: String::new(),
+                ..params.clone()
+            };
+            mysql::MysqlBackend::connect_with_progress(&all, |_| {})?.list_databases()
+        }
+        // Entrando por la del formulario, si hay: puede ser la única en la
+        // que el servidor deja entrar, y desde ella se ven las demás
+        Engine::Postgres => {
+            postgres::PostgresBackend::connect_with_progress(params, |_| {})?.all_databases()
+        }
+    }
+}
+
+/// Servidores reales para los tests marcados `#[ignore]`:
+/// `RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto` y
+/// `RUSTQL_TEST_POSTGRES=…`, con `cargo test -- --ignored`. Los de TLS
+/// necesitan además `RUSTQL_TEST_CA` (ver `with_tls`).
 /// Crean y borran sus propias BBDD `rustql_test_*`.
 #[cfg(test)]
 pub mod test_server {
-    use super::ConnectionParams;
+    use super::{ConnectionParams, Engine};
 
-    pub fn params() -> ConnectionParams {
-        let url = std::env::var("RUSTQL_TEST_MYSQL")
-            .expect("RUSTQL_TEST_MYSQL=usuario:contraseña@host:puerto");
+    fn from_env(var: &str, engine: Engine) -> ConnectionParams {
+        let url =
+            std::env::var(var).unwrap_or_else(|_| panic!("{var}=usuario:contraseña@host:puerto"));
         let (auth, addr) = url.rsplit_once('@').expect("falta @");
         let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
         let (host, port) = addr.rsplit_once(':').expect("falta :puerto");
         ConnectionParams {
+            engine,
             host: host.into(),
             port: port.parse().expect("puerto"),
             user: user.into(),
             password: password.into(),
             keyring_id: None,
+            database: String::new(),
+            tls: Default::default(),
+            tls_ca: String::new(),
         }
+    }
+
+    pub fn params() -> ConnectionParams {
+        from_env("RUSTQL_TEST_MYSQL", Engine::Mysql)
     }
 
     pub fn backend() -> super::mysql::MysqlBackend {
         super::mysql::MysqlBackend::connect_with_progress(&params(), |_| {}).unwrap()
+    }
+
+    /// Parámetros de `base` con el nivel de seguridad `tls`. Para verificar,
+    /// `RUSTQL_TEST_CA` es el fichero de la autoridad que firma el
+    /// certificado de los servidores de prueba (válido para 127.0.0.1).
+    pub fn with_tls(base: ConnectionParams, tls: super::TlsMode, ca: bool) -> ConnectionParams {
+        ConnectionParams {
+            tls,
+            tls_ca: if ca {
+                std::env::var("RUSTQL_TEST_CA").expect("RUSTQL_TEST_CA=/ruta/ca.crt")
+            } else {
+                String::new()
+            },
+            ..base
+        }
+    }
+
+    /// Nombres de unas tablas, para compararlos sin su tipo.
+    pub fn names(tables: Vec<super::TableEntry>) -> Vec<String> {
+        tables.into_iter().map(|table| table.name).collect()
+    }
+
+    pub fn pg_params() -> ConnectionParams {
+        from_env("RUSTQL_TEST_POSTGRES", Engine::Postgres)
+    }
+
+    pub fn pg_backend() -> super::postgres::PostgresBackend {
+        super::postgres::PostgresBackend::connect_with_progress(&pg_params(), |_| {}).unwrap()
     }
 }
 
@@ -259,21 +414,8 @@ mod tests {
     const ATTACK: &str = "\\' OR 1=1 -- ";
 
     #[test]
-    fn identificadores_entre_backticks() {
-        assert_eq!(quote_ident("a`b"), "`a``b`");
-        assert_eq!(qualified("bd", "ta`bla"), "`bd`.`ta``bla`");
-    }
-
-    #[test]
-    fn escape_sql_dobla_las_comillas() {
-        assert_eq!(escape_sql("it's"), "it''s");
-        assert_eq!(escape_sql(ATTACK), "\\\\'' OR 1=1 -- ");
-        assert_eq!(escape_sql("a\nb\\c"), "a\\nb\\\\c");
-    }
-
-    #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
-    fn escape_sql_no_permite_inyectar_en_ningun_sql_mode() {
+    fn un_literal_no_permite_inyectar_en_ningun_sql_mode() {
         let backend = test_server::backend();
         // Una sola conexión: sql_mode es de sesión
         let mut conn = backend.conn().unwrap();
@@ -292,15 +434,15 @@ mod tests {
                 .unwrap();
             let matches: Option<u64> = conn
                 .query_first(format!(
-                    "SELECT COUNT(*) FROM rustql_test_escape.t WHERE v = '{}'",
-                    escape_sql(ATTACK)
+                    "SELECT COUNT(*) FROM rustql_test_escape.t WHERE v = {}",
+                    Engine::Mysql.literal(ATTACK)
                 ))
                 .unwrap();
             assert_eq!(matches, Some(0), "inyección con sql_mode={mode:?}");
             if mode.is_empty() {
                 for value in tricky {
                     let back: Option<String> = conn
-                        .query_first(format!("SELECT '{}'", escape_sql(value)))
+                        .query_first(format!("SELECT {}", Engine::Mysql.literal(value)))
                         .unwrap();
                     assert_eq!(back.as_deref(), Some(value));
                 }

@@ -13,6 +13,8 @@ struct Fixture {
     column_info: Vec<ColumnInfo>,
     /// Cargando o guardando: el grid no deja editar.
     busy: bool,
+    /// Lo que se muestra: una tabla o una vista.
+    kind: TableKind,
     /// Alto de la ventana.
     height: f32,
 }
@@ -25,6 +27,7 @@ fn column(name: &str, extra: &str, nullable: bool) -> ColumnInfo {
         default_val: None,
         column_key: String::new(),
         extra: extra.into(),
+        is_auto: extra.contains("auto_increment"),
     }
 }
 
@@ -58,6 +61,7 @@ impl Fixture {
             view,
             column_info,
             busy: false,
+            kind: TableKind::Table,
             height: 300.0,
         }
     }
@@ -83,6 +87,8 @@ impl Fixture {
                         Some(("db", "t")),
                         &mut self.view,
                         &self.column_info,
+                        Engine::Mysql,
+                        self.kind,
                         self.busy,
                     );
                 });
@@ -408,6 +414,20 @@ fn ctrl_ins_inserta_sin_cursor_y_en_una_tabla_sin_filas() {
 }
 
 #[test]
+fn una_vista_ni_se_edita_ni_admite_filas_nuevas() {
+    let mut f = Fixture::new(2);
+    f.kind = TableKind::View;
+    f.focus();
+    let action = f.press_with(egui::Modifiers::COMMAND, egui::Key::Insert);
+    assert!(matches!(action, GridAction::None), "{action:?}");
+    f.put_cursor(RowRef::Existing(0), 1);
+    f.press(egui::Key::Enter);
+    assert!(f.view.editing_cell.is_none());
+    f.type_text("x");
+    assert!(f.view.editing_cell.is_none());
+}
+
+#[test]
 fn las_filas_eliminadas_y_las_columnas_auto_no_se_editan() {
     let mut f = Fixture::new(2);
     f.add_insert_row();
@@ -537,6 +557,7 @@ fn la_celda_muestra_el_cambio_pendiente() {
         editable: true,
         keyed: true,
         queryable: true,
+        engine: Engine::Mysql,
         pager: None,
     };
     let cell = |row, col| CellRef {
@@ -548,6 +569,55 @@ fn la_celda_muestra_el_cambio_pendiente() {
     assert_eq!(grid.shown(cell(0, 2)), Shown::Value("r0c2"));
     assert_eq!(grid.stored(0, 1), Some("r0c1"), "el filtro usa lo guardado");
     assert_eq!(grid.edit_text(cell(1, 1)), "", "NULL se edita como vacío");
+}
+
+#[test]
+fn se_resalta_el_valor_que_muestra_el_cursor() {
+    let mut f = Fixture::new(2);
+    let data = f.view.table_data.as_mut().unwrap();
+    data.rows[0][2] = Some(String::new());
+    data.rows[0][3] = None;
+    f.view.pending_edits.push(PendingEdit {
+        row_idx: 1,
+        col_idx: 1,
+        new_value: "nuevo".into(),
+        is_null: false,
+    });
+    f.view.pending_inserts.push(PendingInsert {
+        values: vec![InsertValue::Default; COLS],
+        auto_cols: vec![false; COLS],
+    });
+    let data = f.view.table_data.as_ref().unwrap();
+    let grid = Grid {
+        id: egui::Id::unique("test"),
+        data,
+        column_info: &f.column_info,
+        sorts: &[],
+        pending_edits: &f.view.pending_edits,
+        pending_deletes: &f.view.pending_deletes,
+        pending_inserts: &f.view.pending_inserts,
+        editable: true,
+        keyed: true,
+        queryable: true,
+        engine: Engine::Mysql,
+        pager: None,
+    };
+    let at = |row, col| Some(CellRef { row, col });
+    let existing = RowRef::Existing;
+    assert_eq!(grid.highlighted_value(None), None);
+    assert_eq!(grid.highlighted_value(at(existing(0), 1)), Some("r0c1"));
+    assert_eq!(
+        grid.highlighted_value(at(existing(1), 1)),
+        Some("nuevo"),
+        "lo que se ve, con el cambio pendiente"
+    );
+    assert_eq!(grid.highlighted_value(at(existing(0), 2)), None, "vacío");
+    assert_eq!(grid.highlighted_value(at(existing(0), 3)), None, "NULL");
+    assert_eq!(
+        grid.highlighted_value(at(RowRef::Insert(0), 1)),
+        None,
+        "DEFAULT de una fila nueva"
+    );
 }
 
 impl Fixture {

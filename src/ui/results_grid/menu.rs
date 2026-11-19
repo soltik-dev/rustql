@@ -4,7 +4,6 @@
 use eframe::egui;
 
 use super::{CellRef, EditingCell, Grid, GridAction, GridSelection, RowRef, Shown};
-use crate::db::{escape_sql, quote_ident};
 use crate::settings::CopyFormat;
 use crate::ui::icons::{CLOCK, CLONE, COPY, EDIT, PLUS, SEARCH, TRASH, UNDO};
 use crate::ui::{CMD, ellipsize, theme};
@@ -125,19 +124,19 @@ pub(super) fn cell(
     {
         ui.separator();
         let col_name = &g.data.columns[col];
-        let esc_col = quote_ident(col_name);
+        let esc_col = g.engine.quote_ident(col_name);
         let filter = |sql_fragment: String| Some(GridAction::FilterBy { sql_fragment });
         if let Some(value) = g.stored(row, col) {
             let display = ellipsize(value, 22);
-            let escaped = escape_sql(value);
+            let literal = g.engine.literal(value);
             if item(ui, format!("{SEARCH}  = '{display}'")) {
-                action = filter(format!("{esc_col} = '{escaped}'"));
+                action = filter(format!("{esc_col} = {literal}"));
             }
             if item(ui, format!("{SEARCH}  ≠ '{display}'")) {
-                action = filter(format!("{esc_col} != '{escaped}'"));
+                action = filter(format!("{esc_col} != {literal}"));
             }
             if item(ui, format!("{SEARCH}  LIKE '%{display}%'")) {
-                action = filter(format!("{esc_col} LIKE '%{escaped}%'"));
+                action = filter(g.engine.like(col_name, &format!("%{value}%")));
             }
         }
         if item(ui, format!("{SEARCH}  IS NULL ({col_name})")) {

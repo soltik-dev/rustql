@@ -24,9 +24,9 @@ pub use self::state::{
     CellRef, EditingCell, GridAction, GridSelection, InsertValue, PendingEdit, PendingInsert,
     RowRef, SortDir, SortSpec, TableViewState,
 };
-use crate::db::{ColumnInfo, QueryResult};
+use crate::db::{ColumnInfo, Engine, QueryResult, TableKind};
 use crate::settings::CopyFormat;
-use crate::ui::icons::PLUS;
+use crate::ui::icons::{PLUS, VIEW};
 use crate::ui::{CMD, theme};
 
 // ── Lo que el grid dibuja ────────────────────────────────────────────────────
@@ -49,6 +49,8 @@ struct Grid<'a> {
     /// Los datos son los de una tabla: se puede ordenar y filtrar relanzando
     /// su consulta.
     queryable: bool,
+    /// Motor de la conexión: los filtros del menú se escriben en su dialecto.
+    engine: Engine,
     /// Página de la tabla que se muestra, si los datos van por páginas.
     pager: Option<Pager>,
 }
@@ -146,6 +148,16 @@ impl<'a> Grid<'a> {
         }
     }
 
+    /// Valor que se resalta en las demás celdas que lo muestran: el de la
+    /// celda del cursor, salvo que esté vacía, sea NULL o sea el DEFAULT o
+    /// AUTO de una fila nueva (no son un valor que buscar).
+    fn highlighted_value(&self, cursor: Option<CellRef>) -> Option<&'a str> {
+        match self.shown(cursor?) {
+            Shown::Value(v) if !v.is_empty() => Some(v),
+            _ => None,
+        }
+    }
+
     /// Texto con el que arranca el editor de la celda: NULL y DEFAULT se
     /// editan como texto vacío.
     fn edit_text(&self, cell: CellRef) -> String {
@@ -214,6 +226,8 @@ pub fn show(
     selected_table: Option<(&str, &str)>,
     view: &mut TableViewState,
     column_info: &[ColumnInfo],
+    engine: Engine,
+    kind: TableKind,
     busy: bool,
 ) -> GridAction {
     let Some((db, table)) = selected_table else {
@@ -242,7 +256,7 @@ pub fn show(
 
     // Sin la estructura (aún cargando) se supone que hay clave: si no la
     // hay, se sabrá antes de que dé tiempo a guardar nada
-    let keyed = column_info.is_empty() || column_info.iter().any(|c| c.column_key == "PRI");
+    let keyed = column_info.is_empty() || column_info.iter().any(ColumnInfo::is_primary);
     let pager = Pager {
         page: view.page,
         page_size: view.page_size,
@@ -255,6 +269,7 @@ pub fn show(
         busy,
         pager,
         keyed,
+        kind,
     };
     let bar_action = info_bar(ui, &bar);
     ui.separator();
@@ -272,9 +287,11 @@ pub fn show(
         pending_edits: &view.pending_edits,
         pending_deletes: &view.pending_deletes,
         pending_inserts: &view.pending_inserts,
-        editable: !busy,
+        // Una vista se ve, se ordena y se filtra, pero no se edita aquí
+        editable: !busy && !kind.is_view(),
         keyed,
         queryable: true,
+        engine,
         // Mientras carga, la página que se ve ya no es la pedida
         pager: (!busy).then_some(pager),
     };
@@ -312,6 +329,7 @@ pub fn show_read_only(
         editable: false,
         keyed: false,
         queryable: false,
+        engine: Engine::default(),
         pager: None,
     };
     let mut editing = None;
@@ -326,10 +344,17 @@ pub fn copy_rows(
     rows: &BTreeSet<usize>,
     fmt: &CopyFormat,
     table: Option<&str>,
+    engine: Engine,
 ) -> usize {
     let rows: Vec<&Vec<Option<String>>> = rows.iter().filter_map(|&i| data.rows.get(i)).collect();
     if !rows.is_empty() {
-        ctx.copy_text(format_rows_for_copy(&data.columns, &rows, fmt, table));
+        ctx.copy_text(format_rows_for_copy(
+            &data.columns,
+            &rows,
+            fmt,
+            table,
+            engine,
+        ));
     }
     rows.len()
 }
@@ -382,6 +407,7 @@ struct InfoBar<'a> {
     busy: bool,
     pager: Pager,
     keyed: bool,
+    kind: TableKind,
 }
 
 /// Nombre de la tabla, número de filas, botón de fila nueva y la ordenación
@@ -444,6 +470,16 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             ui.separator();
             ui.spinner();
             ui.label("Cargando…");
+        } else if bar.kind.is_view() {
+            // Sin datos propios: ni filas nuevas ni el aviso de la clave
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!("{VIEW} Vista · solo lectura")).color(p.text_muted),
+            )
+            .on_hover_text(
+                "Los datos de una vista son los de sus tablas: se editan en ellas.\n\
+                     Su definición se abre desde el menú de la vista en el árbol.",
+            );
         } else if !data.columns.is_empty()
             && ui
                 .small_button(format!("{PLUS} Fila"))
@@ -453,7 +489,7 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             // A la vista aunque no haya filas sobre las que abrir el menú
             action = GridAction::InsertRow;
         }
-        if !bar.keyed {
+        if !bar.keyed && !bar.kind.is_view() {
             // Antes de que alguien edite para descubrirlo al guardar
             ui.separator();
             ui.label(egui::RichText::new("⚠ Sin clave primaria").color(p.warning))

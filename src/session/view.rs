@@ -6,7 +6,7 @@ use eframe::egui;
 use super::schema::show_loading;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::loadable::Loadable;
-use crate::ui::connection_panel::SaveProfile;
+use crate::ui::connection_panel::{FormView, SaveProfile};
 use crate::ui::db_info::DbInfoAction;
 use crate::ui::filter_bar::FilterAction;
 use crate::ui::results_grid::{ApplyBarAction, GridAction};
@@ -27,6 +27,7 @@ pub(super) struct FrameSignals {
     pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
     pub profile_selected: Option<usize>,
+    pub load_databases: bool,
     // Conectado
     pub sidebar: SidebarOutput,
     pub tab_bar: TabBarResult,
@@ -96,14 +97,18 @@ impl Session {
             ui.push_id(sid, |ui| {
                 let result = connection_panel::show_form(
                     ui,
-                    &mut self.params,
-                    &mut self.port_str,
-                    &self.error_message,
-                    &mut self.profile_name,
-                    &mut self.save_password,
-                    &mut self.color,
-                    &self.selected_profile_idx,
+                    FormView {
+                        params: &mut self.params,
+                        port_str: &mut self.port_str,
+                        error_message: &self.error_message,
+                        profile_name: &mut self.profile_name,
+                        save_password: &mut self.save_password,
+                        color: &mut self.color,
+                        selected_idx: self.selected_profile_idx,
+                        databases: &self.db_picker.list,
+                    },
                 );
+                signals.load_databases = result.load_databases;
                 signals.connect |= result.connect;
                 signals.save_profile = result.save_profile;
                 signals.delete_profile = result.delete_profile;
@@ -184,11 +189,13 @@ impl Session {
                         let view = sidebar::SidebarView {
                             databases: &self.schema.databases,
                             tables: &self.schema.tables_cache,
+                            kinds: &self.schema.kinds,
                             selected_db: sel_db,
                             selected_table: sel_table,
                             favorites: &sh.settings.fav_tables,
                             server_name: &self.title,
                             conn_color,
+                            single_database: self.params.only_database().is_some(),
                         };
                         sidebar::show(
                             ui,
@@ -295,6 +302,10 @@ impl Session {
                         selected_table,
                         &mut self.table_view,
                         col_info_slice,
+                        self.params.engine,
+                        selected_table
+                            .map(|(db, table)| self.schema.kind(db, table))
+                            .unwrap_or_default(),
                         // Con query en curso: spinner en el grid
                         running,
                     );
@@ -304,7 +315,12 @@ impl Session {
                 }
 
                 ActiveTab::Servidor => match &self.schema.databases_info {
-                    Loadable::Ready(dbs) => server_info::show(ui, &self.params.host, dbs),
+                    Loadable::Ready(dbs) => {
+                        let tables = &self.schema.tables_cache;
+                        server_info::show(ui, &self.params.host, dbs, |db| {
+                            tables.get(db).and_then(Loadable::ready).map(Vec::len)
+                        });
+                    }
                     other => show_loading(ui, other),
                 },
 
@@ -343,7 +359,13 @@ impl Session {
                     if let Some(tab) = self.sql_tabs.get_mut(tab_idx) {
                         let databases =
                             self.schema.databases.ready().map_or(&[][..], Vec::as_slice);
-                        signals.sql = sql_editor::show(ui, tab, ctrl_enter || f9, databases);
+                        signals.sql = sql_editor::show(
+                            ui,
+                            tab,
+                            ctrl_enter || f9,
+                            databases,
+                            self.params.engine,
+                        );
                     }
                 }
             });

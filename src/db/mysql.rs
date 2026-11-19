@@ -2,21 +2,46 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mysql::{
-    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Value,
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, SslOpts, Value,
     consts::CapabilityFlags,
     prelude::{Protocol, Queryable},
 };
 
 use super::{
-    CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, QUERY_CANCELLED,
-    QueryResult, Statement, TableInfo, qualified, quote_ident, validate_charset,
+    CancelFlag, ColumnInfo, ConnectionParams, DatabaseInfo, DbBackend, DbResult, Engine,
+    QUERY_CANCELLED, QueryResult, Security, Statement, TableEntry, TableInfo, TableKind, TlsMode,
+    tls, validate_charset,
 };
+
+// El dialecto de este backend, para él y para la exportación
+pub(super) fn quote_ident(s: &str) -> String {
+    Engine::Mysql.quote_ident(s)
+}
+
+pub(super) fn qualified(db: &str, table: &str) -> String {
+    Engine::Mysql.qualified(db, table)
+}
+
+pub(super) fn literal(s: &str) -> String {
+    Engine::Mysql.literal(s)
+}
 
 /// ER_QUERY_INTERRUPTED: la sentencia se interrumpió con KILL QUERY.
 const ER_QUERY_INTERRUPTED: u16 = 1317;
 
 fn is_interrupted(e: &mysql::Error) -> bool {
     matches!(e, mysql::Error::MySqlError(e) if e.code == ER_QUERY_INTERRUPTED)
+}
+
+/// Tabla del árbol a partir de su TABLE_TYPE: «VIEW» y «SYSTEM VIEW» son
+/// vistas; lo demás (tablas, secuencias de MariaDB) se trata como tabla.
+fn table_entry(name: String, table_type: &str) -> TableEntry {
+    let kind = if table_type.contains("VIEW") {
+        TableKind::View
+    } else {
+        TableKind::Table
+    };
+    TableEntry { name, kind }
 }
 
 fn value_to_string(v: Value) -> Option<String> {
@@ -34,6 +59,27 @@ fn value_to_string(v: Value) -> Option<String> {
             let sign = if neg { "-" } else { "" };
             Some(format!("{sign}{days}d {h:02}:{m:02}:{s:02}"))
         }
+    }
+}
+
+/// Un valor leído del servidor, escrito como literal SQL. Lo que no es
+/// texto válido (el contenido de un BLOB) va en hexadecimal: como cadena se
+/// estropearía.
+pub(super) fn sql_literal(v: Value) -> String {
+    match v {
+        Value::NULL => "NULL".into(),
+        Value::Bytes(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => literal(&text),
+            Err(not_text) => {
+                let hex: String = not_text
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect();
+                format!("0x{hex}")
+            }
+        },
+        other => value_to_string(other).map_or("NULL".into(), |text| literal(&text)),
     }
 }
 
@@ -88,6 +134,11 @@ fn col(row: &[Option<String>], i: usize) -> String {
 pub struct MysqlBackend {
     pool: Pool,
     opts: Opts,
+    security: Security,
+    /// Fichero con las autoridades con las que se verifica al servidor.
+    _authorities: Option<tls::AuthorityBundle>,
+    /// La conexión se limita a esta BBDD: es la única que se lista.
+    only_database: Option<String>,
     /// Conexión propia del editor SQL, fuera del pool: el pool resetea cada
     /// conexión al devolverla (COM_RESET_CONNECTION), lo que deshace
     /// transacciones, variables y tablas temporales entre ejecuciones.
@@ -112,33 +163,85 @@ impl MysqlBackend {
         }
         let password = params.resolve_password()?;
         on_status("Estableciendo conexión TCP...");
-        // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
-        // max:4 deja que los trabajos en segundo plano (datos, metadatos,
-        // escrituras) no esperen unos a otros; el editor SQL va aparte.
-        let pool_constraints = PoolConstraints::new(0, 4).unwrap();
-        let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
-        let opts: Opts = OptsBuilder::new()
-            .ip_or_hostname(Some(params.host.as_str()))
-            .tcp_port(params.port)
-            .user(Some(params.user.as_str()))
-            .pass(Some(password.as_str()))
-            // Filas afectadas = filas encontradas por el WHERE, aunque el
-            // UPDATE las deje como estaban: así se distingue «ya tenía ese
-            // valor» de «la fila no existe» (ver execute_transaction).
-            .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS)
-            .pool_opts(pool_opts)
-            .into();
-
-        let pool = Pool::new(opts.clone()).map_err(|e| format!("Error de conexión: {e}"))?;
+        tls::install_provider();
+        let strict = params.tls != TlsMode::Prefer;
+        // Al verificar: las autoridades del sistema y la del fichero de CA,
+        // juntas en un fichero (el crate solo admite uno, y ya confía en las
+        // públicas). Vive lo que la conexión: se lee en cada conexión nueva
+        let authorities = match params.tls {
+            TlsMode::Verify => tls::AuthorityBundle::create(params.ca_file())?,
+            _ => None,
+        };
+        let build = |with_tls: bool| -> Opts {
+            // min:0 evita crear 10 conexiones en paralelo al arrancar (default min:10).
+            // max:4 deja que los trabajos en segundo plano (datos, metadatos,
+            // escrituras) no esperen unos a otros; el editor SQL va aparte.
+            let pool_constraints = PoolConstraints::new(0, 4).unwrap();
+            let pool_opts = PoolOpts::default().with_constraints(pool_constraints);
+            let any_certificate = params.tls.accepts_any_certificate();
+            let ca_file = authorities.as_ref().map(|a| a.path().to_path_buf());
+            let ssl = SslOpts::default()
+                .with_danger_accept_invalid_certs(any_certificate)
+                .with_danger_skip_domain_validation(any_certificate)
+                .with_root_cert_path(ca_file);
+            OptsBuilder::new()
+                .ip_or_hostname(Some(params.host.as_str()))
+                .tcp_port(params.port)
+                .user(Some(params.user.as_str()))
+                .pass(Some(password.as_str()))
+                // BBDD por defecto de la conexión: si no existe o el usuario no
+                // puede entrar, lo dice el servidor al conectar
+                .db_name(params.only_database())
+                // Filas afectadas = filas encontradas por el WHERE, aunque el
+                // UPDATE las deje como estaban: así se distingue «ya tenía ese
+                // valor» de «la fila no existe» (ver execute_transaction).
+                .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS)
+                .ssl_opts(with_tls.then_some(ssl))
+                // En local el crate cambia la conexión TCP por el socket del
+                // servidor, que no va cifrado (ni lo necesita). Si se exige
+                // TLS, la conexión se queda en la que lo lleva
+                .prefer_socket(!strict)
+                .pool_opts(pool_opts)
+                .into()
+        };
+        // Abre el pool y comprueba que se puede entrar
+        let open = |opts: Opts| -> mysql::Result<(Pool, Opts)> {
+            let pool = Pool::new(opts.clone())?;
+            pool.get_conn()?;
+            Ok((pool, opts))
+        };
 
         on_status("Autenticando...");
-        pool.get_conn()
-            .map_err(|e| format!("No se pudo conectar: {e}"))?;
+        let (pool, opts) = match open(build(true)) {
+            // «Cifrar si se puede»: si no se puede (el servidor no ofrece TLS
+            // o solo versiones antiguas), sin cifrar. Un error del servidor
+            // (contraseña, permisos) llega ya con TLS: no es de cifrado
+            Err(e) if !strict && !matches!(e, mysql::Error::MySqlError(_)) => open(build(false)),
+            result => result,
+        }
+        .map_err(|e| {
+            let error = e.to_string();
+            format!(
+                "No se pudo conectar: {error}{}",
+                tls::hint(params.tls, &error)
+            )
+        })?;
+
+        // Lo que dice el servidor de la conexión que se acaba de abrir (en
+        // local el crate puede haberla cambiado por el socket, sin TLS)
+        let cipher: Option<(String, String)> = pool
+            .get_conn()
+            .and_then(|mut conn| conn.query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'"))
+            .unwrap_or_default();
+        let encrypted = cipher.is_some_and(|(_, cipher)| !cipher.is_empty());
 
         on_status("Conexión establecida.");
         Ok(Self {
             pool,
             opts,
+            security: Security::of(encrypted, &params.host),
+            _authorities: authorities,
+            only_database: params.only_database().map(str::to_string),
             session: Arc::default(),
             session_running: Mutex::default(),
             session_killed: AtomicBool::new(false),
@@ -165,29 +268,69 @@ impl MysqlBackend {
 }
 
 impl DbBackend for MysqlBackend {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+
+    fn security(&self) -> Security {
+        self.security
+    }
+
     fn list_databases(&self) -> DbResult<Vec<String>> {
+        if let Some(only) = &self.only_database {
+            return Ok(vec![only.clone()]);
+        }
         self.conn()?
             .query("SHOW DATABASES")
             .map_err(|e| format!("Error en query: {e}"))
     }
 
-    fn list_tables(&self, database: &str) -> DbResult<Vec<String>> {
-        let query = format!("SHOW TABLES FROM {}", quote_ident(database));
-        self.conn()?
+    fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>> {
+        // Con su tipo: «BASE TABLE», «VIEW»…
+        let query = format!("SHOW FULL TABLES FROM {}", quote_ident(database));
+        let rows: Vec<(String, String)> = self
+            .conn()?
             .query(query)
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| format!("Error en query: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, table_type)| table_entry(name, &table_type))
+            .collect())
     }
 
-    fn list_all_tables(&self) -> DbResult<Vec<(String, String)>> {
-        self.conn()?
-            .query(
-                "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
+    fn list_all_tables(&self) -> DbResult<Vec<(String, TableEntry)>> {
+        // Sin BBDD a la que limitarse, el filtro no descarta ninguna
+        let rows: Vec<(String, String, String)> = self
+            .conn()?
+            .exec(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES \
+                 WHERE ? IS NULL OR TABLE_SCHEMA = ? \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME",
+                (&self.only_database, &self.only_database),
             )
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| format!("Error en query: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(db, name, table_type)| (db, table_entry(name, &table_type)))
+            .collect())
     }
 
-    fn execute_query(&self, sql: &str) -> DbResult<QueryResult> {
+    fn view_definition(&self, db: &str, view: &str) -> DbResult<String> {
+        let sql = "SELECT VIEW_DEFINITION FROM information_schema.VIEWS \
+                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?";
+        let result = self.query_with(sql, vec![Some(db.into()), Some(view.into())])?;
+        let definition = result
+            .rows
+            .first()
+            .and_then(|row| row[0].clone())
+            .ok_or_else(|| format!("No se encuentra la definición de la vista «{view}»."))?;
+        Ok(format!(
+            "CREATE OR REPLACE VIEW {} AS\n{definition}",
+            qualified(db, view)
+        ))
+    }
+
+    fn execute_query(&self, _db: Option<&str>, sql: &str) -> DbResult<QueryResult> {
         let mut conn = self.conn()?;
         conn.query_iter(sql)
             .and_then(|set| read_result(set, usize::MAX))
@@ -268,7 +411,7 @@ impl DbBackend for MysqlBackend {
             .map_err(|e| format!("No se pudo cancelar la consulta: {e}"))
     }
 
-    fn execute_write(&self, sql: &str) -> DbResult<u64> {
+    fn execute_write(&self, _db: Option<&str>, sql: &str) -> DbResult<u64> {
         let mut conn = self.conn()?;
         conn.query_drop(sql)
             .map_err(|e| format!("Error en escritura: {e}"))?;
@@ -283,16 +426,18 @@ impl DbBackend for MysqlBackend {
                           COALESCE(SUM(t.DATA_LENGTH + COALESCE(t.INDEX_LENGTH,0)), 0) \
                    FROM information_schema.SCHEMATA s \
                    LEFT JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = s.SCHEMA_NAME \
+                   WHERE ? IS NULL OR s.SCHEMA_NAME = ? \
                    GROUP BY s.SCHEMA_NAME, s.DEFAULT_CHARACTER_SET_NAME, s.DEFAULT_COLLATION_NAME \
                    ORDER BY s.SCHEMA_NAME";
-        let r = self.execute_query(sql)?;
+        let only = self.only_database.clone();
+        let r = self.query_with(sql, vec![only.clone(), only])?;
         Ok(r.rows
             .iter()
             .map(|row| DatabaseInfo {
                 name: col(row, 0),
                 charset: col(row, 1),
                 collation: col(row, 2),
-                table_count: col(row, 3).parse().unwrap_or(0),
+                table_count: col(row, 3).parse().ok(),
                 size_bytes: col(row, 4).parse().unwrap_or(0),
             })
             .collect())
@@ -330,6 +475,7 @@ impl DbBackend for MysqlBackend {
             .iter()
             .map(|row| {
                 let default_raw = col(row, 3);
+                let extra = col(row, 5);
                 ColumnInfo {
                     name: col(row, 0),
                     col_type: col(row, 1),
@@ -340,7 +486,8 @@ impl DbBackend for MysqlBackend {
                         Some(default_raw)
                     },
                     column_key: col(row, 4),
-                    extra: col(row, 5),
+                    is_auto: extra.contains("auto_increment"),
+                    extra,
                 }
             })
             .collect())
@@ -353,25 +500,25 @@ impl DbBackend for MysqlBackend {
             quote_ident(name),
             charset
         );
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
     fn drop_database(&self, name: &str) -> DbResult<()> {
         let sql = format!("DROP DATABASE {}", quote_ident(name));
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
-    fn drop_table(&self, db: &str, table: &str) -> DbResult<()> {
-        let sql = format!("DROP TABLE {}", qualified(db, table));
-        self.execute_write(&sql).map(|_| ())
+    fn drop_table(&self, db: &str, table: &str, kind: TableKind) -> DbResult<()> {
+        let sql = Engine::Mysql.drop_table(db, table, kind);
+        self.execute_write(None, &sql).map(|_| ())
     }
 
     fn truncate_table(&self, db: &str, table: &str) -> DbResult<()> {
         let sql = format!("TRUNCATE TABLE {}", qualified(db, table));
-        self.execute_write(&sql).map(|_| ())
+        self.execute_write(None, &sql).map(|_| ())
     }
 
-    fn execute_transaction(&self, stmts: &[Statement]) -> DbResult<()> {
+    fn execute_transaction(&self, _db: Option<&str>, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
             .map_err(|e| format!("Error iniciando transacción: {e}"))?;
@@ -409,22 +556,31 @@ mod tests {
         // Nombres con comilla y barra: con el escape a mano eran frágiles
         let db = "rustql_test_meta'\\x";
         let qdb = quote_ident(db);
-        b.execute_write(&format!("DROP DATABASE IF EXISTS {qdb}"))
+        b.execute_write(None, &format!("DROP DATABASE IF EXISTS {qdb}"))
             .unwrap();
-        b.execute_write(&format!("CREATE DATABASE {qdb}")).unwrap();
-        b.execute_write(&format!(
-            "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
+        b.execute_write(None, &format!("CREATE DATABASE {qdb}"))
+            .unwrap();
+        b.execute_write(
+            None,
+            &format!(
+                "CREATE TABLE {qdb}.t (id INT AUTO_INCREMENT PRIMARY KEY, \
              v VARCHAR(10) NOT NULL DEFAULT 'x', n INT NULL)"
-        ))
+            ),
+        )
         .unwrap();
-        b.execute_write(&format!("INSERT INTO {qdb}.t (v) VALUES ('a'), ('b')"))
+        b.execute_write(
+            None,
+            &format!("INSERT INTO {qdb}.t (v) VALUES ('a'), ('b')"),
+        )
+        .unwrap();
+        b.execute_write(None, &format!("ANALYZE TABLE {qdb}.t"))
             .unwrap();
-        b.execute_write(&format!("ANALYZE TABLE {qdb}.t")).unwrap();
 
         let tables = b.get_tables_info(db);
         let columns = b.get_columns_info(db, "t");
         let all = b.list_all_tables();
-        b.execute_write(&format!("DROP DATABASE {qdb}")).unwrap();
+        b.execute_write(None, &format!("DROP DATABASE {qdb}"))
+            .unwrap();
 
         let tables = tables.unwrap();
         assert_eq!(tables.len(), 1);
@@ -434,24 +590,121 @@ mod tests {
         let names: Vec<_> = columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["id", "v", "n"]);
         assert!(columns[0].extra.contains("auto_increment"));
+        assert!(columns[0].is_auto && !columns[1].is_auto);
         assert!(!columns[1].is_nullable && columns[2].is_nullable);
-        assert_eq!(columns[0].column_key, "PRI");
-        assert!(all.unwrap().contains(&(db.to_string(), "t".to_string())));
+        assert!(columns[0].is_primary() && !columns[1].is_primary());
+        assert!(all.unwrap().contains(&(db.to_string(), "t".into())));
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
+    fn la_conexion_limitada_a_una_bbdd_solo_ensena_esa() {
+        let all = test_server::backend();
+        all.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_only")
+            .unwrap();
+        all.execute_write(None, "CREATE DATABASE rustql_test_only")
+            .unwrap();
+        all.execute_write(None, "CREATE TABLE rustql_test_only.t (id INT)")
+            .unwrap();
+        let params = ConnectionParams {
+            database: " rustql_test_only ".into(),
+            ..test_server::params()
+        };
+        let only = MysqlBackend::connect_with_progress(&params, |_| {}).unwrap();
+
+        let databases = only.list_databases();
+        let tables = only.list_all_tables();
+        let info = only.get_databases_info();
+        // Es la BBDD por defecto: las consultas no necesitan nombrarla
+        let unqualified = only.execute_query(None, "SELECT COUNT(*) FROM t");
+        // El botón de elegir del formulario lista todas, haya o no una puesta
+        let picker = crate::db::list_server_databases(&params);
+        let missing = MysqlBackend::connect_with_progress(
+            &ConnectionParams {
+                database: "rustql_test_no_existe".into(),
+                ..test_server::params()
+            },
+            |_| {},
+        );
+        all.execute_write(None, "DROP DATABASE rustql_test_only")
+            .unwrap();
+
+        assert_eq!(databases.unwrap(), ["rustql_test_only"]);
+        assert_eq!(
+            tables.unwrap(),
+            [("rustql_test_only".to_string(), "t".into())]
+        );
+        let info = info.unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(
+            (info[0].name.as_str(), info[0].table_count),
+            ("rustql_test_only", Some(1))
+        );
+        assert_eq!(unqualified.unwrap().rows, [[Some("0".to_string())]]);
+        let picker = picker.unwrap();
+        assert!(picker.contains(&"rustql_test_only".to_string()));
+        assert!(picker.contains(&"information_schema".to_string()));
+        let err = missing.err().expect("no existe");
+        assert!(err.contains("rustql_test_no_existe"), "{err}");
+    }
+
+    #[test]
+    #[ignore = "necesita RUSTQL_TEST_MYSQL y RUSTQL_TEST_CA"]
+    fn niveles_de_seguridad_de_la_conexion() {
+        let connect = |tls, ca| {
+            MysqlBackend::connect_with_progress(
+                &test_server::with_tls(test_server::params(), tls, ca),
+                |_| {},
+            )
+        };
+        let cipher = |b: &MysqlBackend| {
+            let status = b.execute_query(None, "SHOW SESSION STATUS LIKE 'Ssl_cipher'");
+            status.unwrap().rows[0][1].clone().unwrap_or_default()
+        };
+
+        // Por defecto: entra, cifre o no (en local el crate pasa al socket,
+        // que no va cifrado pero tampoco sale del equipo)
+        let preferred = connect(TlsMode::Prefer, false).unwrap();
+        assert_ne!(preferred.security(), Security::Plain);
+        // Exigir: cifrada, sin mirar el certificado (que es de una CA propia)
+        let required = connect(TlsMode::Require, false).unwrap();
+        assert_ne!(cipher(&required), "", "la conexión va por TLS");
+        assert_eq!(required.security(), Security::Encrypted);
+        // Verificar sin decir qué autoridad lo firma: no se conoce
+        let unknown = connect(TlsMode::Verify, false)
+            .err()
+            .expect("CA desconocida");
+        assert!(unknown.contains("fichero de CA"), "{unknown}");
+        // Con su CA, el certificado vale (y es de 127.0.0.1)
+        let verified = connect(TlsMode::Verify, true).unwrap();
+        assert_ne!(cipher(&verified), "");
+        // La sesión del editor usa la misma conexión segura
+        let run = verified.execute_in_session(
+            None,
+            "SHOW SESSION STATUS LIKE 'Ssl_cipher'",
+            10,
+            &CancelFlag::default(),
+        );
+        assert_ne!(run.unwrap().rows[0][1], Some(String::new()));
     }
 
     #[test]
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn una_consulta_sin_filas_conserva_sus_columnas() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_empty")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_empty")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_empty")
+        b.execute_write(None, "CREATE DATABASE rustql_test_empty")
             .unwrap();
-        b.execute_write("CREATE TABLE rustql_test_empty.t (id INT PRIMARY KEY, v VARCHAR(10))")
+        b.execute_write(
+            None,
+            "CREATE TABLE rustql_test_empty.t (id INT PRIMARY KEY, v VARCHAR(10))",
+        )
+        .unwrap();
+        let empty = b.execute_query(None, "SELECT * FROM rustql_test_empty.t");
+        let filtered = b.execute_query(None, "SELECT v FROM rustql_test_empty.t WHERE id = 1");
+        b.execute_write(None, "DROP DATABASE rustql_test_empty")
             .unwrap();
-        let empty = b.execute_query("SELECT * FROM rustql_test_empty.t");
-        let filtered = b.execute_query("SELECT v FROM rustql_test_empty.t WHERE id = 1");
-        b.execute_write("DROP DATABASE rustql_test_empty").unwrap();
 
         // Sin las columnas, el grid no puede mostrar la cabecera ni dejar
         // insertar la primera fila
@@ -466,13 +719,20 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_transaccion_se_deshace_si_no_encuentra_la_fila() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_rows")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_rows")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_rows").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_rows.t (id INT PRIMARY KEY, v VARCHAR(10))")
+        b.execute_write(None, "CREATE DATABASE rustql_test_rows")
             .unwrap();
-        b.execute_write("INSERT INTO rustql_test_rows.t VALUES (1,'a'),(2,'b')")
-            .unwrap();
+        b.execute_write(
+            None,
+            "CREATE TABLE rustql_test_rows.t (id INT PRIMARY KEY, v VARCHAR(10))",
+        )
+        .unwrap();
+        b.execute_write(
+            None,
+            "INSERT INTO rustql_test_rows.t VALUES (1,'a'),(2,'b')",
+        )
+        .unwrap();
         let update = |v: &str, id: &str| Statement {
             sql: "UPDATE rustql_test_rows.t SET v = ? WHERE id = ?".into(),
             params: vec![Some(v.into()), Some(id.into())],
@@ -480,11 +740,12 @@ mod tests {
         };
 
         // La fila 9 no existe (otro la borró): tampoco se guarda la 1
-        let missing = b.execute_transaction(&[update("x", "1"), update("y", "9")]);
+        let missing = b.execute_transaction(None, &[update("x", "1"), update("y", "9")]);
         // Dejar una fila con el valor que ya tenía no es «no encontrada»
-        let unchanged = b.execute_transaction(&[update("b", "2")]);
-        let rows = b.execute_query("SELECT v FROM rustql_test_rows.t ORDER BY id");
-        b.execute_write("DROP DATABASE rustql_test_rows").unwrap();
+        let unchanged = b.execute_transaction(None, &[update("b", "2")]);
+        let rows = b.execute_query(None, "SELECT v FROM rustql_test_rows.t ORDER BY id");
+        b.execute_write(None, "DROP DATABASE rustql_test_rows")
+            .unwrap();
 
         let err = missing.unwrap_err();
         assert!(err.contains("encontró 0"), "{err}");
@@ -499,11 +760,11 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn la_sesion_del_editor_sobrevive_entre_ejecuciones() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_session")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_session")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_session")
+        b.execute_write(None, "CREATE DATABASE rustql_test_session")
             .unwrap();
-        b.execute_write("CREATE TABLE rustql_test_session.t (id INT)")
+        b.execute_write(None, "CREATE TABLE rustql_test_session.t (id INT)")
             .unwrap();
         let db = Some("rustql_test_session");
         let run = |sql: &str| {
@@ -512,7 +773,7 @@ mod tests {
                 .rows
         };
         let count = || {
-            b.execute_query("SELECT COUNT(*) FROM rustql_test_session.t")
+            b.execute_query(None, "SELECT COUNT(*) FROM rustql_test_session.t")
                 .unwrap()
                 .rows[0][0]
                 .clone()
@@ -535,7 +796,7 @@ mod tests {
         run("COMMIT");
         assert_eq!(count(), Some("1".into()));
 
-        b.execute_write("DROP DATABASE rustql_test_session")
+        b.execute_write(None, "DROP DATABASE rustql_test_session")
             .unwrap();
     }
 
@@ -543,13 +804,17 @@ mod tests {
     #[ignore = "necesita RUSTQL_TEST_MYSQL"]
     fn el_editor_lee_como_mucho_max_rows() {
         let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_cap")
+        b.execute_write(None, "DROP DATABASE IF EXISTS rustql_test_cap")
             .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_cap").unwrap();
-        b.execute_write("CREATE TABLE rustql_test_cap.t (id INT)")
+        b.execute_write(None, "CREATE DATABASE rustql_test_cap")
             .unwrap();
-        b.execute_write("INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)")
+        b.execute_write(None, "CREATE TABLE rustql_test_cap.t (id INT)")
             .unwrap();
+        b.execute_write(
+            None,
+            "INSERT INTO rustql_test_cap.t VALUES (1),(2),(3),(4),(5)",
+        )
+        .unwrap();
         let db = Some("rustql_test_cap");
         let run =
             |sql: &str, max_rows| b.execute_in_session(db, sql, max_rows, &CancelFlag::default());
@@ -558,7 +823,8 @@ mod tests {
         let empty = run("SELECT id AS n FROM t WHERE 1 = 0", 3);
         // Tras recortar, la sesión sigue utilizable
         let after = run("SELECT COUNT(*) FROM t", 3);
-        b.execute_write("DROP DATABASE rustql_test_cap").unwrap();
+        b.execute_write(None, "DROP DATABASE rustql_test_cap")
+            .unwrap();
 
         let capped = capped.unwrap();
         assert_eq!(capped.rows.len(), 3);

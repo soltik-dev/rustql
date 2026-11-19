@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::db::ConnectionParams;
+use crate::db::{ConnectionParams, Engine, TlsMode};
 
 /// Color identificativo de una conexión: tiñe su pestaña y su árbol del sidebar.
 /// Los presets se resuelven en theme.rs con variante clara/oscura.
@@ -52,9 +52,21 @@ pub struct ConnectionProfile {
     #[serde(default)]
     pub id: String,
     pub name: String,
+    /// Motor del servidor. Los perfiles anteriores a PostgreSQL son de MySQL.
+    #[serde(default)]
+    pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub user: String,
+    /// Base de datos a la que se limita la conexión; vacía = todas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub database: String,
+    /// Seguridad de la conexión; por defecto, cifrar si se puede.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tls: TlsMode,
+    /// Fichero de CA para verificar al servidor; vacío = autoridades públicas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tls_ca: String,
     /// La contraseña está en el llavero del sistema, bajo `id`.
     #[serde(default)]
     pub password_in_keyring: bool,
@@ -67,15 +79,43 @@ pub struct ConnectionProfile {
     pub color: Option<ConnColor>,
 }
 
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
 impl ConnectionProfile {
     pub fn to_params(&self) -> ConnectionParams {
         ConnectionParams {
+            engine: self.engine,
             host: self.host.clone(),
             port: self.port,
             user: self.user.clone(),
             password: self.password.clone().unwrap_or_default(),
             keyring_id: self.password_in_keyring.then(|| self.id.clone()),
+            database: self.database.clone(),
+            tls: self.tls,
+            tls_ca: self.tls_ca.clone(),
         }
+    }
+
+    /// A dónde conecta, en una línea: «PostgreSQL · app@db:5432 · tienda».
+    pub fn summary(&self) -> String {
+        let mut text = format!(
+            "{} · {}@{}:{}",
+            self.engine.label(),
+            self.user,
+            self.host,
+            self.port
+        );
+        if !self.database.is_empty() {
+            text.push_str(" · ");
+            text.push_str(&self.database);
+        }
+        if self.tls != TlsMode::default() {
+            text.push_str(" · ");
+            text.push_str(self.tls.label());
+        }
+        text
     }
 
     /// Tiene contraseña guardada, en el llavero o (heredada) en claro.
@@ -186,9 +226,13 @@ mod tests {
         let profile = ConnectionProfile {
             id: "abc".into(),
             name: "Prod".into(),
+            engine: Engine::Mysql,
             host: "db".into(),
             port: 3306,
             user: "app".into(),
+            database: String::new(),
+            tls: TlsMode::default(),
+            tls_ca: String::new(),
             password_in_keyring: true,
             password: None,
             color: None,
@@ -205,6 +249,43 @@ mod tests {
             ..profile
         };
         assert_eq!(sin_llavero.to_params().keyring_id, None);
+    }
+
+    #[test]
+    fn los_perfiles_anteriores_son_de_mysql() {
+        let json = r#"[{"name":"Local","host":"127.0.0.1","port":3306,"user":"root"}]"#;
+        let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(json).unwrap();
+        assert_eq!(profiles[0].to_params().engine, Engine::Mysql);
+        assert_eq!(
+            profiles[0].summary(),
+            "MySQL / MariaDB · root@127.0.0.1:3306"
+        );
+
+        profiles[0].engine = Engine::Postgres;
+        profiles[0].database = "tienda".into();
+        let json = serde_json::to_string(&profiles[0]).unwrap();
+        assert!(json.contains(r#""engine":"postgres""#), "{json}");
+        let back: ConnectionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.to_params().engine, Engine::Postgres);
+        assert_eq!(back.summary(), "PostgreSQL · root@127.0.0.1:3306 · tienda");
+    }
+
+    #[test]
+    fn la_base_de_datos_del_perfil_es_opcional() {
+        // Los perfiles anteriores no la tienen: ven todo el servidor
+        let json = r#"[{"name":"Local","host":"127.0.0.1","port":3306,"user":"root"}]"#;
+        let mut profiles: Vec<ConnectionProfile> = serde_json::from_str(json).unwrap();
+        assert_eq!(profiles[0].to_params().only_database(), None);
+        assert!(
+            !serde_json::to_string(&profiles[0])
+                .unwrap()
+                .contains("database")
+        );
+
+        profiles[0].database = "tienda".into();
+        let json = serde_json::to_string(&profiles[0]).unwrap();
+        let back: ConnectionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.to_params().only_database(), Some("tienda"));
     }
 
     #[test]

@@ -4,13 +4,23 @@ use egui_extras::{Column, TableBuilder};
 use crate::db::DatabaseInfo;
 use crate::ui::{format_bytes, theme};
 
-/// Panel "Servidor": lista de bases de datos con estadísticas.
-pub fn show(ui: &mut egui::Ui, host: &str, databases: &[DatabaseInfo]) {
+/// Panel "Servidor": lista de bases de datos con estadísticas. `known_tables`
+/// dice cuántas tablas tiene una BBDD si ya se han leído (al desplegarla en
+/// el árbol): completa el recuento que el servidor no haya podido dar.
+pub fn show(
+    ui: &mut egui::Ui,
+    host: &str,
+    databases: &[DatabaseInfo],
+    known_tables: impl Fn(&str) -> Option<usize>,
+) {
     ui.horizontal(|ui| {
         ui.strong(format!("Servidor: {host}"));
         ui.label(
-            egui::RichText::new(format!("— {} bases de datos", databases.len()))
-                .color(theme::get(ui).text_muted),
+            egui::RichText::new(match databases.len() {
+                1 => "— 1 base de datos".to_string(),
+                n => format!("— {n} bases de datos"),
+            })
+            .color(theme::get(ui).text_muted),
         );
     });
     ui.separator();
@@ -50,7 +60,11 @@ pub fn show(ui: &mut egui::Ui, host: &str, databases: &[DatabaseInfo]) {
                     ui.add(egui::Label::new(&db.collation).truncate());
                 });
                 row.col(|ui| {
-                    ui.label(db.table_count.to_string());
+                    // Hay motores que no pueden contarlas sin entrar en la BBDD
+                    match db.table_count.or_else(|| known_tables(&db.name)) {
+                        Some(count) => ui.label(count.to_string()),
+                        None => ui.label("—"),
+                    };
                 });
                 row.col(|ui| {
                     ui.label(format_bytes(db.size_bytes));

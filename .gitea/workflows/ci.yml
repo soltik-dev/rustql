@@ -43,21 +43,61 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
-      # Los tests marcados #[ignore] usan un servidor real (RUSTQL_TEST_MYSQL).
-      # Se arranca un MariaDB desechable dentro del propio contenedor.
-      - name: Tests de integración (MariaDB)
+      # Los tests marcados #[ignore] usan servidores reales (RUSTQL_TEST_MYSQL
+      # y RUSTQL_TEST_POSTGRES, con TLS). Se arrancan desechables dentro del
+      # propio contenedor.
+      - name: Tests de integración (MariaDB y PostgreSQL)
         run: |
-          apt-get install -y --no-install-recommends mariadb-server mariadb-client
+          # Sin el cluster que el paquete de PostgreSQL crea y arranca solo
+          apt-get install -y --no-install-recommends postgresql-common openssl
+          sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' \
+            /etc/postgresql-common/createcluster.conf
+          apt-get install -y --no-install-recommends \
+            mariadb-server mariadb-client postgresql
+
+          # Certificado de los dos servidores, firmado por una autoridad
+          # propia y válido para 127.0.0.1: los tests de TLS comprueban que
+          # se verifica con ella y que sin ella no se acepta
+          tls="$(mktemp -d /tmp/rustql-tls.XXXXXX)"
+          openssl req -new -x509 -days 2 -nodes -subj "/CN=RustQL CI CA" \
+            -keyout "$tls/ca.key" -out "$tls/ca.crt" 2> /dev/null
+          openssl req -new -nodes -subj "/CN=rustql-ci" \
+            -keyout "$tls/server.key" -out "$tls/server.csr" 2> /dev/null
+          printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\n' > "$tls/ext.cnf"
+          openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.crt" -CAkey "$tls/ca.key" \
+            -CAcreateserial -days 2 -extfile "$tls/ext.cnf" -out "$tls/server.crt" 2> /dev/null
+          chmod 755 "$tls" && chmod 644 "$tls"/*
+
           data="$RUNNER_TEMP/mariadb"
           mariadb-install-db --no-defaults --user=root --datadir="$data" \
             --auth-root-authentication-method=normal --skip-test-db > /dev/null
           mariadbd --no-defaults --user=root --datadir="$data" --socket="$data.sock" \
-            --port=33306 --bind-address=127.0.0.1 --skip-name-resolve &
+            --port=33306 --bind-address=127.0.0.1 --skip-name-resolve \
+            --ssl-cert="$tls/server.crt" --ssl-key="$tls/server.key" &
           for _ in $(seq 30); do
             [ -S "$data.sock" ] && break
             sleep 1
           done
-          mariadb --no-defaults -S "$data.sock" -uroot \
+          mariadb --no-defaults --skip-ssl -S "$data.sock" -uroot \
             -e "CREATE USER 'ci'@'127.0.0.1' IDENTIFIED BY 'ci'; GRANT ALL ON *.* TO 'ci'@'127.0.0.1';"
+
+          # PostgreSQL no arranca como root: va con el usuario del paquete,
+          # en un cluster propio y en otro puerto (el runner comparte la red
+          # del anfitrión, donde el 5432 puede estar ocupado).
+          pg="$(mktemp -d /tmp/rustql-pg.XXXXXX)"
+          chown postgres "$pg"
+          su postgres -c "
+            set -e
+            export PATH=\"\$(echo /usr/lib/postgresql/*/bin):\$PATH\"
+            echo ci > $pg/password
+            initdb -D $pg/data -U ci --pwfile=$pg/password --auth=scram-sha-256 > /dev/null
+            cp $tls/server.crt $tls/server.key $pg/data/
+            chmod 600 $pg/data/server.key
+            pg_ctl -D $pg/data -l $pg/log -w start \\
+              -o '-p 55432 -c listen_addresses=127.0.0.1 -c unix_socket_directories=$pg -c ssl=on'
+          "
+
+          RUSTQL_TEST_CA="$tls/ca.crt" \
           RUSTQL_TEST_MYSQL='ci:ci@127.0.0.1:33306' \
+          RUSTQL_TEST_POSTGRES='ci:ci@127.0.0.1:55432' \
             cargo test --locked -- --ignored --skip secrets

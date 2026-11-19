@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use eframe::egui;
 
 use super::{ModalAction, dialog};
+use crate::db::Engine;
 use crate::db::export::{ExportDestination, ExportEvent, ExportOptions};
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
@@ -63,6 +64,7 @@ pub enum ExportPhase {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show_export_data(
     ctx: &egui::Context,
+    engine: Engine,
     source_db: &str,
     _source_table: &Option<String>,
     tables: &mut [TableExportEntry],
@@ -90,6 +92,7 @@ pub(super) fn show_export_data(
             ExportPhase::Configuring => {
                 action = render_export_config(
                     ui,
+                    engine,
                     source_db,
                     tables,
                     databases,
@@ -135,6 +138,7 @@ pub(super) fn show_export_data(
 #[allow(clippy::too_many_arguments)]
 fn render_export_config(
     ui: &mut egui::Ui,
+    engine: Engine,
     source_db: &str,
     tables: &mut [TableExportEntry],
     databases: &[String],
@@ -329,6 +333,19 @@ fn render_export_config(
                     ui.checkbox(&mut options.include_create, "Incluir CREATE TABLE");
                     ui.checkbox(&mut options.include_data, "Incluir datos (INSERT INTO)");
                     ui.checkbox(&mut options.drop_if_exists, "DROP TABLE IF EXISTS");
+                    // Lo que no entra, donde se decide qué exportar
+                    if engine == Engine::Postgres {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Se copian tablas y vistas con sus secuencias, claves e \
+                                 índices. No disparadores, funciones, permisos ni \
+                                 particiones: para una copia completa, usa pg_dump.",
+                            )
+                            .small()
+                            .color(theme::get(ui).text_muted),
+                        );
+                    }
                 });
             });
     });

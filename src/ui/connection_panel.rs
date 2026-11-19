@@ -1,8 +1,10 @@
 use eframe::egui;
 
-use crate::db::ConnectionParams;
+use crate::db::{ConnectionParams, Engine, TlsMode};
+use crate::loadable::Loadable;
 use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::secrets;
+use crate::ui::icons::DATABASE;
 use crate::ui::theme;
 
 /// Cómo guardar el formulario como favorito.
@@ -20,6 +22,8 @@ pub struct FormResult {
     pub connect: bool,
     pub save_profile: Option<SaveProfile>,
     pub delete_profile: bool,
+    /// Se abrió la lista de BBDD: hay que leerla del servidor.
+    pub load_databases: bool,
 }
 
 /// Panel izquierdo: lista de favoritos guardados.
@@ -51,7 +55,8 @@ pub fn show_favorites(
                         color_dot(ui, profile.color);
                         ui.selectable_label(is_selected, &profile.name)
                     })
-                    .inner;
+                    .inner
+                    .on_hover_text(profile.summary());
                 if resp.clicked() {
                     clicked = Some(i);
                 }
@@ -81,65 +86,62 @@ fn color_dot(ui: &mut egui::Ui, color: Option<ConnColor>) {
     }
 }
 
+/// Lo que enseña y edita el formulario de conexión.
+pub struct FormView<'a> {
+    pub params: &'a mut ConnectionParams,
+    pub port_str: &'a mut String,
+    pub error_message: &'a Option<String>,
+    pub profile_name: &'a mut String,
+    pub save_password: &'a mut bool,
+    pub color: &'a mut Option<ConnColor>,
+    pub selected_idx: Option<usize>,
+    /// BBDD del servidor, leídas al pulsar el botón de elegir.
+    pub databases: &'a Loadable<Vec<String>>,
+}
+
 /// Panel derecho: formulario de conexión + botones de gestión.
-#[allow(clippy::too_many_arguments)]
-pub fn show_form(
-    ui: &mut egui::Ui,
-    params: &mut ConnectionParams,
-    port_str: &mut String,
-    error_message: &Option<String>,
-    profile_name: &mut String,
-    save_password: &mut bool,
-    color: &mut Option<ConnColor>,
-    selected_idx: &Option<usize>,
-) -> FormResult {
+pub fn show_form(ui: &mut egui::Ui, view: FormView<'_>) -> FormResult {
     let mut result = FormResult::default();
     let p = theme::get(ui);
 
-    ui.add_space(32.0);
-    ui.vertical_centered(|ui| {
-        ui.heading("RustQL");
-        ui.label(egui::RichText::new("Conectar a base de datos").color(p.text_muted));
-    });
-    ui.add_space(20.0);
-
-    ui.vertical_centered(|ui| {
-        ui.set_max_width(420.0);
-        egui::Frame::NONE
-            .fill(p.bg_raised)
-            .stroke(egui::Stroke::new(1.0, p.border_subtle))
-            .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
-            .inner_margin(egui::Margin::same(20))
-            .show(ui, |ui| {
-                show_form_fields(
-                    ui,
-                    params,
-                    port_str,
-                    error_message,
-                    profile_name,
-                    save_password,
-                    color,
-                    selected_idx,
-                    &mut result,
-                );
+    // Con scroll: en una ventana baja, o con el error de conexión a la vista,
+    // el formulario no cabe entero
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.add_space(32.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("RustQL");
+                ui.label(egui::RichText::new("Conectar a base de datos").color(p.text_muted));
             });
-    });
+            ui.add_space(20.0);
+
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(420.0);
+                egui::Frame::NONE
+                    .fill(p.bg_raised)
+                    .stroke(egui::Stroke::new(1.0, p.border_subtle))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
+                    .inner_margin(egui::Margin::same(20))
+                    .show(ui, |ui| show_form_fields(ui, view, &mut result));
+            });
+            ui.add_space(16.0);
+        });
 
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn show_form_fields(
-    ui: &mut egui::Ui,
-    params: &mut ConnectionParams,
-    port_str: &mut String,
-    error_message: &Option<String>,
-    profile_name: &mut String,
-    save_password: &mut bool,
-    color: &mut Option<ConnColor>,
-    selected_idx: &Option<usize>,
-    result: &mut FormResult,
-) {
+fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResult) {
+    let FormView {
+        params,
+        port_str,
+        error_message,
+        profile_name,
+        save_password,
+        color,
+        selected_idx,
+        databases,
+    } = view;
     let p = theme::get(ui);
 
     egui::Grid::new("connection_form")
@@ -147,11 +149,25 @@ fn show_form_fields(
         .spacing([16.0, 8.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
+            ui.label("Motor:");
+            ui.horizontal(|ui| {
+                for engine in Engine::ALL {
+                    let selected = params.engine == engine;
+                    if ui.selectable_label(selected, engine.label()).clicked() && !selected {
+                        switch_engine(params, port_str, engine);
+                    }
+                }
+            });
+            ui.end_row();
+
             // Enter en cualquiera de los campos de la conexión conecta
+            let mut connect = false;
+            let mut field_width = FIELD_WIDTH;
             let mut field = |ui: &mut egui::Ui, edit: egui::TextEdit<'_>| {
-                let resp = ui.add(edit.min_size(egui::vec2(220.0, 0.0)));
+                let resp = ui.add(edit.min_size(egui::vec2(FIELD_WIDTH, 0.0)));
+                field_width = resp.rect.width();
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    result.connect = true;
+                    connect = true;
                 }
             };
 
@@ -180,6 +196,65 @@ fn show_form_fields(
                     .hint_text(hint),
             );
             ui.end_row();
+
+            // El campo y su botón de elegir ocupan lo que los demás campos
+            ui.label("Base de datos:");
+            let row = egui::vec2(field_width, ui.spacing().interact_size.y);
+            let layout = egui::Layout::right_to_left(egui::Align::Center);
+            ui.allocate_ui_with_layout(row, layout, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                result.load_databases = database_picker(ui, &mut params.database, databases);
+                let edit = egui::TextEdit::singleline(&mut params.database)
+                    .hint_text("Todas")
+                    .desired_width(ui.available_width());
+                let resp = ui.add(edit);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    connect = true;
+                }
+            });
+            ui.end_row();
+
+            ui.label("Seguridad:");
+            egui::ComboBox::from_id_salt("tls_mode")
+                .selected_text(params.tls.label())
+                .width(field_width)
+                .show_ui(ui, |ui| {
+                    for mode in TlsMode::ALL {
+                        ui.selectable_value(&mut params.tls, mode, mode.label())
+                            .on_hover_text(mode.description());
+                    }
+                })
+                .response
+                .on_hover_text(params.tls.description());
+            ui.end_row();
+
+            // Solo al verificar: la autoridad que firma el certificado
+            if params.tls == TlsMode::Verify {
+                ui.label("Fichero de CA:");
+                ui.allocate_ui_with_layout(row, layout, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.button("…").on_hover_text("Elegir el fichero").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Certificados", &["pem", "crt", "cer"])
+                            .add_filter("Todos", &["*"])
+                            .pick_file()
+                    {
+                        params.tls_ca = path.to_string_lossy().to_string();
+                    }
+                    let edit = egui::TextEdit::singleline(&mut params.tls_ca)
+                        .hint_text("Las del sistema")
+                        .desired_width(ui.available_width());
+                    let resp = ui.add(edit).on_hover_text(
+                        "Certificado (PEM) de la autoridad que firma el del servidor.\n\
+                         Vacío, se confía en las autoridades instaladas en el sistema.",
+                    );
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        connect = true;
+                    }
+                });
+                ui.end_row();
+            }
+            result.connect |= connect;
 
             ui.label("");
             ui.vertical(|ui| {
@@ -250,17 +325,122 @@ fn show_form_fields(
     ui.separator();
     ui.add_space(12.0);
 
-    if let Some(err) = error_message {
-        theme::error_card(ui, err);
+    let error = error_message.as_ref().map(|err| {
+        let card = theme::error_card_response(ui, err);
         ui.add_space(8.0);
-    }
+        card
+    });
 
-    ui.vertical_centered(|ui| {
-        ui.spacing_mut().button_padding = egui::vec2(48.0, 8.0);
-        if theme::primary_button(ui, "Conectar").clicked() {
-            result.connect = true;
+    let button = ui
+        .vertical_centered(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(48.0, 8.0);
+            let button = theme::primary_button(ui, "Conectar");
+            if button.clicked() {
+                result.connect = true;
+            }
+            button
+        })
+        .inner;
+
+    // Un error nuevo se lleva a la vista (con el botón): puede haber quedado
+    // por debajo de la ventana. Solo al aparecer, para no retener el scroll
+    let seen_id = ui.scope_id().with("connection_error_seen");
+    let seen: Option<String> = ui.data(|d| d.get_temp(seen_id));
+    if seen.as_ref() != error_message.as_ref() {
+        if let Some(card) = &error {
+            ui.scroll_to_rect(card.rect.union(button.rect), None);
+        }
+        ui.data_mut(|d| match error_message {
+            Some(err) => {
+                d.insert_temp(seen_id, err.clone());
+            }
+            None => d.remove::<String>(seen_id),
+        });
+    }
+}
+
+/// Cambia el motor del formulario. El puerto y el usuario, si eran los
+/// habituales del motor anterior, pasan a ser los del nuevo.
+fn switch_engine(params: &mut ConnectionParams, port_str: &mut String, engine: Engine) {
+    let previous = params.engine;
+    if port_str.trim() == previous.default_port().to_string() {
+        *port_str = engine.default_port().to_string();
+    }
+    if params.user == previous.default_user() {
+        params.user = engine.default_user().to_string();
+    }
+    params.engine = engine;
+}
+
+/// Ancho mínimo de los campos del formulario.
+const FIELD_WIDTH: f32 = 220.0;
+
+/// Botón que despliega las BBDD del servidor para elegir una. Devuelve true
+/// al abrirse: hay que leer la lista (con las credenciales del formulario).
+fn database_picker(
+    ui: &mut egui::Ui,
+    database: &mut String,
+    databases: &Loadable<Vec<String>>,
+) -> bool {
+    let p = theme::get(ui);
+    let resp = ui
+        .button(DATABASE)
+        .on_hover_text("Elegir entre las bases de datos del servidor");
+    let popup = egui::Popup::menu(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(FIELD_WIDTH);
+    // El clic aún no se ha aplicado: si estaba cerrado, es que se abre
+    let opened = resp.clicked() && !popup.is_open();
+    // El desplegable recuerda su tamaño mientras está abierto: al cambiar lo
+    // que enseña (del «leyendo…» a la lista) hay que volver a medirlo, o la
+    // lista se queda con la altura de una línea
+    let stage = std::mem::discriminant(databases);
+    let stage_id = resp.id.with("stage");
+    let changed = ui.data_mut(|d| {
+        let previous = d.get_temp(stage_id);
+        d.insert_temp(stage_id, stage);
+        previous != Some(stage)
+    });
+    // Al abrirse, lo que hubiera es de la vez anterior (quizá de otro
+    // servidor): la lista nueva se pide en este mismo frame
+    let loading = Loadable::Loading(0);
+    let databases = if opened { &loading } else { databases };
+    popup.sizing_pass(changed && !opened).show(|ui| {
+        ui.set_min_width(FIELD_WIDTH);
+        match databases {
+            Loadable::NotLoaded | Loadable::Loading(_) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Leyendo las bases de datos…");
+                });
+            }
+            Loadable::Failed(e) => {
+                ui.set_max_width(FIELD_WIDTH + 80.0);
+                ui.add(egui::Label::new(egui::RichText::new(e).color(p.danger)).wrap());
+            }
+            Loadable::Ready(list) => {
+                if ui
+                    .selectable_label(database.trim().is_empty(), "Todas")
+                    .clicked()
+                {
+                    database.clear();
+                    ui.close();
+                }
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for name in list {
+                            if ui.selectable_label(database.trim() == name, name).clicked() {
+                                *database = name.clone();
+                                ui.close();
+                            }
+                        }
+                    });
+            }
         }
     });
+    opened
 }
 
 /// Muestras para elegir el color de la conexión: «sin color», los presets de
@@ -365,4 +545,25 @@ fn swatch(
         );
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cambiar_de_motor_propone_su_puerto_y_su_usuario() {
+        let mut params = ConnectionParams::default();
+        let mut port = params.port.to_string();
+        switch_engine(&mut params, &mut port, Engine::Postgres);
+        assert_eq!((params.engine, port.as_str()), (Engine::Postgres, "5432"));
+        assert_eq!(params.user, "postgres");
+
+        // Lo que el usuario ya había escrito no se toca
+        port = "6543".into();
+        params.user = "app".into();
+        switch_engine(&mut params, &mut port, Engine::Mysql);
+        assert_eq!((params.engine, port.as_str()), (Engine::Mysql, "6543"));
+        assert_eq!(params.user, "app");
+    }
 }

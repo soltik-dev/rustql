@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use super::jobs::JobResult;
 use super::{SelectedNode, Session, Shared};
-use crate::db::{DbBackend, DbResult, Statement, qualified};
+use crate::db::{DbBackend, DbResult, Statement};
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::ui::modals::{ModalState, Reload};
@@ -95,9 +95,11 @@ impl Session {
     pub(super) fn create_database(&mut self, name: String, charset: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, format!("CREATE DATABASE `{name}`"), || {
-                b.create_database(&name, &charset).map(|()| 0)
-            });
+            let result = logged(
+                &mut log,
+                format!("CREATE DATABASE {}", b.engine().quote_ident(&name)),
+                || b.create_database(&name, &charset).map(|()| 0),
+            );
             WriteResult {
                 write: Write::CreateDatabase { name },
                 log,
@@ -109,7 +111,7 @@ impl Session {
     pub(super) fn create_table(&mut self, db: String, name: String, sql: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, sql.clone(), || b.execute_write(&sql));
+            let result = logged(&mut log, sql.clone(), || b.execute_write(Some(&db), &sql));
             WriteResult {
                 write: Write::CreateTable { db, name },
                 log,
@@ -121,9 +123,11 @@ impl Session {
     pub(super) fn drop_database(&mut self, db: String) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, format!("DROP DATABASE `{db}`"), || {
-                b.drop_database(&db).map(|()| 0)
-            });
+            let result = logged(
+                &mut log,
+                format!("DROP DATABASE {}", b.engine().quote_ident(&db)),
+                || b.drop_database(&db).map(|()| 0),
+            );
             WriteResult {
                 write: Write::DropDatabase { db },
                 log,
@@ -132,11 +136,13 @@ impl Session {
         });
     }
 
+    /// Elimina una tabla o una vista, con la sentencia de lo que sea.
     pub(super) fn drop_table(&mut self, db: String, table: String) {
+        let kind = self.schema.kind(&db, &table);
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let result = logged(&mut log, format!("DROP TABLE `{db}`.`{table}`"), || {
-                b.drop_table(&db, &table).map(|()| 0)
+            let result = logged(&mut log, b.engine().drop_table(&db, &table, kind), || {
+                b.drop_table(&db, &table, kind).map(|()| 0)
             });
             WriteResult {
                 write: Write::DropTable { db, table },
@@ -147,14 +153,19 @@ impl Session {
     }
 
     /// Vacía `tables` de `db`; sin `tables`, todas las de la BBDD (se piden
-    /// al servidor: el árbol puede no haberlas cargado).
+    /// al servidor: el árbol puede no haberlas cargado). Las vistas no: no
+    /// tienen datos propios.
     pub(super) fn truncate(&mut self, db: String, tables: Option<Vec<String>>) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
             let tables = match tables {
                 Some(tables) => tables,
                 None => match b.list_tables(&db) {
-                    Ok(tables) => tables,
+                    Ok(tables) => tables
+                        .into_iter()
+                        .filter(|table| !table.kind.is_view())
+                        .map(|table| table.name)
+                        .collect(),
                     Err(e) => {
                         return WriteResult {
                             write: Write::Truncate {
@@ -171,7 +182,7 @@ impl Session {
             let failed = tables
                 .iter()
                 .filter_map(|table| {
-                    let label = format!("TRUNCATE TABLE {}", qualified(&db, table));
+                    let label = format!("TRUNCATE TABLE {}", b.engine().qualified(&db, table));
                     logged(&mut log, label, || b.truncate_table(&db, table).map(|()| 0))
                         .err()
                         .map(|e| format!("{table}: {e}"))
@@ -188,12 +199,15 @@ impl Session {
     pub(super) fn clone_table(&mut self, db: String, source: String, name: String, data: bool) {
         self.spawn_write(move |b| {
             let mut log = Vec::new();
-            let (src, dst) = (qualified(&db, &source), qualified(&db, &name));
-            let create = format!("CREATE TABLE {dst} LIKE {src}");
-            let mut result = logged(&mut log, create.clone(), || b.execute_write(&create));
+            let engine = b.engine();
+            let (src, dst) = (engine.qualified(&db, &source), engine.qualified(&db, &name));
+            let create = engine.create_table_like(&dst, &src);
+            let mut result = logged(&mut log, create.clone(), || {
+                b.execute_write(Some(&db), &create)
+            });
             if result.is_ok() && data {
                 let copy = format!("INSERT INTO {dst} SELECT * FROM {src}");
-                result = logged(&mut log, copy.clone(), || b.execute_write(&copy));
+                result = logged(&mut log, copy.clone(), || b.execute_write(Some(&db), &copy));
             }
             WriteResult {
                 write: Write::CloneTable { db, name },
@@ -236,7 +250,8 @@ impl Session {
             let mut log = Vec::new();
             let statements = stmts.len() as u64;
             let result = logged(&mut log, summary, || {
-                b.execute_transaction(&stmts).map(|()| statements)
+                b.execute_transaction(Some(&db), &stmts)
+                    .map(|()| statements)
             });
             WriteResult {
                 write: Write::Commit {
@@ -302,7 +317,7 @@ impl Session {
             }
             (Write::DropTable { db, table }, Ok(())) => {
                 self.on_dropped(&db, Some(&table));
-                sh.toasts.success(format!("Tabla «{db}.{table}» eliminada"));
+                sh.toasts.success(format!("«{db}.{table}» eliminada"));
             }
             (Write::DropDatabase { db }, Err(message)) => {
                 self.show_error(format!("No se pudo eliminar «{db}»"), message);

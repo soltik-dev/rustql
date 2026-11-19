@@ -1,15 +1,20 @@
+//! Exportación de tablas: a un fichero .sql, a una carpeta (un fichero por
+//! tabla), a otra BBDD del mismo servidor o a otro servidor.
+//!
+//! Cada motor sabe describir sus tablas como sentencias (`Source`, en
+//! export/mysql.rs y export/postgres.rs); aquí está lo común: a dónde van
+//! esas sentencias (`Sink`), el orden en que se ejecutan y el progreso.
+
+mod mysql;
+mod postgres;
+
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use mysql::PooledConn;
-use mysql::prelude::Queryable;
-
-use super::DbBackend;
-use super::mysql::MysqlBackend;
-use super::{ConnectionParams, escape_sql, qualified, quote_ident};
+use super::{ConnectionParams, DbResult, Engine};
 
 // ── Tipos públicos ─────────────────────────────────────────────────────────────
 
@@ -65,6 +70,9 @@ pub enum ExportEvent {
         elapsed_ms: u64,
     },
     Cancelled,
+    /// Filas copiadas desde el aviso anterior: las tablas se copian por
+    /// bloques, y una grande tarda.
+    RowsCopied(u64),
     /// Error fatal que aborta toda la exportación (conexión, fichero, etc.).
     Failed(String),
 }
@@ -83,139 +91,309 @@ pub fn spawn_export(
 ) -> Receiver<ExportEvent> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        run_export(params, source_db, tables, destination, options, cancel, tx);
+        let start = std::time::Instant::now();
+        let job = Job {
+            source_db: &source_db,
+            tables: &tables,
+            options: &options,
+            cancel: &cancel,
+            tx: &tx,
+        };
+        let result = match params.engine {
+            Engine::Mysql => mysql::run(&params, &destination, &job),
+            Engine::Postgres => postgres::run(&params, &destination, &job),
+        };
+        let _ = tx.send(match result {
+            _ if cancel.load(Ordering::Relaxed) => ExportEvent::Cancelled,
+            Ok((total_tables, total_rows)) => ExportEvent::Finished {
+                total_tables,
+                total_rows,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            },
+            Err(e) => ExportEvent::Failed(e),
+        });
     });
     rx
 }
 
-// ── Implementación interna ─────────────────────────────────────────────────────
+// ── Lo común a todos los motores ───────────────────────────────────────────────
 
-fn run_export(
-    params: ConnectionParams,
-    source_db: String,
-    tables: Vec<String>,
-    destination: ExportDestination,
-    options: ExportOptions,
-    cancel: Arc<AtomicBool>,
-    tx: Sender<ExportEvent>,
-) {
-    let start = std::time::Instant::now();
+/// Tablas exportadas y filas copiadas.
+type Totals = (usize, u64);
 
-    if let ExportDestination::SameServerDb { target_db } = &destination
-        && *target_db == source_db
-    {
-        let _ = tx.send(ExportEvent::Failed(SAME_TARGET_ERROR.into()));
-        return;
+const SAME_TARGET_ERROR: &str = "El destino es la misma base de datos del mismo servidor que el origen: \
+     la copia borraría o duplicaría sus datos. Elige otra base de datos destino.";
+
+/// Lo que se exporta y cómo se cuenta.
+struct Job<'a> {
+    source_db: &'a str,
+    tables: &'a [String],
+    options: &'a ExportOptions,
+    cancel: &'a AtomicBool,
+    tx: &'a Sender<ExportEvent>,
+}
+
+impl Job<'_> {
+    fn send(&self, event: ExportEvent) {
+        let _ = self.tx.send(event);
     }
 
-    // Conectar a la fuente
-    let backend = match MysqlBackend::connect_with_progress(&params, |_| {}) {
-        Ok(b) => b,
-        Err(e) => {
-            let _ = tx.send(ExportEvent::Failed(format!("Conexión al origen: {e}")));
-            return;
-        }
-    };
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
 
-    let result = match destination {
-        ExportDestination::SqlFile { ref path } => {
-            export_to_file(&backend, &source_db, &tables, &options, path, &cancel, &tx)
-        }
-        ExportDestination::Folder { ref path } => {
-            export_to_folder(&backend, &source_db, &tables, &options, path, &cancel, &tx)
-        }
-        ExportDestination::SameServerDb { ref target_db } => export_to_same_server_db(
-            &backend, &source_db, &tables, &options, target_db, &cancel, &tx,
-        ),
-        ExportDestination::RemoteServer {
-            ref params,
-            ref target_db,
-        } => {
-            let dest_backend = match MysqlBackend::connect_with_progress(params, |_| {}) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = tx.send(ExportEvent::Failed(format!("Conexión al destino: {e}")));
-                    return;
-                }
-            };
-            // Otro perfil (u otro nombre de host) puede llevar al mismo servidor:
-            // copiar una BBDD sobre sí misma borra (DROP) o duplica sus datos.
-            if *target_db == source_db {
-                match same_server(&backend, &dest_backend) {
-                    Ok(false) => {}
-                    Ok(true) => {
-                        let _ = tx.send(ExportEvent::Failed(SAME_TARGET_ERROR.into()));
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ExportEvent::Failed(format!(
-                            "No se pudo comprobar si el destino es el mismo servidor: {e}"
-                        )));
-                        return;
-                    }
-                }
+    /// Recorre las tablas avisando del progreso; `export` exporta una y
+    /// devuelve sus filas. Se detiene al cancelar.
+    fn for_each_table(&self, mut export: impl FnMut(&str) -> DbResult<u64>) -> Totals {
+        let (mut done, mut total_rows) = (0, 0);
+        for table in self.tables {
+            if self.cancelled() {
+                break;
             }
-            export_to_remote(
-                &backend,
-                &dest_backend,
-                &source_db,
-                &tables,
-                &options,
-                target_db,
-                &cancel,
-                &tx,
-            )
+            self.send(ExportEvent::TableStarted(table.clone()));
+            let table = table.clone();
+            match export(&table) {
+                Ok(rows) => {
+                    total_rows += rows;
+                    done += 1;
+                    self.send(ExportEvent::TableDone { table, rows });
+                }
+                Err(error) => self.send(ExportEvent::TableError { table, error }),
+            }
         }
-    };
-
-    if cancel.load(Ordering::Relaxed) {
-        let _ = tx.send(ExportEvent::Cancelled);
-        return;
-    }
-
-    match result {
-        Ok((total_tables, total_rows)) => {
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let _ = tx.send(ExportEvent::Finished {
-                total_tables,
-                total_rows,
-                elapsed_ms,
-            });
-        }
-        Err(e) => {
-            let _ = tx.send(ExportEvent::Failed(e));
-        }
+        (done, total_rows)
     }
 }
 
-/// Recorre `tables` avisando del progreso; `export` exporta una y devuelve
-/// sus filas. Se detiene al cancelar. Devuelve (tablas exportadas, filas).
-fn for_each_table(
-    tables: &[String],
-    cancel: &AtomicBool,
-    tx: &Sender<ExportEvent>,
-    mut export: impl FnMut(&str) -> Result<u64, String>,
-) -> (usize, u64) {
-    let mut total_rows = 0u64;
-    let mut done = 0usize;
-    for table in tables {
-        if cancel.load(Ordering::Relaxed) {
-            break;
+/// Lo que hay que ejecutar, y en qué momento, para recrear una tabla.
+#[derive(Default)]
+struct TableScript {
+    /// Antes de sus datos: crearla, con lo que necesite (esquema, tipos…).
+    create: Vec<String>,
+    /// Sus datos; `None` si no los tiene (una vista).
+    data: Option<TableData>,
+    /// Tras sus datos: claves, índices y el valor de sus secuencias.
+    after_data: Vec<String>,
+    /// Cuando ya están todas las tablas: lo que depende de otras (claves
+    /// foráneas, vistas).
+    finish: Vec<String>,
+}
+
+struct TableData {
+    /// Consulta que lee las filas en el origen.
+    select: String,
+    /// `INSERT INTO tabla`, sin columnas ni valores.
+    insert_into: String,
+    /// Lo que va entre la lista de columnas y la de valores.
+    values_keyword: &'static str,
+}
+
+/// Origen de una exportación: una BBDD de un motor concreto.
+trait Source {
+    fn engine(&self) -> Engine;
+    /// Sentencias que dejan una sesión (o un fichero) lista para la carga.
+    fn prelude(&self) -> Vec<String>;
+    /// Sentencias que eliminan `tables` del destino antes de crearlas, si
+    /// el motor necesita eliminarlas juntas. Si no, cada tabla se elimina
+    /// en su propio `TableScript::create`.
+    fn drop_together(&self, tables: &[String]) -> DbResult<Vec<String>>;
+    fn script(&self, table: &str, options: &ExportOptions) -> DbResult<TableScript>;
+    /// Lee las filas de `select` sin traerlas todas a memoria: las entrega
+    /// a `each` en bloques de hasta `batch`, con los nombres de las columnas
+    /// y cada valor ya escrito como literal SQL. Si `each` falla, deja de
+    /// leer y devuelve su error.
+    fn read_rows(&self, select: &str, batch: usize, each: &mut RowBatch<'_>) -> DbResult<()>;
+}
+
+/// Lo que recibe cada bloque de filas: columnas y valores como literales.
+type RowBatch<'a> = dyn FnMut(&[String], Vec<Vec<String>>) -> DbResult<()> + 'a;
+
+/// Destino de las sentencias: un fichero o una conexión.
+trait Sink {
+    fn run(&mut self, sql: &str) -> DbResult<()>;
+
+    /// Texto para quien lea el destino; una conexión no lo necesita.
+    fn comment(&mut self, _text: &str) -> DbResult<()> {
+        Ok(())
+    }
+
+    fn run_all(&mut self, statements: &[String]) -> DbResult<()> {
+        statements.iter().try_for_each(|sql| self.run(sql))
+    }
+}
+
+/// Fichero .sql: cada sentencia, terminada en punto y coma.
+struct FileSink(BufWriter<std::fs::File>);
+
+impl FileSink {
+    fn create(path: &Path, source_db: &str) -> DbResult<Self> {
+        let file = std::fs::File::create(path)
+            .map_err(|e| format!("No se pudo crear el fichero '{}': {e}", path.display()))?;
+        let mut sink = Self(BufWriter::new(file));
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        sink.comment(&format!("RustQL Export — Base de datos: {source_db}"))?;
+        sink.comment(&format!("Generado: {now}"))?;
+        sink.comment(&"─".repeat(70))?;
+        writeln!(sink.0).map_err(write_error)?;
+        Ok(sink)
+    }
+
+    fn finish(mut self) -> DbResult<()> {
+        self.0.flush().map_err(write_error)
+    }
+}
+
+impl Sink for FileSink {
+    fn run(&mut self, sql: &str) -> DbResult<()> {
+        writeln!(self.0, "{sql};").map_err(write_error)
+    }
+
+    fn comment(&mut self, text: &str) -> DbResult<()> {
+        writeln!(self.0, "-- {text}").map_err(write_error)
+    }
+}
+
+fn write_error(e: std::io::Error) -> String {
+    format!("Error escribiendo fichero: {e}")
+}
+
+/// Cabecera de una parte del volcado, para quien lo lea.
+fn section(sink: &mut dyn Sink, title: &str) -> DbResult<()> {
+    sink.comment("")?;
+    sink.comment(&format!(
+        "── {title} {}",
+        "─".repeat(60usize.saturating_sub(title.len()))
+    ))?;
+    sink.comment("")
+}
+
+/// Crea la tabla en `sink` y copia sus datos, bloque a bloque. Devuelve las
+/// filas copiadas y lo que queda por ejecutar cuando estén todas las tablas.
+fn export_table(
+    source: &dyn Source,
+    sink: &mut dyn Sink,
+    table: &str,
+    job: &Job,
+) -> DbResult<(u64, Vec<String>)> {
+    let options = job.options;
+    let script = source.script(table, options)?;
+    // Sin nada que escribir ahora (una vista, que va al final), sin cabecera
+    if !script.create.is_empty() || script.data.is_some() || !script.after_data.is_empty() {
+        section(sink, &format!("Tabla: {table}"))?;
+    }
+    sink.run_all(&script.create)?;
+
+    let mut total_rows = 0;
+    if let Some(data) = script.data.filter(|_| options.include_data) {
+        let engine = source.engine();
+        let mut header = None;
+        let mut write_batch = |columns: &[String], rows: Vec<Vec<String>>| {
+            // Una tabla grande son muchos bloques: se puede cancelar entre ellos
+            if job.cancelled() {
+                return Err("Exportación cancelada.".to_string());
+            }
+            let header = header.get_or_insert_with(|| {
+                let columns: Vec<String> = columns.iter().map(|c| engine.quote_ident(c)).collect();
+                format!(
+                    "{} ({}) {}",
+                    data.insert_into,
+                    columns.join(", "),
+                    data.values_keyword
+                )
+            });
+            let values: Vec<String> = rows
+                .iter()
+                .map(|row| format!("({})", row.join(", ")))
+                .collect();
+            sink.run(&format!("{header}\n{}", values.join(",\n")))
+                .map_err(|e| format!("INSERT: {e}"))?;
+            total_rows += rows.len() as u64;
+            job.send(ExportEvent::RowsCopied(rows.len() as u64));
+            Ok(())
+        };
+        source.read_rows(&data.select, options.batch_size.max(1), &mut write_batch)?;
+    }
+    sink.run_all(&script.after_data)?;
+    Ok((total_rows, script.finish))
+}
+
+/// Exporta todas las tablas del trabajo a un mismo destino.
+fn export_into(source: &dyn Source, sink: &mut dyn Sink, job: &Job) -> DbResult<Totals> {
+    sink.run_all(&source.prelude())?;
+    if job.options.drop_if_exists {
+        // Si algo del destino que no se exporta depende de ellas (una clave
+        // foránea, una vista), el servidor se niega: no se fuerza, porque
+        // eso lo eliminaría sin avisar
+        let drops = source.drop_together(job.tables)?;
+        sink.run_all(&drops).map_err(|e| {
+            format!(
+                "No se pudieron eliminar del destino las tablas que ya existen: {e}\n\n\
+                 Si otras tablas o vistas del destino dependen de ellas, expórtalas también \
+                 o elimínalas antes."
+            )
+        })?;
+    }
+
+    // Las tablas con algo pendiente para el final no se dan por hechas
+    // hasta entonces: ahí también pueden fallar
+    let mut pending: Vec<(String, u64, Vec<String>)> = Vec::new();
+    let (mut done, mut total_rows) = (0, 0);
+    for table in job.tables {
+        if job.cancelled() {
+            return Ok((done, total_rows));
         }
-        let _ = tx.send(ExportEvent::TableStarted(table.clone()));
+        job.send(ExportEvent::TableStarted(table.clone()));
         let table = table.clone();
-        match export(&table) {
-            Ok(rows) => {
-                total_rows += rows;
+        match export_table(source, sink, &table, job) {
+            Ok((rows, finish)) if finish.is_empty() => {
                 done += 1;
-                let _ = tx.send(ExportEvent::TableDone { table, rows });
+                total_rows += rows;
+                job.send(ExportEvent::TableDone { table, rows });
             }
-            Err(error) => {
-                let _ = tx.send(ExportEvent::TableError { table, error });
-            }
+            Ok((rows, finish)) => pending.push((table, rows, finish)),
+            Err(error) => job.send(ExportEvent::TableError { table, error }),
         }
     }
-    (done, total_rows)
+    if !pending.is_empty() {
+        section(sink, "Vistas y claves foráneas")?;
+    }
+    for (table, rows, finish) in pending {
+        match sink.run_all(&finish) {
+            Ok(()) => {
+                done += 1;
+                total_rows += rows;
+                job.send(ExportEvent::TableDone { table, rows });
+            }
+            Err(error) => job.send(ExportEvent::TableError { table, error }),
+        }
+    }
+    Ok((done, total_rows))
+}
+
+fn export_to_file(source: &dyn Source, path: &str, job: &Job) -> DbResult<Totals> {
+    let mut sink = FileSink::create(Path::new(path), job.source_db)?;
+    let totals = export_into(source, &mut sink, job)?;
+    sink.finish()?;
+    Ok(totals)
+}
+
+/// Un fichero por tabla, cada uno con todo lo suyo (también lo que en un
+/// único destino se deja para el final).
+fn export_to_folder(source: &dyn Source, folder: &str, job: &Job) -> DbResult<Totals> {
+    std::fs::create_dir_all(folder)
+        .map_err(|e| format!("No se pudo crear la carpeta '{folder}': {e}"))?;
+    Ok(job.for_each_table(|table| {
+        let path = Path::new(folder).join(format!("{}.sql", file_name_for(table)));
+        let mut sink = FileSink::create(&path, job.source_db)?;
+        sink.run_all(&source.prelude())?;
+        if job.options.drop_if_exists {
+            sink.run_all(&source.drop_together(&[table.to_string()])?)?;
+        }
+        let (rows, finish) = export_table(source, &mut sink, table, job)?;
+        sink.run_all(&finish)?;
+        sink.finish()?;
+        Ok(rows)
+    }))
 }
 
 /// Nombre de fichero para una tabla, válido en cualquier sistema: sin
@@ -244,355 +422,9 @@ fn file_name_for(table: &str) -> String {
     }
 }
 
-fn write_error(e: std::io::Error) -> String {
-    format!("Error escribiendo fichero: {e}")
-}
-
-// ── Exportar a un único fichero .sql ──────────────────────────────────────────
-
-fn export_to_file(
-    backend: &MysqlBackend,
-    source_db: &str,
-    tables: &[String],
-    options: &ExportOptions,
-    path: &str,
-    cancel: &Arc<AtomicBool>,
-    tx: &Sender<ExportEvent>,
-) -> Result<(usize, u64), String> {
-    let file = std::fs::File::create(path)
-        .map_err(|e| format!("No se pudo crear el fichero '{path}': {e}"))?;
-    let mut out = BufWriter::new(file);
-    write_sql_header(&mut out, source_db)?;
-    let totals = for_each_table(tables, cancel, tx, |table| {
-        export_table_to_writer(&mut out, backend, source_db, table, options)
-    });
-    out.flush().map_err(write_error)?;
-    Ok(totals)
-}
-
-fn export_to_folder(
-    backend: &MysqlBackend,
-    source_db: &str,
-    tables: &[String],
-    options: &ExportOptions,
-    folder: &str,
-    cancel: &Arc<AtomicBool>,
-    tx: &Sender<ExportEvent>,
-) -> Result<(usize, u64), String> {
-    std::fs::create_dir_all(folder)
-        .map_err(|e| format!("No se pudo crear la carpeta '{folder}': {e}"))?;
-    Ok(for_each_table(tables, cancel, tx, |table| {
-        let file_path = Path::new(folder).join(format!("{}.sql", file_name_for(table)));
-        let file = std::fs::File::create(&file_path)
-            .map_err(|e| format!("No se pudo crear '{}': {e}", file_path.display()))?;
-        let mut out = BufWriter::new(file);
-        write_sql_header(&mut out, source_db)?;
-        let rows = export_table_to_writer(&mut out, backend, source_db, table, options)?;
-        out.flush().map_err(write_error)?;
-        Ok(rows)
-    }))
-}
-
-// ── Exportar a otra BBDD en el mismo servidor ──────────────────────────────────
-
-fn export_to_same_server_db(
-    backend: &MysqlBackend,
-    source_db: &str,
-    tables: &[String],
-    options: &ExportOptions,
-    target_db: &str,
-    cancel: &Arc<AtomicBool>,
-    tx: &Sender<ExportEvent>,
-) -> Result<(usize, u64), String> {
-    // Crear la BBDD destino si no existe
-    let create_db_sql = format!("CREATE DATABASE IF NOT EXISTS {}", quote_ident(target_db));
-    backend
-        .execute_query(&create_db_sql)
-        .map_err(|e| format!("No se pudo crear la base de datos '{target_db}': {e}"))?;
-
-    // Una única conexión para toda la copia: FOREIGN_KEY_CHECKS es de sesión
-    // (el pool puede resetearla entre queries) y sin ella el orden de las
-    // tablas con claves foráneas hace fallar CREATE/INSERT.
-    let mut conn = backend.conn()?;
-    conn.query_drop("SET FOREIGN_KEY_CHECKS = 0")
-        .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
-
-    Ok(for_each_table(tables, cancel, tx, |table| {
-        copy_table_same_server(&mut conn, source_db, table, target_db, options)
-    }))
-}
-
-fn copy_table_same_server(
-    conn: &mut PooledConn,
-    source_db: &str,
-    table: &str,
-    target_db: &str,
-    options: &ExportOptions,
-) -> Result<u64, String> {
-    let src = qualified(source_db, table);
-    let dst = qualified(target_db, table);
-
-    if options.drop_if_exists {
-        conn.query_drop(format!("DROP TABLE IF EXISTS {dst}"))
-            .map_err(|e| format!("DROP TABLE: {e}"))?;
-    }
-
-    if options.include_create {
-        conn.query_drop(format!("CREATE TABLE {dst} LIKE {src}"))
-            .map_err(|e| format!("CREATE TABLE LIKE: {e}"))?;
-    }
-
-    if !options.include_data {
-        return Ok(0);
-    }
-
-    conn.query_drop(format!("INSERT INTO {dst} SELECT * FROM {src}"))
-        .map_err(|e| format!("INSERT INTO ... SELECT: {e}"))?;
-    Ok(conn.affected_rows())
-}
-
-// ── Exportar a otro servidor ───────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-fn export_to_remote(
-    src_backend: &MysqlBackend,
-    dst_backend: &MysqlBackend,
-    source_db: &str,
-    tables: &[String],
-    options: &ExportOptions,
-    target_db: &str,
-    cancel: &Arc<AtomicBool>,
-    tx: &Sender<ExportEvent>,
-) -> Result<(usize, u64), String> {
-    // Crear BBDD destino si no existe
-    dst_backend
-        .execute_query(&format!(
-            "CREATE DATABASE IF NOT EXISTS {}",
-            quote_ident(target_db)
-        ))
-        .map_err(|e| format!("No se pudo crear la BBDD destino '{target_db}': {e}"))?;
-
-    // Sesión estable en destino con FOREIGN_KEY_CHECKS desactivado (ver
-    // export_to_same_server_db).
-    let mut dst_conn = dst_backend.conn()?;
-    dst_conn
-        .query_drop("SET FOREIGN_KEY_CHECKS = 0")
-        .map_err(|e| format!("SET FOREIGN_KEY_CHECKS: {e}"))?;
-
-    Ok(for_each_table(tables, cancel, tx, |table| {
-        copy_table_remote(
-            src_backend,
-            &mut dst_conn,
-            source_db,
-            table,
-            target_db,
-            options,
-        )
-    }))
-}
-
-fn copy_table_remote(
-    src: &MysqlBackend,
-    dst_conn: &mut PooledConn,
-    source_db: &str,
-    table: &str,
-    target_db: &str,
-    options: &ExportOptions,
-) -> Result<u64, String> {
-    let dst_ref = qualified(target_db, table);
-
-    if options.drop_if_exists {
-        dst_conn
-            .query_drop(format!("DROP TABLE IF EXISTS {dst_ref}"))
-            .map_err(|e| format!("DROP TABLE: {e}"))?;
-    }
-
-    if options.include_create {
-        let ddl = get_create_table_ddl(src, source_db, table)?;
-        // Sustituir referencia de BBDD en el DDL y ejecutar en destino
-        let dst_ddl = ddl.replace(&quote_ident(table), &qualified(target_db, table));
-        dst_conn
-            .query_drop(dst_ddl)
-            .map_err(|e| format!("CREATE TABLE en destino: {e}"))?;
-    }
-
-    if !options.include_data {
-        return Ok(0);
-    }
-
-    // SELECT en origen, INSERT en destino en batches
-    let data = src
-        .execute_query(&format!("SELECT * FROM {}", qualified(source_db, table)))
-        .map_err(|e| format!("SELECT: {e}"))?;
-
-    if data.rows.is_empty() {
-        return Ok(0);
-    }
-
-    let col_list = data
-        .columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let total_rows = data.rows.len() as u64;
-
-    for batch in data.rows.chunks(options.batch_size) {
-        let values_list = batch
-            .iter()
-            .map(|row| {
-                let vals = row
-                    .iter()
-                    .map(|v| match v {
-                        None => "NULL".to_string(),
-                        Some(s) => format!("'{}'", escape_sql(s)),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("({vals})")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let insert_sql = format!("INSERT INTO {dst_ref} ({col_list}) VALUES {values_list}");
-        dst_conn
-            .query_drop(insert_sql)
-            .map_err(|e| format!("INSERT batch: {e}"))?;
-    }
-
-    Ok(total_rows)
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-const SAME_TARGET_ERROR: &str = "El destino es la misma base de datos del mismo servidor que el origen: \
-     la copia borraría o duplicaría sus datos. Elige otra base de datos destino.";
-
-/// Si dos conexiones llegan al mismo servidor, según el propio servidor
-/// (host, puerto y directorio de datos), no según los parámetros usados.
-fn same_server(a: &MysqlBackend, b: &MysqlBackend) -> Result<bool, String> {
-    let identity = |backend: &MysqlBackend| {
-        backend
-            .execute_query("SELECT @@hostname, @@port, @@datadir")
-            .map(|r| r.rows.into_iter().next())
-    };
-    let (id_a, id_b) = (identity(a)?, identity(b)?);
-    Ok(id_a.is_some() && id_a == id_b)
-}
-
-/// Obtiene el DDL de una tabla con SHOW CREATE TABLE.
-fn get_create_table_ddl(
-    backend: &MysqlBackend,
-    source_db: &str,
-    table: &str,
-) -> Result<String, String> {
-    let result = backend
-        .execute_query(&format!(
-            "SHOW CREATE TABLE {}",
-            qualified(source_db, table)
-        ))
-        .map_err(|e| format!("SHOW CREATE TABLE: {e}"))?;
-
-    result
-        .rows
-        .first()
-        .and_then(|r| r.get(1))
-        .and_then(|v| v.clone())
-        .ok_or_else(|| format!("No se obtuvo DDL para la tabla '{table}'"))
-}
-
-/// Escribe el encabezado estándar de un fichero SQL de exportación.
-fn write_sql_header(file: &mut impl Write, source_db: &str) -> Result<(), String> {
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    writeln!(file, "-- RustQL Export — Base de datos: {source_db}").map_err(write_error)?;
-    writeln!(file, "-- Generado: {now}").map_err(write_error)?;
-    writeln!(
-        file,
-        "-- ──────────────────────────────────────────────────────────────────────\n"
-    )
-    .map_err(write_error)?;
-    writeln!(file, "SET NAMES utf8mb4;").map_err(write_error)?;
-    writeln!(file, "SET FOREIGN_KEY_CHECKS = 0;\n").map_err(write_error)?;
-    Ok(())
-}
-
-/// Exporta una tabla al writer proporcionado generando CREATE TABLE + INSERTs.
-fn export_table_to_writer(
-    file: &mut impl Write,
-    backend: &MysqlBackend,
-    source_db: &str,
-    table: &str,
-    options: &ExportOptions,
-) -> Result<u64, String> {
-    writeln!(
-        file,
-        "\n-- ── Tabla: `{table}` ─────────────────────────────────────────────────────\n"
-    )
-    .map_err(write_error)?;
-
-    if options.drop_if_exists {
-        writeln!(file, "DROP TABLE IF EXISTS {};", quote_ident(table)).map_err(write_error)?;
-    }
-
-    if options.include_create {
-        let ddl = get_create_table_ddl(backend, source_db, table)?;
-        writeln!(file, "{ddl};\n").map_err(write_error)?;
-    }
-
-    if !options.include_data {
-        return Ok(0);
-    }
-
-    let data = backend
-        .execute_query(&format!("SELECT * FROM {}", qualified(source_db, table)))
-        .map_err(|e| format!("SELECT: {e}"))?;
-
-    if data.rows.is_empty() {
-        return Ok(0);
-    }
-
-    let col_list = data
-        .columns
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let total_rows = data.rows.len() as u64;
-
-    for batch in data.rows.chunks(options.batch_size) {
-        let values_list = batch
-            .iter()
-            .map(|row| {
-                let vals = row
-                    .iter()
-                    .map(|v| match v {
-                        None => "NULL".to_string(),
-                        Some(s) => format!("'{}'", escape_sql(s)),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("({vals})")
-            })
-            .collect::<Vec<_>>()
-            .join(",\n");
-
-        writeln!(
-            file,
-            "INSERT INTO {} ({col_list}) VALUES\n{values_list};",
-            quote_ident(table)
-        )
-        .map_err(write_error)?;
-    }
-
-    Ok(total_rows)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_server;
 
     #[test]
     fn nombres_de_fichero_seguros() {
@@ -601,122 +433,8 @@ mod tests {
         assert_eq!(file_name_for("a:b*c"), "a_b_c");
         assert_eq!(file_name_for("con"), "_con");
         assert_eq!(file_name_for("año"), "año");
-    }
-
-    #[test]
-    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
-    fn no_copia_una_bbdd_sobre_si_misma() {
-        let b = test_server::backend();
-        b.execute_write("DROP DATABASE IF EXISTS rustql_test_export")
-            .unwrap();
-        b.execute_write("CREATE DATABASE rustql_test_export")
-            .unwrap();
-        b.execute_write("CREATE TABLE rustql_test_export.t (id INT PRIMARY KEY)")
-            .unwrap();
-        b.execute_write("INSERT INTO rustql_test_export.t VALUES (1)")
-            .unwrap();
-
-        // Mismo servidor a través de un perfil «remoto», con DROP IF EXISTS
-        let rx = spawn_export(
-            test_server::params(),
-            "rustql_test_export".into(),
-            vec!["t".into()],
-            ExportDestination::RemoteServer {
-                params: test_server::params(),
-                target_db: "rustql_test_export".into(),
-            },
-            ExportOptions {
-                drop_if_exists: true,
-                ..Default::default()
-            },
-            Arc::new(AtomicBool::new(false)),
-        );
-        let events: Vec<ExportEvent> = rx.iter().collect();
-        let rows = b
-            .execute_query("SELECT COUNT(*) FROM rustql_test_export.t")
-            .map(|r| r.rows[0][0].clone());
-        b.execute_write("DROP DATABASE rustql_test_export").unwrap();
-
-        assert!(
-            matches!(events.as_slice(), [ExportEvent::Failed(e)] if e == SAME_TARGET_ERROR),
-            "debe abortar antes de tocar nada"
-        );
-        assert_eq!(
-            rows,
-            Ok(Some("1".into())),
-            "la tabla de origen sigue intacta"
-        );
-    }
-
-    #[test]
-    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
-    fn misma_conexion_es_el_mismo_servidor() {
-        let (a, b) = (test_server::backend(), test_server::backend());
-        assert!(same_server(&a, &b).unwrap());
-    }
-
-    #[test]
-    #[ignore = "necesita RUSTQL_TEST_MYSQL"]
-    fn el_fichero_sql_se_puede_volver_a_cargar() {
-        use mysql::prelude::Queryable;
-
-        let b = test_server::backend();
-        for sql in [
-            "DROP DATABASE IF EXISTS rustql_test_dump",
-            "DROP DATABASE IF EXISTS rustql_test_dump2",
-            "CREATE DATABASE rustql_test_dump",
-            "CREATE DATABASE rustql_test_dump2",
-            "CREATE TABLE rustql_test_dump.t (id INT PRIMARY KEY, v TEXT)",
-            "INSERT INTO rustql_test_dump.t VALUES \
-             (1, 'it''s'), (2, 'barra \\\\ y salto\\n'), (3, NULL), (4, '')",
-        ] {
-            b.execute_write(sql).unwrap();
-        }
-        let path = std::env::temp_dir().join(format!("rustql-test-{}.sql", std::process::id()));
-        let rx = spawn_export(
-            test_server::params(),
-            "rustql_test_dump".into(),
-            vec!["t".into()],
-            ExportDestination::SqlFile {
-                path: path.to_string_lossy().into_owned(),
-            },
-            ExportOptions {
-                batch_size: 2,
-                ..Default::default()
-            },
-            Arc::new(AtomicBool::new(false)),
-        );
-        let events: Vec<ExportEvent> = rx.iter().collect();
-        let dump = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-
-        // Cargarlo en otra BBDD, como haría el cliente mysql
-        let mut conn = b.conn().unwrap();
-        let loaded = conn.query_drop(format!("USE rustql_test_dump2; {dump}"));
-        let select = "SELECT id, v FROM t ORDER BY id";
-        let copy: Vec<(i32, Option<String>)> = conn.query(select).unwrap();
-        let mut conn = b.conn().unwrap();
-        conn.query_drop("USE rustql_test_dump").unwrap();
-        let source: Vec<(i32, Option<String>)> = conn.query(select).unwrap();
-        b.execute_write("DROP DATABASE rustql_test_dump").unwrap();
-        b.execute_write("DROP DATABASE rustql_test_dump2").unwrap();
-
-        assert!(
-            matches!(
-                events.last(),
-                Some(ExportEvent::Finished { total_rows: 4, .. })
-            ),
-            "{:?}",
-            events
-                .iter()
-                .map(|e| match e {
-                    ExportEvent::Failed(e) | ExportEvent::TableError { error: e, .. } => e.clone(),
-                    _ => String::new(),
-                })
-                .collect::<Vec<_>>()
-        );
-        loaded.unwrap();
-        assert_eq!(copy, source);
-        assert_eq!(source[1].1.as_deref(), Some("barra \\ y salto\n"));
+        // Una tabla de otro esquema de PostgreSQL
+        assert_eq!(file_name_for("ventas.pedidos"), "ventas.pedidos");
+        assert_eq!(file_name_for("\"a.b\".t"), "_a.b_.t");
     }
 }

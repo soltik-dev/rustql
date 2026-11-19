@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use eframe::egui;
 
-use crate::db::{CancelFlag, QUERY_CANCELLED, QueryResult};
+use crate::db::{CancelFlag, Engine, QUERY_CANCELLED, QueryResult};
 use crate::settings::{CopyFormat, SavedSqlTab};
 use crate::ui::results_grid::{self, GridAction, GridSelection};
 use crate::ui::{CMD, sql_highlight, theme};
@@ -136,6 +136,7 @@ pub fn show(
     tab: &mut SqlTab,
     run_pressed: bool,
     databases: &[String],
+    engine: Engine,
 ) -> SqlEditorAction {
     ui.push_id(("sql_tab", tab.uid), |ui| {
         let (mut action, execute_held) = toolbar(ui, tab, databases);
@@ -149,7 +150,7 @@ pub fn show(
             };
         }
         ui.separator();
-        editor(ui, tab, execute_held);
+        editor(ui, tab, execute_held, engine);
         if let Some(fmt) = result(ui, tab)
             && action == SqlEditorAction::None
         {
@@ -252,7 +253,7 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
 
 /// Editor con resaltado de sintaxis y, debajo, la franja con la que se
 /// cambia su alto. Si la consulta no cabe, el editor se desplaza.
-fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool) {
+fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engine) {
     let p = theme::get(ui);
     let available = ui.available_height();
     let max_height = (available - MIN_RESULT_HEIGHT).max(MIN_EDITOR_HEIGHT);
@@ -264,7 +265,7 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool) {
     let dark = ui.visuals().dark_mode;
     let font_size = egui::TextStyle::Monospace.resolve(ui.style()).size;
     let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-        let mut job = sql_highlight::highlight(ui.ctx(), dark, font_size, buf.as_str());
+        let mut job = sql_highlight::highlight(ui.ctx(), engine, dark, font_size, buf.as_str());
         job.wrap.max_width = wrap_width;
         ui.fonts_mut(|f| f.layout_job(job))
     };
@@ -445,7 +446,7 @@ mod tests {
             self.ctx
                 .run_ui(input, |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
-                        action = show(ui, &mut self.tab, run_pressed, &[]);
+                        action = show(ui, &mut self.tab, run_pressed, &[], Engine::Mysql);
                     });
                 })
                 .drop_without_applying_deltas();
