@@ -25,5 +25,7 @@ First public beta.
   authorities or a custom CA, and a padlock in the status bar.
 - Passwords stored in the system keyring.
 - Light and dark themes, selectable fonts and remembered window size.
+- Packages for Windows (installer and portable zip), macOS (universal disk
+  image for Apple Silicon and Intel) and Linux (AppImage, tarball and .deb).
 
 [Unreleased]: https://github.com/soltik-dev/rustql/commits/master

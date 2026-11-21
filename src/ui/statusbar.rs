@@ -5,7 +5,8 @@ use crate::session::ConnectionStatus;
 use crate::ui::icons::{LOCK, UNLOCK};
 use crate::ui::theme;
 
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The version with the commit for development builds (see build.rs).
+const APP_VERSION: &str = env!("RUSTQL_VERSION");
 
 /// VSCode-style bottom bar with panel buttons, version and connection status.
 pub fn show(
