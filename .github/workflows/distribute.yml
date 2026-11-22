@@ -1,0 +1,93 @@
+name: Distribute
+
+# When a release is published: build the RPM in COPR (dukerth/rustql) from
+# the release's vendored source tarball. The website deploy will go here too.
+#
+# Run by hand with a version already released, it sends it to COPR again;
+# raise the RPM release number if the spec changed, or dnf will not update.
+#
+# On a PR that touches the RPM, it builds the whole RPM here from a fresh
+# source tarball instead, and sends nothing to COPR.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released version to send to COPR again (e.g. 0.9.0)
+        required: true
+      rpm-release:
+        description: RPM release number (1 for a new version)
+        default: "1"
+  pull_request:
+    paths:
+      - .github/workflows/distribute.yml
+      - packaging/fedora/**
+      - scripts/release.py
+      - scripts/package-source.sh
+
+permissions:
+  contents: read
+
+jobs:
+  copr:
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    env:
+      TEST: ${{ github.event_name == 'pull_request' }}
+      TAG: ${{ github.event.release.tag_name || format('v{0}', inputs.version) }}
+      RPM_RELEASE: ${{ inputs.rpm-release || '1' }}
+    steps:
+      - name: Packages
+        run: |
+          dnf install -y git rpm-build copr-cli cargo rust gcc zlib-devel \
+            desktop-file-utils appstream python3
+
+      # The spec and the script as they were in the release
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name != 'pull_request' && env.TAG || '' }}
+
+      - name: Source tarball
+        run: |
+          mkdir -p "$RUNNER_TEMP/SOURCES"
+          if [ "$TEST" = true ]; then
+            # The checkout belongs to another user than the container's root
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            version="$(python3 scripts/release.py state | sed -n 's/^version=//p')"
+            scripts/package-source.sh "$version" "$RUNNER_TEMP/SOURCES"
+          else
+            version="${TAG#v}"
+            cd "$RUNNER_TEMP/SOURCES"
+            base="https://github.com/soltik-dev/rustql/releases/download/$TAG"
+            curl -fsSLO "$base/rustql-$version-vendored.tar.xz"
+            curl -fsSLO "$base/SHA256SUMS"
+            grep " rustql-$version-vendored.tar.xz$" SHA256SUMS | sha256sum -c -
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: SRPM
+        run: |
+          python3 scripts/release.py spec "$VERSION" \
+            "$RUNNER_TEMP/SOURCES/rustql-$VERSION-vendored.tar.xz" \
+            --release "$RPM_RELEASE" > rustql.spec
+          rpmbuild -bs rustql.spec --define "_sourcedir $RUNNER_TEMP/SOURCES" \
+            --define "_srcrpmdir $RUNNER_TEMP/SRPMS"
+
+      - name: Test build of the RPM
+        if: env.TEST == 'true'
+        run: |
+          rpmbuild --rebuild "$RUNNER_TEMP"/SRPMS/rustql-*.src.rpm \
+            --define "_topdir $RUNNER_TEMP/rpmbuild"
+          rpm -qlp "$RUNNER_TEMP"/rpmbuild/RPMS/x86_64/rustql-*.rpm
+
+      # Builds for every chroot enabled in the COPR project and waits for the
+      # result, so a failed build fails this job
+      - name: COPR build
+        if: env.TEST != 'true'
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          mkdir -p ~/.config
+          printf '%s\n' "$COPR_CONFIG" > ~/.config/copr
+          copr-cli build dukerth/rustql "$RUNNER_TEMP"/SRPMS/rustql-*.src.rpm
