@@ -30,9 +30,10 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config zlib1g-dev
+            ca-certificates curl git build-essential pkg-config zlib1g-dev \
+            python3 appstream desktop-file-utils
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # egui 0.37 needs Rust ≥ 1.95 (rust-version in Cargo.toml).
       - uses: dtolnay/rust-toolchain@stable
@@ -43,6 +44,14 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --check
+
+      # A release PR (scripts/release.py prepare) must leave every file with
+      # the same version, and the packaging metadata must stay valid
+      - name: Release files
+        run: |
+          python3 scripts/release.py state
+          desktop-file-validate packaging/linux/com.rustql.RustQL.desktop
+          appstreamcli validate --no-net packaging/linux/com.rustql.RustQL.metainfo.xml
 
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -120,7 +129,7 @@ jobs:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:

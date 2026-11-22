@@ -1,0 +1,264 @@
+name: Release
+
+# On every push to main: if the version in Cargo.toml is a prepared release
+# (scripts/release.py prepare, merged through a PR) and has no GitHub release
+# yet, build every package and create a DRAFT release with them. Publishing
+# the draft creates the tag and starts distribute.yml.
+#
+# On a PR that touches the packaging (and so on every release PR), or run by
+# hand, it builds every package and keeps them as workflow artifacts without
+# releasing anything: that is how the pipeline is tested.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/**
+      - assets/icon/**
+      - build.rs
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+# Two pushes to main never build the same release at the same time; a new
+# push to a PR cancels its previous test build
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The plain version in the binaries, without the commit (see build.rs)
+  RUSTQL_RELEASE: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    # Only to read: a read-only token may not see draft releases, and then a
+    # second push would create a duplicate draft
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.state.outputs.version }}
+      build: ${{ steps.decide.outputs.build }}
+      release: ${{ steps.decide.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Fails if Cargo.toml, Cargo.lock, CHANGELOG.md and the metainfo disagree
+      - id: state
+        run: python3 scripts/release.py state | tee -a "$GITHUB_OUTPUT"
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.state.outputs.version }}
+          PREPARED: ${{ steps.state.outputs.prepared }}
+        run: |
+          build=false
+          release=false
+          if [ "$GITHUB_EVENT_NAME" != push ]; then
+            echo "Test run ($GITHUB_EVENT_NAME): building $VERSION without releasing it"
+            build=true
+          elif [ "$PREPARED" != true ]; then
+            echo "$VERSION is not a prepared release: nothing to do"
+          elif gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "v$VERSION already has a release (draft or published): nothing to do"
+          else
+            echo "Releasing $VERSION"
+            build=true
+            release=true
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  # Tarball, AppImage and .deb. Built against glibc 2.28 (AlmaLinux 8), so the
+  # binary runs on RHEL 8, Debian 10, Ubuntu 20.04 and anything newer.
+  linux:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64:2026.11.07-1
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Packages
+        run: dnf install -y zlib-devel pkgconf-pkg-config
+
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Packaging tools
+        run: |
+          cargo install cargo-deb --locked --version 3.8.0
+          mkdir -p "$RUNNER_TEMP/tools"
+          cd "$RUNNER_TEMP/tools"
+          curl -sSfL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          curl -sSfL -o runtime \
+            https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          sha256sum -c - << 'EOF'
+          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime
+          EOF
+          chmod +x appimagetool
+
+      - name: Package
+        env:
+          APPIMAGETOOL: ${{ runner.temp }}/tools/appimagetool
+          APPIMAGE_RUNTIME: ${{ runner.temp }}/tools/runtime
+        run: scripts/package-linux.sh "$VERSION" dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/
+          if-no-files-found: error
+
+  # Installer (Inno Setup) and portable zip
+  windows:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Inno Setup
+        run: choco install innosetup --version=6.7.1 --no-progress -y
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "rustql-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force dist, "staging\$name" | Out-Null
+          Copy-Item target\release\rustql.exe, README.md "staging\$name\"
+          Copy-Item LICENSE "staging\$name\LICENSE.txt"
+          Compress-Archive -Path "staging\$name" -DestinationPath "dist\$name.zip"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:VERSION" packaging\windows\rustql.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/
+          if-no-files-found: error
+
+  # Universal .dmg (Apple Silicon and Intel), for macOS 11 and later
+  macos:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Package
+        run: |
+          scripts/package-macos.sh "$VERSION" \
+            target/aarch64-apple-darwin/release/rustql \
+            target/x86_64-apple-darwin/release/rustql dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/
+          if-no-files-found: error
+
+  # Sources with every dependency vendored, for COPR and Flathub
+  source:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Package
+        run: scripts/package-source.sh "$VERSION" dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source
+          path: dist/
+          if-no-files-found: error
+
+  # SHA256SUMS and release.json for everything, and the draft release
+  draft:
+    needs: [plan, linux, windows, macos, source]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and manifest
+        run: |
+          python3 scripts/release.py manifest "$VERSION" dist
+          cat dist/SHA256SUMS
+
+      - name: Draft release
+        if: needs.plan.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+          # The tag is created on this commit when the draft is published
+          gh release create "v$VERSION" dist/* --draft --target "$GITHUB_SHA" \
+            --title "RustQL $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: Manifest of the test run
+        if: needs.plan.outputs.release != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: |
+            dist/SHA256SUMS
+            dist/release.json
