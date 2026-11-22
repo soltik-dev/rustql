@@ -12,8 +12,12 @@ and the AppStream metainfo in step.
         The changelog section of a version, as Markdown.
     scripts/release.py manifest 0.9.0 DIR
         Writes DIR/SHA256SUMS and DIR/release.json for the files in DIR.
+    scripts/release.py spec 0.9.0 TARBALL [--release N]
+        The RPM spec for COPR, from packaging/fedora/rustql.spec and the
+        vendored source tarball (whose crates give the License field).
 
-Only the standard library: it runs on any CI image and locally.
+Only the standard library (and cargo, for `spec`): it runs on any CI image
+and locally.
 """
 
 import argparse
@@ -22,7 +26,10 @@ import hashlib
 import html
 import json
 import re
+import subprocess
 import sys
+import tarfile
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -247,6 +254,68 @@ def manifest(version: str, directory: Path) -> None:
     (directory / "release.json").write_text(json.dumps(release, indent=2, ensure_ascii=False) + "\n")
 
 
+# ── spec ──────────────────────────────────────────────────────────────────────
+
+SPEC = ROOT / "packaging/fedora/rustql.spec"
+# Crates whose Cargo.toml has a license file instead of an SPDX expression
+LICENSE_OVERRIDES = {"webpki": "ISC"}
+
+
+def spdx(expression: str) -> str:
+    """One crate's license as a self-contained SPDX term: the old `A/B`
+    form becomes `A OR B`, alternatives are sorted (so `MIT OR Apache-2.0`
+    and `Apache-2.0 OR MIT` are one term) and compound ones get parentheses."""
+    e = re.sub(r"\s*/\s*", " OR ", expression.strip())
+    if " AND " in e or "(" in e or " WITH " in e:
+        return f"({e})"
+    terms = sorted(t.strip() for t in e.split(" OR "))
+    return terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")"
+
+
+def bundled_licenses(source_dir: Path) -> list[str]:
+    """Licenses of the crates compiled for Linux, from the vendored sources."""
+    meta = json.loads(subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--offline",
+         "--filter-platform", "x86_64-unknown-linux-gnu"],
+        cwd=source_dir, capture_output=True, text=True, check=True,
+    ).stdout)
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    root = meta["resolve"]["root"]
+    seen, stack = set(), [root]
+    while stack:
+        for dep in nodes[stack.pop()]["deps"]:
+            if dep["pkg"] not in seen:
+                seen.add(dep["pkg"])
+                stack.append(dep["pkg"])
+    terms = set()
+    for pkg in meta["packages"]:
+        if pkg["id"] not in seen:
+            continue
+        license_ = pkg["license"] or LICENSE_OVERRIDES.get(pkg["name"])
+        if not license_:
+            raise ReleaseError(f"crate {pkg['name']} has no SPDX license: add it to LICENSE_OVERRIDES")
+        terms.add(spdx(license_))
+    return sorted(terms)
+
+
+def spec(version: str, tarball: Path, release: int) -> str:
+    with tempfile.TemporaryDirectory() as tmp:
+        with tarfile.open(tarball) as tar:
+            tar.extractall(tmp, filter="data")
+        licenses = bundled_licenses(Path(tmp) / f"rustql-{version}")
+    license_ = " AND ".join(["GPL-3.0-or-later", "OFL-1.1"] + [t for t in licenses if t not in ("GPL-3.0-or-later", "OFL-1.1")])
+    current = state()
+    date = datetime.date.fromisoformat(current["date"]) if current["prepared"] and current["version"] == version else datetime.date.today()
+    changelog = (
+        f"* {date.strftime('%a %b %d %Y')} Alberto López <1663315+dukerth@users.noreply.github.com> - {version}-{release}\n"
+        f"- RustQL {version}: {REPO}/releases/tag/v{version}"
+    )
+    text = SPEC.read_text()
+    for key, value in {"@VERSION@": version, "@RELEASE@": str(release), "@LICENSE@": license_, "@CHANGELOG@": changelog}.items():
+        text = text.replace(key, value)
+    return text
+
+
 # ── Command line ──────────────────────────────────────────────────────────────
 
 
@@ -262,6 +331,10 @@ def main() -> int:
     p = sub.add_parser("manifest")
     p.add_argument("version")
     p.add_argument("directory", type=Path)
+    p = sub.add_parser("spec")
+    p.add_argument("version")
+    p.add_argument("tarball", type=Path)
+    p.add_argument("--release", type=int, default=1)
     args = parser.parse_args()
     try:
         if args.command == "prepare":
@@ -275,6 +348,8 @@ def main() -> int:
             print(notes(args.version))
         elif args.command == "manifest":
             manifest(args.version, args.directory)
+        elif args.command == "spec":
+            print(spec(args.version, args.tarball, args.release), end="")
     except ReleaseError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
