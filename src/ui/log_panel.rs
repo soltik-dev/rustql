@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use eframe::egui;
 
+use crate::i18n::t;
 use crate::log::LogEntry;
 use crate::ui::icons::{CODE, COPY};
 use crate::ui::theme;
@@ -26,9 +27,11 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
     let mut action = LogAction::None;
     let p = theme::get(ui);
     ui.horizontal(|ui| {
-        theme::section_label(ui, "Log de consultas");
+        theme::section_label(ui, &t!("log-title"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(format!("{} entradas", log.len())).color(p.text_muted));
+            ui.label(
+                egui::RichText::new(t!("log-entry-count", count = log.len())).color(p.text_muted),
+            );
         });
     });
     ui.separator();
@@ -45,12 +48,12 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
 
                     // Status
                     if cancelled(entry) {
-                        theme::badge(ui, "CANCELADA", p.warning);
+                        theme::badge(ui, &t!("log-cancelled"), p.warning);
                     } else if entry.error.is_some() {
-                        theme::badge(ui, "ERROR", p.danger);
+                        theme::badge(ui, &t!("log-error"), p.danger);
                     } else {
                         let rows = entry.rows.unwrap_or(0);
-                        theme::badge(ui, &format!("{rows} filas"), p.success);
+                        theme::badge(ui, &t!("log-rows", count = rows), p.success);
                     }
 
                     // Duration
@@ -72,19 +75,24 @@ pub fn show(ui: &mut egui::Ui, log: &VecDeque<LogEntry>) -> LogAction {
                 )
                 .on_hover_text(&entry.query)
                 .context_menu(|ui| {
-                    if ui.button(format!("{COPY}  Copiar la consulta")).clicked() {
+                    if ui
+                        .button(format!("{COPY}  {}", t!("log-copy-query")))
+                        .clicked()
+                    {
                         ui.ctx().copy_text(entry.query.clone());
                         ui.close();
                     }
                     if let Some(err) = &entry.error
-                        && ui.button(format!("{COPY}  Copiar el error")).clicked()
+                        && ui
+                            .button(format!("{COPY}  {}", t!("log-copy-error")))
+                            .clicked()
                     {
                         ui.ctx().copy_text(err.clone());
                         ui.close();
                     }
                     ui.separator();
                     if ui
-                        .button(format!("{CODE}  Abrir en una pestaña SQL"))
+                        .button(format!("{CODE}  {}", t!("log-open-in-sql-tab")))
                         .clicked()
                     {
                         action = LogAction::OpenInSql(entry.query.clone());

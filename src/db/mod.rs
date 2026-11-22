@@ -4,6 +4,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod tls;
 
+use crate::i18n::t;
 use std::sync::Arc;
 
 pub use dialect::{Engine, ParamList};
@@ -54,12 +55,8 @@ impl ConnectionParams {
     pub fn resolve_password(&self) -> DbResult<String> {
         match &self.keyring_id {
             Some(id) if self.password.is_empty() => crate::secrets::get(id)
-                .map_err(|e| format!("No se pudo leer la contraseña del llavero: {e}"))?
-                .ok_or_else(|| {
-                    "La contraseña de este perfil ya no está en el llavero del sistema: \
-                     escríbela y vuelve a guardar el perfil."
-                        .into()
-                }),
+                .map_err(|e| t!("keyring-read-failed", error = e))?
+                .ok_or_else(|| t!("keyring-password-gone")),
             _ => Ok(self.password.clone()),
         }
     }
@@ -89,7 +86,8 @@ pub type DbResult<T> = Result<T, String>;
 pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
 
 /// Error a cancelled editor run ends with.
-pub const QUERY_CANCELLED: &str = "Consulta cancelada.";
+/// A marker, not a text: the interface shows its own translated message.
+pub const QUERY_CANCELLED: &str = "Query cancelled.";
 
 /// Statement with parameters (see `ParamList`). The values travel apart
 /// from the SQL: they need no escaping and arrive intact (`None` = NULL).
@@ -136,15 +134,6 @@ impl TableKind {
     /// rows are not edited.
     pub fn is_view(self) -> bool {
         self != TableKind::Table
-    }
-
-    /// What it is called, with its article: «la tabla», «la vista».
-    pub fn label(self) -> &'static str {
-        match self {
-            TableKind::Table => "la tabla",
-            TableKind::View => "la vista",
-            TableKind::MaterializedView => "la vista materializada",
-        }
     }
 
     /// Word SQL names it with in `DROP …`.
@@ -210,9 +199,7 @@ pub fn validate_charset(s: &str) -> DbResult<()> {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "Charset inválido: '{s}'. Solo se permiten caracteres alfanuméricos y '_'."
-        ))
+        Err(t!("charset-invalid", charset = s))
     }
 }
 
@@ -348,11 +335,10 @@ pub mod test_server {
     use super::{ConnectionParams, Engine};
 
     fn from_env(var: &str, engine: Engine) -> ConnectionParams {
-        let url =
-            std::env::var(var).unwrap_or_else(|_| panic!("{var}=usuario:contraseña@host:puerto"));
-        let (auth, addr) = url.rsplit_once('@').expect("falta @");
+        let url = std::env::var(var).unwrap_or_else(|_| panic!("{var}=user:password@host:port"));
+        let (auth, addr) = url.rsplit_once('@').expect("missing @");
         let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
-        let (host, port) = addr.rsplit_once(':').expect("falta :puerto");
+        let (host, port) = addr.rsplit_once(':').expect("missing :port");
         ConnectionParams {
             engine,
             host: host.into(),

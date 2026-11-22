@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::i18n::t;
 use crate::ui::theme;
 
 /// Notifications on screen at once: with more, the oldest go.
@@ -178,7 +179,7 @@ fn draw(ui: &mut egui::Ui, toast: &Toast) -> egui::Response {
     frame
         .response
         .interact(egui::Sense::click())
-        .on_hover_text("Clic para cerrar")
+        .on_hover_text(t!("toast-close-hint"))
 }
 
 #[cfg(test)]

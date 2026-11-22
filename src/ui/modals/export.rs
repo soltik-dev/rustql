@@ -9,6 +9,7 @@ use eframe::egui;
 use super::{ModalAction, dialog};
 use crate::db::Engine;
 use crate::db::export::{ExportDestination, ExportEvent, ExportOptions};
+use crate::i18n::t;
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
 use crate::ui::theme;
@@ -79,7 +80,7 @@ pub(super) fn show_export_data(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    let title = format!("{EXPORT}  Exportar datos — {source_db}");
+    let title = format!("{EXPORT}  {}", t!("export-title", db = source_db));
     // While running it only closes with Cancel: closing it would leave the
     // export running with nothing showing it
     let closable = !matches!(phase, ExportPhase::Running(_));
@@ -163,13 +164,17 @@ fn render_export_config(
             .horizontal(|mut strip| {
                 // ── Left column: table list ────────────────────────────────────
                 strip.cell(|ui| {
-                    ui.heading(format!("Tablas ({selected_count}/{})", tables.len()));
+                    ui.heading(t!(
+                        "export-tables-heading",
+                        selected = selected_count,
+                        total = tables.len()
+                    ));
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        if ui.small_button("Todo").clicked() {
+                        if ui.small_button(t!("export-select-all")).clicked() {
                             tables.iter_mut().for_each(|t| t.selected = true);
                         }
-                        if ui.small_button("Ninguno").clicked() {
+                        if ui.small_button(t!("export-select-none")).clicked() {
                             tables.iter_mut().for_each(|t| t.selected = false);
                         }
                     });
@@ -190,7 +195,7 @@ fn render_export_config(
 
                 // ── Right column: destination + options ────────────────────────
                 strip.cell(|ui| {
-                    ui.heading("Destino");
+                    ui.heading(t!("export-destination"));
                     ui.add_space(4.0);
 
                     // Radio buttons for the destination type
@@ -199,7 +204,7 @@ fn render_export_config(
                     let is_samedb = matches!(destination, ExportDestination::SameServerDb { .. });
                     let is_remote = matches!(destination, ExportDestination::RemoteServer { .. });
 
-                    if ui.radio(is_sqlfile, "Fichero SQL (.sql)").clicked() && !is_sqlfile {
+                    if ui.radio(is_sqlfile, t!("export-to-file")).clicked() && !is_sqlfile {
                         *destination = ExportDestination::SqlFile {
                             path: String::new(),
                         };
@@ -225,7 +230,7 @@ fn render_export_config(
                         ui.add_space(4.0);
                     }
 
-                    if ui.radio(is_folder, "Carpeta (un .sql por tabla)").clicked() && !is_folder {
+                    if ui.radio(is_folder, t!("export-to-folder")).clicked() && !is_folder {
                         *destination = ExportDestination::Folder {
                             path: String::new(),
                         };
@@ -248,11 +253,7 @@ fn render_export_config(
                         ui.add_space(4.0);
                     }
 
-                    if ui
-                        .radio(is_samedb, "Otra base de datos (mismo servidor)")
-                        .clicked()
-                        && !is_samedb
-                    {
+                    if ui.radio(is_samedb, t!("export-to-database")).clicked() && !is_samedb {
                         // Preselect the first different database if there is one
                         let first_other = databases
                             .iter()
@@ -267,9 +268,9 @@ fn render_export_config(
                     {
                         egui::ComboBox::from_id_salt("export_dest_db")
                             .selected_text(if target_db.is_empty() {
-                                "Seleccionar…"
+                                t!("export-choose")
                             } else {
-                                target_db.as_str()
+                                target_db.clone()
                             })
                             .show_ui(ui, |ui| {
                                 for db in databases.iter().filter(|d| d.as_str() != source_db) {
@@ -279,7 +280,7 @@ fn render_export_config(
                         ui.add_space(4.0);
                     }
 
-                    if ui.radio(is_remote, "Otro servidor (favoritos)").clicked() && !is_remote {
+                    if ui.radio(is_remote, t!("export-to-server")).clicked() && !is_remote {
                         let params = profiles.first().map(|p| p.to_params()).unwrap_or_default();
                         *destination = ExportDestination::RemoteServer {
                             params,
@@ -293,7 +294,7 @@ fn render_export_config(
                             .selected_text(
                                 profiles
                                     .get(*profile_idx)
-                                    .map_or("Sin perfiles", |p| p.name.as_str()),
+                                    .map_or_else(|| t!("export-no-profiles"), |p| p.name.clone()),
                             )
                             .show_ui(ui, |ui| {
                                 for (i, prof) in profiles.iter().enumerate() {
@@ -310,15 +311,13 @@ fn render_export_config(
                             });
                         if profiles.is_empty() {
                             ui.label(
-                                egui::RichText::new(
-                                    "Guarda antes un perfil con el servidor destino.",
-                                )
-                                .color(theme::get(ui).text_muted)
-                                .small(),
+                                egui::RichText::new(t!("export-no-profiles-hint"))
+                                    .color(theme::get(ui).text_muted)
+                                    .small(),
                             );
                         }
                         ui.horizontal(|ui| {
-                            ui.label("BBDD destino:");
+                            ui.label(t!("export-target-database"));
                             ui.add(egui::TextEdit::singleline(target_db_name).desired_width(130.0));
                         });
                         if let ExportDestination::RemoteServer { target_db, .. } = destination {
@@ -328,22 +327,18 @@ fn render_export_config(
                     }
 
                     ui.separator();
-                    ui.heading("Opciones");
+                    ui.heading(t!("export-options"));
                     ui.add_space(2.0);
-                    ui.checkbox(&mut options.include_create, "Incluir CREATE TABLE");
-                    ui.checkbox(&mut options.include_data, "Incluir datos (INSERT INTO)");
+                    ui.checkbox(&mut options.include_create, t!("export-include-create"));
+                    ui.checkbox(&mut options.include_data, t!("export-include-data"));
                     ui.checkbox(&mut options.drop_if_exists, "DROP TABLE IF EXISTS");
                     // What does not fit, where what to export is chosen
                     if engine == Engine::Postgres {
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(
-                                "Se copian tablas y vistas con sus secuencias, claves e \
-                                 índices. No disparadores, funciones, permisos ni \
-                                 particiones: para una copia completa, usa pg_dump.",
-                            )
-                            .small()
-                            .color(theme::get(ui).text_muted),
+                            egui::RichText::new(t!("export-postgres-scope"))
+                                .small()
+                                .color(theme::get(ui).text_muted),
                         );
                     }
                 });
@@ -353,14 +348,17 @@ fn render_export_config(
     // ── Footer ─────────────────────────────────────────────────────────────
     ui.separator();
     ui.horizontal(|ui| {
-        if ui.button("Cancelar").clicked() {
+        if ui.button(t!("common-cancel")).clicked() {
             action = ModalAction::CloseExport;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can_export =
                 selected_count > 0 && is_destination_valid(destination, !profiles.is_empty());
-            let btn =
-                theme::primary_button_enabled(ui, can_export, format!("{EXPORT}  Exportar →"));
+            let btn = theme::primary_button_enabled(
+                ui,
+                can_export,
+                format!("{EXPORT}  {} →", t!("export-button")),
+            );
             if btn.clicked() {
                 let sel_tables = tables
                     .iter()
@@ -376,7 +374,7 @@ fn render_export_config(
             }
             if !can_export && selected_count == 0 {
                 ui.label(
-                    egui::RichText::new("Selecciona al menos una tabla")
+                    egui::RichText::new(t!("export-select-a-table"))
                         .color(theme::get(ui).text_muted)
                         .small(),
                 );
@@ -402,7 +400,7 @@ fn destination_label(dest: &ExportDestination) -> String {
     match dest {
         ExportDestination::SqlFile { path } => path.clone(),
         ExportDestination::Folder { path } => path.clone(),
-        ExportDestination::SameServerDb { target_db } => format!("Base de datos: {target_db}"),
+        ExportDestination::SameServerDb { target_db } => t!("db-info-title", db = target_db),
         ExportDestination::RemoteServer { target_db, params } => {
             format!("{}:{} → {target_db}", params.host, params.port)
         }
@@ -424,9 +422,11 @@ fn render_export_running(
     };
 
     // Progress bar
-    ui.add(
-        egui::ProgressBar::new(fraction).text(format!("{}/{} tablas", running.done_count, total)),
-    );
+    ui.add(egui::ProgressBar::new(fraction).text(t!(
+        "export-progress",
+        done = running.done_count,
+        total = total
+    )));
     ui.add_space(6.0);
 
     ui.scope(|ui| {
@@ -483,16 +483,17 @@ fn render_export_running(
 
                 // Right panel: statistics
                 strip.cell(|ui| {
-                    ui.label(egui::RichText::new("Destino:").strong());
+                    ui.label(egui::RichText::new(t!("export-destination-label")).strong());
                     ui.label(destination_label(destination));
                     ui.add_space(8.0);
-                    ui.label(format!(
-                        "Tablas completadas: {} / {}",
-                        running.done_count, total
+                    ui.label(t!(
+                        "export-tables-done",
+                        done = running.done_count,
+                        total = total
                     ));
-                    ui.label(format!(
-                        "Filas exportadas:   {}",
-                        format_rows(running.rows_done)
+                    ui.label(t!(
+                        "export-rows-done",
+                        rows = format_rows(running.rows_done)
                     ));
                 });
             });
@@ -500,7 +501,7 @@ fn render_export_running(
 
     ui.separator();
     ui.horizontal(|ui| {
-        if ui.button("Cancelar exportación").clicked() {
+        if ui.button(t!("export-cancel")).clicked() {
             action = ModalAction::CancelExport;
         }
     });
@@ -522,11 +523,14 @@ fn render_export_done(
         .count();
 
     if error_count == 0 {
-        ui.add(egui::ProgressBar::new(1.0).text("✓ Completado"));
+        ui.add(egui::ProgressBar::new(1.0).text(format!("✓ {}", t!("export-completed"))));
     } else {
         ui.add(
             egui::ProgressBar::new(1.0)
-                .text(format!("⚠ Completado con {error_count} errores"))
+                .text(format!(
+                    "⚠ {}",
+                    t!("export-completed-errors", count = error_count)
+                ))
                 .fill(theme::get(ui).warning),
         );
     }
@@ -579,31 +583,32 @@ fn render_export_done(
                 strip.cell(|ui| {
                     if error_count == 0 {
                         ui.label(
-                            egui::RichText::new("Exportación completada")
+                            egui::RichText::new(t!("export-done"))
                                 .color(theme::get(ui).success)
                                 .strong(),
                         );
                     } else {
                         ui.label(
-                            egui::RichText::new("Exportación completada con errores")
+                            egui::RichText::new(t!("export-done-errors"))
                                 .color(theme::get(ui).warning)
                                 .strong(),
                         );
                     }
                     ui.add_space(8.0);
-                    ui.label(format!("Tablas: {total_tables}"));
+                    ui.label(t!("export-summary-tables", count = total_tables));
                     if error_count > 0 {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "Con error: {error_count} (detalle en el log)"
-                            ))
-                            .color(theme::get(ui).danger),
+                            egui::RichText::new(t!("export-summary-errors", count = error_count))
+                                .color(theme::get(ui).danger),
                         );
                     }
-                    ui.label(format!("Filas:  {}", format_rows(total_rows)));
-                    ui.label(format!("Tiempo: {:.1}s", elapsed_ms as f64 / 1000.0));
+                    ui.label(t!("export-summary-rows", rows = format_rows(total_rows)));
+                    ui.label(t!(
+                        "export-summary-time",
+                        seconds = format!("{:.1}", elapsed_ms as f64 / 1000.0)
+                    ));
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Destino:").strong());
+                    ui.label(egui::RichText::new(t!("export-destination-label")).strong());
                     ui.label(destination_label(destination));
                 });
             });
@@ -611,7 +616,7 @@ fn render_export_done(
 
     ui.separator();
     ui.horizontal(|ui| {
-        if ui.button("Cerrar").clicked() {
+        if ui.button(t!("common-close")).clicked() {
             action = ModalAction::CloseExport;
         }
     });
@@ -621,7 +626,7 @@ fn render_export_done(
 fn render_export_cancelled(ui: &mut egui::Ui, tables: &[TableExportEntry]) -> ModalAction {
     let mut action = ModalAction::None;
 
-    ui.add(egui::ProgressBar::new(0.0).text("✗ Cancelado"));
+    ui.add(egui::ProgressBar::new(0.0).text(format!("✗ {}", t!("export-cancelled"))));
     ui.add_space(6.0);
 
     egui::ScrollArea::vertical()
@@ -642,7 +647,7 @@ fn render_export_cancelled(ui: &mut egui::Ui, tables: &[TableExportEntry]) -> Mo
 
     ui.separator();
     ui.horizontal(|ui| {
-        if ui.button("Cerrar").clicked() {
+        if ui.button(t!("common-close")).clicked() {
             action = ModalAction::CloseExport;
         }
     });
@@ -652,11 +657,11 @@ fn render_export_cancelled(ui: &mut egui::Ui, tables: &[TableExportEntry]) -> Mo
 fn render_export_failed(ui: &mut egui::Ui, error: &str) -> ModalAction {
     let mut action = ModalAction::None;
 
-    ui.add(egui::ProgressBar::new(0.0).text("✗ Error"));
+    ui.add(egui::ProgressBar::new(0.0).text(format!("✗ {}", t!("error-title"))));
     ui.add_space(6.0);
 
     ui.label(
-        egui::RichText::new("La exportación falló:")
+        egui::RichText::new(t!("export-failed"))
             .color(theme::get(ui).danger)
             .strong(),
     );
@@ -665,7 +670,7 @@ fn render_export_failed(ui: &mut egui::Ui, error: &str) -> ModalAction {
 
     ui.separator();
     ui.horizontal(|ui| {
-        if ui.button("Cerrar").clicked() {
+        if ui.button(t!("common-close")).clicked() {
             action = ModalAction::CloseExport;
         }
     });
@@ -674,11 +679,11 @@ fn render_export_failed(ui: &mut egui::Ui, error: &str) -> ModalAction {
 
 fn format_rows(n: u64) -> String {
     if n >= 1_000_000 {
-        format!("{:.1}M f.", n as f64 / 1_000_000.0)
+        format!("{:.1}M {}", n as f64 / 1_000_000.0, t!("export-rows-unit"))
     } else if n >= 1_000 {
-        format!("{:.1}K f.", n as f64 / 1_000.0)
+        format!("{:.1}K {}", n as f64 / 1_000.0, t!("export-rows-unit"))
     } else {
-        format!("{n} f.")
+        format!("{n} {}", t!("export-rows-unit"))
     }
 }
 

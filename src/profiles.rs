@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::db::{ConnectionParams, Engine, TlsMode};
+use crate::i18n::t;
 
 /// Identifying colour of a connection: tints its tab and its sidebar tree.
 /// The presets are resolved in theme.rs with light/dark variants.
@@ -30,17 +31,17 @@ impl ConnColor {
         ConnColor::Purple,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            ConnColor::Blue => "Azul",
-            ConnColor::Teal => "Turquesa",
-            ConnColor::Green => "Verde",
-            ConnColor::Yellow => "Amarillo",
-            ConnColor::Orange => "Naranja",
-            ConnColor::Red => "Rojo",
-            ConnColor::Pink => "Rosa",
-            ConnColor::Purple => "Morado",
-            ConnColor::Custom(_) => "Personalizado",
+            ConnColor::Blue => t!("color-blue"),
+            ConnColor::Teal => t!("color-teal"),
+            ConnColor::Green => t!("color-green"),
+            ConnColor::Yellow => t!("color-yellow"),
+            ConnColor::Orange => t!("color-orange"),
+            ConnColor::Red => t!("color-red"),
+            ConnColor::Pink => t!("color-pink"),
+            ConnColor::Purple => t!("color-purple"),
+            ConnColor::Custom(_) => t!("color-custom"),
         }
     }
 }
@@ -113,7 +114,7 @@ impl ConnectionProfile {
         }
         if self.tls != TlsMode::default() {
             text.push_str(" · ");
-            text.push_str(self.tls.label());
+            text.push_str(&self.tls.label());
         }
         text
     }

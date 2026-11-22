@@ -12,6 +12,8 @@ use std::sync::OnceLock;
 
 use keyring_core::{Entry, Error};
 
+use crate::i18n::t;
+
 const SERVICE: &str = "rustql";
 
 /// Result of initializing the store (on Linux, connecting to D-Bus).
@@ -23,7 +25,7 @@ pub fn init() -> bool {
         .get_or_init(|| {
             let result = open_store();
             if let Err(e) = &result {
-                log::warn!("Llavero del sistema no disponible: {e}");
+                log::warn!("System keyring not available: {e}");
             }
             result
         })
@@ -48,7 +50,7 @@ pub fn available() -> Option<bool> {
 
 fn entry(id: &str, label: &str) -> Result<Entry, String> {
     if !init() {
-        return Err("no hay llavero del sistema disponible".into());
+        return Err(t!("keyring-unavailable"));
     }
     // Only Secret Service supports a label (the one shown in Seahorse/KWallet).
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -91,7 +93,7 @@ pub fn delete(id: &str) -> Result<(), String> {
 pub fn delete_in_background(id: String) {
     std::thread::spawn(move || {
         if let Err(e) = delete(&id) {
-            log::warn!("No se pudo borrar la contraseña del llavero: {e}");
+            log::warn!("Could not delete the password from the keyring: {e}");
         }
     });
 }
@@ -99,7 +101,7 @@ pub fn delete_in_background(id: String) {
 fn describe(e: Error) -> String {
     match e {
         Error::NoStorageAccess(err) => {
-            format!("el llavero está bloqueado o se canceló el desbloqueo ({err})")
+            t!("keyring-locked", error = err.to_string())
         }
         e => e.to_string(),
     }

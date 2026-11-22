@@ -8,6 +8,7 @@ use eframe::egui;
 use super::jobs::JobResult;
 use super::{SelectedNode, Session};
 use crate::db::{ColumnInfo, DatabaseInfo, DbBackend, DbResult, TableEntry, TableInfo, TableKind};
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::ui::tab_bar::ActiveTab;
 use crate::ui::theme;
@@ -125,11 +126,11 @@ impl SchemaCache {
 /// Spinner while `value` loads, or the error if it failed.
 pub fn show_loading<T>(ui: &mut egui::Ui, value: &Loadable<T>) {
     match value {
-        Loadable::Failed(e) => theme::error_card(ui, &format!("Error: {e}")),
+        Loadable::Failed(e) => theme::error_card(ui, &t!("common-error", error = e.as_str())),
         _ => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Cargando…");
+                ui.label(t!("common-loading"));
             });
         }
     }

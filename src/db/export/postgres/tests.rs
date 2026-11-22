@@ -294,7 +294,7 @@ fn copia_a_otra_bbdd_y_se_puede_repetir() {
     assert_same(&after_again, &original);
     let blocked = errors(&blocked);
     assert!(
-        matches!(blocked.as_slice(), [e] if e.contains("expórtalas también")),
+        matches!(blocked.as_slice(), [e] if e.contains("export those too")),
         "{blocked:?}"
     );
     assert_eq!(finished(&empty), Some((3, 0)), "{:?}", errors(&empty));
@@ -339,7 +339,7 @@ fn a_otro_servidor_y_nunca_sobre_si_misma() {
 
     for events in [&onto_itself, &same_server_db] {
         assert!(
-            matches!(events.as_slice(), [ExportEvent::Failed(e)] if e == SAME_TARGET_ERROR),
+            matches!(events.as_slice(), [ExportEvent::Failed(e)] if *e == same_target_error()),
             "debe abortar antes de tocar nada: {:?}",
             errors(events)
         );

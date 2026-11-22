@@ -2,6 +2,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::db::ColumnInfo;
+use crate::i18n::t;
 use crate::ui::theme;
 
 /// "Table" panel: list of columns with structure information.
@@ -9,7 +10,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
     ui.horizontal(|ui| {
         ui.strong(format!("{db}.{table}"));
         ui.label(
-            egui::RichText::new(format!("— {} columnas", columns.len()))
+            egui::RichText::new(t!("structure-column-count", count = columns.len()))
                 .color(theme::get(ui).text_muted),
         );
     });
@@ -17,7 +18,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
 
     if columns.is_empty() {
         // Already loaded and with nothing to list (while loading it never gets here)
-        ui.label(egui::RichText::new("(sin columnas)").color(theme::get(ui).text_muted));
+        ui.label(egui::RichText::new(t!("structure-no-columns")).color(theme::get(ui).text_muted));
         return;
     }
 
@@ -32,9 +33,17 @@ pub fn show(ui: &mut egui::Ui, db: &str, table: &str, columns: &[ColumnInfo]) {
         .column(Column::auto().at_least(50.0)) // key
         .column(Column::remainder().at_least(100.0).clip(true)) // extra
         .header(24.0, |mut header| {
-            for name in &["Columna", "Tipo", "Nullable", "Default", "Clave", "Extra"] {
+            let names = [
+                t!("structure-col-column"),
+                t!("structure-col-type"),
+                "Nullable".to_owned(),
+                "Default".to_owned(),
+                t!("structure-col-key"),
+                "Extra".to_owned(),
+            ];
+            for name in &names {
                 header.col(|ui| {
-                    ui.label(egui::RichText::new(*name).color(theme::get(ui).text_muted));
+                    ui.label(egui::RichText::new(name.as_str()).color(theme::get(ui).text_muted));
                 });
             }
         })

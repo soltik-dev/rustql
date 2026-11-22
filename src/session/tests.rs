@@ -1381,14 +1381,14 @@ fn guardar_y_las_escrituras_se_confirman_con_un_aviso() {
     s.commit_pending_changes(&mut sh, AfterCommit::ReloadData);
     assert!(matches!(s.modal, ModalState::None));
     finish_jobs(&mut s, &mut sh);
-    assert_eq!(sh.toasts.texts(), ["2 cambios guardados en «t»"]);
+    assert_eq!(sh.toasts.texts(), ["2 changes saved in “t”"]);
 
     s.truncate("db".into(), Some(vec!["t".into()]));
     s.create_table("db".into(), "nueva".into(), "CREATE TABLE …".into());
     finish_jobs(&mut s, &mut sh);
     let texts = sh.toasts.texts();
-    assert!(texts.contains(&"Tabla «db.t» vaciada"), "{texts:?}");
-    assert!(texts.contains(&"Tabla «db.nueva» creada"), "{texts:?}");
+    assert!(texts.contains(&"Table “db.t” emptied"), "{texts:?}");
+    assert!(texts.contains(&"Table “db.nueva” created"), "{texts:?}");
     assert!(!sh.toasts.has_error());
 }
 
@@ -1403,7 +1403,7 @@ fn copiar_filas_dice_cuantas_y_en_que_formato() {
         ..Default::default()
     };
     s.apply_signals(&ctx, &mut sh, copy(None), FrameKeys::default());
-    assert_eq!(sh.toasts.texts(), ["2 filas copiadas (CSV)"]);
+    assert_eq!(sh.toasts.texts(), ["2 rows copied (CSV)"]);
 
     // Those of a SQL tab's result, the same
     s.active_tab = ActiveTab::Sql(0);
@@ -1416,7 +1416,7 @@ fn copiar_filas_dice_cuantas_y_en_que_formato() {
     s.apply_signals(&ctx, &mut sh, signals, FrameKeys::default());
     assert_eq!(
         sh.toasts.texts(),
-        ["2 filas copiadas (CSV)", "1 fila copiada (TSV)"]
+        ["2 rows copied (CSV)", "1 row copied (TSV)"]
     );
 }
 

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use eframe::egui;
 
 use crate::db::TableKind;
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::table_state::table_key;
 use crate::ui::icons::*;
@@ -90,7 +91,7 @@ pub struct SidebarOutput {
 fn loading_label(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.label("Cargando…");
+        ui.label(t!("common-loading"));
     });
 }
 
@@ -128,7 +129,7 @@ pub fn show(
     let p = theme::get(ui);
 
     ui.add_space(4.0);
-    theme::section_label(ui, "Esquema");
+    theme::section_label(ui, &t!("tree-title"));
     ui.add_space(2.0);
     toolbar(ui, table_search, show_only_fav, &mut out);
     ui.separator();
@@ -136,7 +137,7 @@ pub fn show(
     let dbs = match view.databases {
         Loadable::Ready(dbs) => dbs,
         Loadable::Failed(e) => {
-            ui.colored_label(p.danger, format!("Error: {e}"));
+            ui.colored_label(p.danger, t!("common-error", error = e.to_string()));
             return out;
         }
         _ => {
@@ -180,15 +181,15 @@ fn toolbar(
             *show_only_fav = !*show_only_fav;
         }
         fav_btn.on_hover_text(if *show_only_fav {
-            "Mostrando solo favoritos"
+            t!("tree-showing-favourites")
         } else {
-            "Filtrar favoritos"
+            t!("tree-filter-favourites")
         });
         let refresh_btn = ui.add(egui::Button::new(REFRESH).small());
         if refresh_btn.clicked() {
             out.action = SidebarAction::Refresh;
         }
-        refresh_btn.on_hover_text("Recargar esquema");
+        refresh_btn.on_hover_text(t!("tree-reload"));
 
         // Pill-style search box
         egui::Frame::NONE
@@ -200,7 +201,7 @@ fn toolbar(
                 let search_resp = ui.add(
                     egui::TextEdit::singleline(table_search)
                         .id_salt("sidebar_table_search")
-                        .hint_text(format!("Buscar…  {CMD}F"))
+                        .hint_text(format!("{}  {CMD}F", t!("tree-search")))
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY),
                 );
@@ -285,15 +286,15 @@ impl Tree<'_> {
         }
         header.context_menu(|ui| {
             if !self.view.single_database {
-                if menu_item(ui, format!("{PLUS} Crear base de datos")) {
+                if menu_item(ui, format!("{PLUS} {}", t!("tree-create-database"))) {
                     out.action = SidebarAction::CreateDatabase;
                 }
                 ui.separator();
             }
-            if menu_item(ui, format!("{REFRESH} Refrescar")) {
+            if menu_item(ui, format!("{REFRESH} {}", t!("tree-refresh"))) {
                 out.action = SidebarAction::Refresh;
             }
-            if menu_item(ui, format!("{PLUG} Desconectar")) {
+            if menu_item(ui, format!("{PLUG} {}", t!("tree-disconnect"))) {
                 out.action = SidebarAction::Disconnect;
             }
         });
@@ -355,7 +356,7 @@ impl Tree<'_> {
             .show(ui, |ui| match listing {
                 Listing::Hidden => {}
                 Listing::Failed(e) => {
-                    ui.colored_label(p.danger, format!("Error: {e}"));
+                    ui.colored_label(p.danger, t!("common-error", error = e.to_string()));
                 }
                 Listing::Loading => loading_label(ui),
                 // Requested when first expanded
@@ -365,9 +366,9 @@ impl Tree<'_> {
                 }
                 Listing::Tables(tables) if tables.is_empty() => {
                     ui.label(if self.filtering() {
-                        "(sin coincidencias)"
+                        t!("tree-no-matches")
                     } else {
-                        "(sin tablas)"
+                        t!("tree-no-tables")
                     });
                 }
                 Listing::Tables(tables) => {
@@ -383,18 +384,18 @@ impl Tree<'_> {
         }
         header.context_menu(|ui| {
             let db = || db.clone();
-            if menu_item(ui, format!("{PLUS} Crear tabla")) {
+            if menu_item(ui, format!("{PLUS} {}", t!("tree-create-table"))) {
                 out.action = SidebarAction::CreateTable { db: db() };
             }
-            if menu_item(ui, format!("{EXPORT} Exportar base de datos")) {
+            if menu_item(ui, format!("{EXPORT} {}", t!("tree-export-database"))) {
                 out.action = SidebarAction::ExportDatabase(db());
             }
             ui.separator();
-            if menu_item(ui, format!("{TRASH} Vaciar todas las tablas")) {
+            if menu_item(ui, format!("{TRASH} {}", t!("tree-empty-all-tables"))) {
                 out.action = SidebarAction::TruncateAllTables { db: db() };
             }
             if !self.view.single_database
-                && danger_item(ui, format!("{TRASH} Eliminar base de datos"))
+                && danger_item(ui, format!("{TRASH} {}", t!("tree-drop-database")))
             {
                 out.action = SidebarAction::DropDatabase { db: db() };
             }
@@ -529,50 +530,66 @@ impl Tree<'_> {
                     }
                 };
             let fav_label = if is_fav {
-                format!("{STAR} Quitar de favoritos")
+                format!("{STAR} {}", t!("tree-unfavourite"))
             } else {
-                format!("{STAR_FILLED} Marcar favorito")
+                format!("{STAR_FILLED} {}", t!("tree-favourite"))
             };
             item(ui, fav_label, |db, table| SidebarAction::ToggleFav {
                 db,
                 table,
             });
-            item(ui, format!("{EDIT} Ver estructura"), |db, table| {
-                SidebarAction::OpenTableStructure { db, table }
-            });
-            item(ui, format!("{CODE} Abrir en SQL"), |db, table| {
-                SidebarAction::OpenInSql { db, table }
-            });
-            item(ui, format!("{COPY} Copiar nombre"), |_, table| {
-                SidebarAction::CopyTableName(table)
-            });
+            item(
+                ui,
+                format!("{EDIT} {}", t!("tree-show-structure")),
+                |db, table| SidebarAction::OpenTableStructure { db, table },
+            );
+            item(
+                ui,
+                format!("{CODE} {}", t!("tree-open-in-sql")),
+                |db, table| SidebarAction::OpenInSql { db, table },
+            );
+            item(
+                ui,
+                format!("{COPY} {}", t!("tree-copy-name")),
+                |_, table| SidebarAction::CopyTableName(table),
+            );
             // A view has no data of its own: it is neither cloned nor emptied,
             // and what matters is its definition
             if kind.is_view() {
-                item(ui, format!("{VIEW} Ver definición"), |db, table| {
-                    SidebarAction::ViewDefinition { db, table }
-                });
-                item(ui, format!("{EXPORT} Exportar vista"), |db, table| {
-                    SidebarAction::ExportTable { db, table }
-                });
+                item(
+                    ui,
+                    format!("{VIEW} {}", t!("tree-show-definition")),
+                    |db, table| SidebarAction::ViewDefinition { db, table },
+                );
+                item(
+                    ui,
+                    format!("{EXPORT} {}", t!("tree-export-view")),
+                    |db, table| SidebarAction::ExportTable { db, table },
+                );
                 ui.separator();
-                if danger_item(ui, format!("{TRASH} Eliminar vista")) {
+                if danger_item(ui, format!("{TRASH} {}", t!("tree-drop-view"))) {
                     let (db, table) = names();
                     out.action = SidebarAction::DropTable { db, table };
                 }
                 return;
             }
-            item(ui, format!("{CLONE} Clonar tabla"), |db, table| {
-                SidebarAction::CloneTable { db, table }
-            });
-            item(ui, format!("{EXPORT} Exportar tabla"), |db, table| {
-                SidebarAction::ExportTable { db, table }
-            });
+            item(
+                ui,
+                format!("{CLONE} {}", t!("tree-clone-table")),
+                |db, table| SidebarAction::CloneTable { db, table },
+            );
+            item(
+                ui,
+                format!("{EXPORT} {}", t!("tree-export-table")),
+                |db, table| SidebarAction::ExportTable { db, table },
+            );
             ui.separator();
-            item(ui, format!("{TRASH} Vaciar tabla"), |db, table| {
-                SidebarAction::TruncateTable { db, table }
-            });
-            if danger_item(ui, format!("{TRASH} Eliminar tabla")) {
+            item(
+                ui,
+                format!("{TRASH} {}", t!("tree-empty-table")),
+                |db, table| SidebarAction::TruncateTable { db, table },
+            );
+            if danger_item(ui, format!("{TRASH} {}", t!("tree-drop-table"))) {
                 let (db, table) = names();
                 out.action = SidebarAction::DropTable { db, table };
             }

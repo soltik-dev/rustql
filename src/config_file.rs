@@ -34,7 +34,7 @@ pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
         Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return T::default(),
         Err(e) => {
-            log::warn!("No se pudo leer {}: {e}", path.display());
+            log::warn!("Could not read {}: {e}", path.display());
             return T::default();
         }
     };
@@ -44,12 +44,12 @@ pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
             let backup = backup_path(&path);
             match std::fs::rename(&path, &backup) {
                 Ok(()) => log::warn!(
-                    "{} no es válido ({e}): se ha apartado como {}",
+                    "{} is not valid ({e}): set aside as {}",
                     path.display(),
                     backup.display()
                 ),
                 Err(re) => log::warn!(
-                    "{} no es válido ({e}) y no se pudo apartar: {re}",
+                    "{} is not valid ({e}) and could not be set aside: {re}",
                     path.display()
                 ),
             }
@@ -62,7 +62,7 @@ pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
 /// file (0600) and the directory (0700), on Unix.
 pub fn save<T: Serialize>(name: &str, value: &T, private: bool) {
     if let Err(e) = try_save(name, value, private) {
-        log::warn!("No se pudo guardar {name}: {e}");
+        log::warn!("Could not save {name}: {e}");
     }
 }
 
@@ -71,7 +71,7 @@ fn try_save<T: Serialize>(name: &str, value: &T, private: bool) -> io::Result<()
     // already private to them.
     #[cfg(not(unix))]
     let _ = private;
-    let dir = dir().ok_or_else(|| io::Error::other("sin directorio de configuración"))?;
+    let dir = dir().ok_or_else(|| io::Error::other("no configuration directory"))?;
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     if private {

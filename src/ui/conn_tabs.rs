@@ -3,12 +3,13 @@
 
 use eframe::egui;
 
+use crate::i18n::t;
 use crate::ui::icons::PLUS;
 use crate::ui::theme;
 
 /// What the bar needs from each session.
 pub struct ConnTab<'a> {
-    pub title: &'a str,
+    pub title: std::borrow::Cow<'a, str>,
     /// "user@host:port"; empty while the tab is on the form.
     pub tooltip: String,
     pub color: Option<egui::Color32>,
@@ -52,7 +53,7 @@ pub fn show(ui: &mut egui::Ui, tabs: &[ConnTab], active: usize) -> ConnTabsActio
         ui.add_space(4.0);
         if ui
             .add(egui::Button::new(PLUS).frame(false))
-            .on_hover_text("Nueva conexión")
+            .on_hover_text(t!("conn-tabs-new"))
             .clicked()
         {
             action = ConnTabsAction::New;
@@ -74,7 +75,7 @@ fn tab_widget(
     let text_color = if active { p.text_primary } else { p.text_muted };
 
     let mut job = egui::text::LayoutJob::simple_singleline(
-        tab.title.to_owned(),
+        tab.title.to_string(),
         egui::TextStyle::Body.resolve(ui.style()),
         text_color,
     );
@@ -167,5 +168,5 @@ fn tab_widget(
         );
     }
 
-    (resp, close_resp.on_hover_text("Cerrar conexión"))
+    (resp, close_resp.on_hover_text(t!("conn-tabs-close")))
 }

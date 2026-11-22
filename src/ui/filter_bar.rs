@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use crate::i18n::t;
 use crate::ui::theme;
 
 #[derive(Default)]
@@ -23,9 +24,7 @@ pub fn show(
 
     ui.horizontal(|ui| {
         // ── History button ───────────────────────────────────────────────
-        let hist_btn = ui
-            .button("▾")
-            .on_hover_text("Historial de filtros recientes");
+        let hist_btn = ui.button("▾").on_hover_text(t!("filter-history-hint"));
         let popup_id = ui.make_persistent_id("filter_history_popup");
 
         if hist_btn.clicked() {
@@ -40,7 +39,7 @@ pub fn show(
                 ui.set_min_width(280.0);
                 let mut picked: Option<String> = None;
                 if filter_history.is_empty() {
-                    ui.label("Sin historial");
+                    ui.label(t!("filter-no-history"));
                 } else {
                     egui::ScrollArea::vertical()
                         .max_height(200.0)
@@ -69,24 +68,25 @@ pub fn show(
         let resp = ui
             .add(
                 egui::TextEdit::singleline(filter_text)
-                    .hint_text("id = 1 AND nombre LIKE 'foo%'")
+                    .hint_text(t!("filter-hint"))
                     .desired_width(ui.available_width() - 160.0),
             )
-            .on_hover_text("SQL directo — se inyecta como cláusula WHERE en la consulta");
+            .on_hover_text(t!("filter-field-hint"));
 
         // Enter in the field also applies
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = FilterAction::Apply;
         }
 
-        if theme::primary_button(ui, "Aplicar  F9").clicked() || f9_pressed {
+        if theme::primary_button(ui, format!("{}  F9", t!("filter-apply"))).clicked() || f9_pressed
+        {
             action = FilterAction::Apply;
         }
 
         if !filter_text.is_empty()
             && ui
                 .add(egui::Button::new("×").frame(false))
-                .on_hover_text("Limpiar filtro")
+                .on_hover_text(t!("filter-clear"))
                 .clicked()
         {
             filter_text.clear();

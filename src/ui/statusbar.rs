@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::db::Security;
+use crate::i18n::t;
 use crate::session::ConnectionStatus;
 use crate::ui::icons::{LOCK, UNLOCK};
 use crate::ui::theme;
@@ -18,12 +19,12 @@ pub fn show(
 ) {
     let p = theme::get(ui);
     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.toggle_value(show_sidebar, "Esquema");
+        ui.toggle_value(show_sidebar, t!("status-schema"));
         ui.separator();
-        ui.toggle_value(show_log, "Log");
+        ui.toggle_value(show_log, t!("status-log"));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.toggle_value(show_settings, "Ajustes");
+            ui.toggle_value(show_settings, t!("status-settings"));
             ui.separator();
             // Version
             ui.label(egui::RichText::new(format!("v{APP_VERSION}")).color(p.text_disabled));
@@ -50,7 +51,7 @@ pub fn show(
                     status_dot(ui, p.success);
                 }
                 None => {
-                    ui.label(egui::RichText::new("Sin conexión").color(p.text_muted));
+                    ui.label(egui::RichText::new(t!("status-disconnected")).color(p.text_muted));
                     status_dot(ui, p.danger);
                 }
             }

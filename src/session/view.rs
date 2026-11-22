@@ -5,6 +5,7 @@ use eframe::egui;
 
 use super::schema::show_loading;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::ui::connection_panel::{FormView, SaveProfile};
 use crate::ui::db_info::DbInfoAction;
@@ -145,13 +146,13 @@ impl Session {
             ui.vertical_centered(|ui| {
                 ui.spinner();
                 ui.add_space(10.0);
-                ui.strong(format!("Conectando a {}...", host));
+                ui.strong(t!("session-connecting", host = host));
                 ui.add_space(6.0);
                 ui.label(status.as_str());
                 ui.add_space(4.0);
                 ui.label(format!("{}s", elapsed));
                 ui.add_space(16.0);
-                if ui.button("Cancelar").clicked() {
+                if ui.button(t!("common-cancel")).clicked() {
                     signals.cancel_connect = true;
                 }
             });
@@ -334,7 +335,7 @@ impl Session {
                         }
                     } else {
                         ui.centered_and_justified(|ui| {
-                            ui.label("Selecciona una base de datos en el panel izquierdo");
+                            ui.label(t!("session-pick-database"));
                         });
                     }
                 }
@@ -350,7 +351,7 @@ impl Session {
                         }
                     } else {
                         ui.centered_and_justified(|ui| {
-                            ui.label("Selecciona una tabla en el panel izquierdo");
+                            ui.label(t!("session-pick-table"));
                         });
                     }
                 }

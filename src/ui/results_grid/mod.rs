@@ -25,6 +25,7 @@ pub use self::state::{
     RowRef, SortDir, SortSpec, TableViewState,
 };
 use crate::db::{ColumnInfo, Engine, QueryResult, TableKind};
+use crate::i18n::t;
 use crate::settings::CopyFormat;
 use crate::ui::icons::{PLUS, VIEW};
 use crate::ui::{CMD, theme};
@@ -231,23 +232,23 @@ pub fn show(
 ) -> GridAction {
     let Some((db, table)) = selected_table else {
         ui.centered_and_justified(|ui| {
-            ui.label("Selecciona una tabla en el panel izquierdo");
+            ui.label(t!("session-pick-table"));
         });
         return GridAction::None;
     };
     if let Some(err) = &view.table_error {
         ui.label(format!("{db}.{table}"));
         ui.separator();
-        theme::error_card(ui, &format!("Error: {err}"));
+        theme::error_card(ui, &t!("common-error", error = err.as_str()));
         return GridAction::None;
     }
     let Some(data) = &view.table_data else {
         ui.centered_and_justified(|ui| {
             if busy {
                 ui.spinner();
-                ui.label("Ejecutando consulta…");
+                ui.label(t!("grid-running-query"));
             } else {
-                ui.label("Cargando…");
+                ui.label(t!("common-loading"));
             }
         });
         return GridAction::None;
@@ -274,7 +275,7 @@ pub fn show(
     ui.separator();
 
     if data.columns.is_empty() {
-        ui.label("(sin columnas)");
+        ui.label(t!("structure-no-columns"));
         return bar_action;
     }
 
@@ -429,15 +430,16 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             // The table does not fit in one page: which ones are shown and how to move
             let first = pager.page * pager.page_size + 1;
             let rows = if data.rows.is_empty() {
-                "— ninguna fila en esta página".to_string()
+                t!("grid-page-empty")
             } else {
-                format!("— filas {first}–{}", first + data.rows.len() - 1)
+                t!(
+                    "grid-page-rows",
+                    first = first,
+                    last = first + data.rows.len() - 1
+                )
             };
             ui.label(egui::RichText::new(rows).color(p.text_muted))
-                .on_hover_text(format!(
-                    "Se piden {} filas por página (se cambia en Ajustes).",
-                    pager.page_size
-                ));
+                .on_hover_text(t!("grid-page-size-hint", count = pager.page_size));
             let mut go = |ui: &mut egui::Ui, label: &str, hint: &str, page: Option<usize>| {
                 let button = ui
                     .add_enabled(!busy && page.is_some(), egui::Button::new(label).small())
@@ -450,39 +452,42 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
             };
             go(
                 ui,
-                "‹ Anterior",
-                "Página anterior  Alt+Re Pág",
+                &format!("‹ {}", t!("grid-page-previous")),
+                &format!(
+                    "{}  Alt+{}",
+                    t!("grid-page-previous-hint"),
+                    t!("key-page-up")
+                ),
                 pager.previous(),
             );
             go(
                 ui,
-                "Siguiente ›",
-                "Página siguiente  Alt+Av Pág",
+                &format!("{} ›", t!("grid-page-next")),
+                &format!("{}  Alt+{}", t!("grid-page-next-hint"), t!("key-page-down")),
                 pager.next(),
             );
         } else {
             ui.label(
-                egui::RichText::new(format!("— {} filas", data.rows.len())).color(p.text_muted),
+                egui::RichText::new(t!("grid-row-count", count = data.rows.len()))
+                    .color(p.text_muted),
             );
         }
         if busy {
             ui.separator();
             ui.spinner();
-            ui.label("Cargando…");
+            ui.label(t!("common-loading"));
         } else if bar.kind.is_view() {
             // No data of its own: neither new rows nor the key warning
             ui.separator();
             ui.label(
-                egui::RichText::new(format!("{VIEW} Vista · solo lectura")).color(p.text_muted),
+                egui::RichText::new(format!("{VIEW} {}", t!("grid-view-read-only")))
+                    .color(p.text_muted),
             )
-            .on_hover_text(
-                "Los datos de una vista son los de sus tablas: se editan en ellas.\n\
-                     Su definición se abre desde el menú de la vista en el árbol.",
-            );
+            .on_hover_text(t!("grid-view-read-only-hint"));
         } else if !data.columns.is_empty()
             && ui
-                .small_button(format!("{PLUS} Fila"))
-                .on_hover_text(format!("Insertar una fila  {CMD}Ins"))
+                .small_button(format!("{PLUS} {}", t!("grid-row")))
+                .on_hover_text(format!("{}  {CMD}Ins", t!("grid-insert-row-hint")))
                 .clicked()
         {
             // In view even when there are no rows to open the menu on
@@ -491,19 +496,17 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
         if !bar.keyed && !bar.kind.is_view() {
             // Before someone edits only to find out when saving
             ui.separator();
-            ui.label(egui::RichText::new("⚠ Sin clave primaria").color(p.warning))
-                .on_hover_text(
-                    "Sin clave primaria no hay forma segura de identificar una fila:\n\
-                     las que ya existen no se pueden editar ni eliminar desde aquí.\n\
-                     Sí se pueden añadir filas nuevas.",
-                );
+            ui.label(
+                egui::RichText::new(format!("⚠ {}", t!("grid-no-primary-key"))).color(p.warning),
+            )
+            .on_hover_text(t!("grid-no-primary-key-hint"));
         }
 
         if sorts.is_empty() {
             return;
         }
         ui.separator();
-        ui.label("Orden:");
+        ui.label(t!("grid-sort"));
         for (i, spec) in sorts.iter().enumerate() {
             let arrow = if spec.dir == SortDir::Asc {
                 "↑"
@@ -519,7 +522,7 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
                     ui.label(format!("{} {arrow}", spec.col_name));
                     if ui
                         .small_button("x")
-                        .on_hover_text(format!("Quitar '{}'", spec.col_name))
+                        .on_hover_text(t!("grid-sort-remove", column = &spec.col_name))
                         .clicked()
                     {
                         let mut specs = sorts.to_vec();
@@ -530,8 +533,8 @@ fn info_bar(ui: &mut egui::Ui, bar: &InfoBar) -> GridAction {
         }
         if sorts.len() > 1
             && ui
-                .small_button("Limpiar todo")
-                .on_hover_text("Eliminar toda la ordenación")
+                .small_button(t!("grid-sort-clear"))
+                .on_hover_text(t!("grid-sort-clear-hint"))
                 .clicked()
         {
             action = GridAction::SortChanged(Vec::new());

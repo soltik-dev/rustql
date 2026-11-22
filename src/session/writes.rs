@@ -6,6 +6,7 @@ use std::time::Instant;
 use super::jobs::JobResult;
 use super::{SelectedNode, Session, Shared};
 use crate::db::{DbBackend, DbResult, Statement};
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::ui::modals::{ModalState, Reload};
@@ -230,17 +231,17 @@ impl Session {
             Ok(stmts) => stmts,
             Err(message) => {
                 self.modal = ModalState::Error {
-                    title: "No se pueden guardar los cambios".into(),
+                    title: t!("save-cannot-title"),
                     message,
                 };
                 return;
             }
         };
-        let summary = format!(
-            "Guardar cambios: {} eliminación(es), {} edición(es), {} inserción(es) (transacción)",
-            self.table_view.pending_deletes.len(),
-            self.table_view.pending_edits.len(),
-            self.table_view.pending_inserts.len()
+        let summary = t!(
+            "log-save-changes",
+            deletes = self.table_view.pending_deletes.len(),
+            edits = self.table_view.pending_edits.len(),
+            inserts = self.table_view.pending_inserts.len()
         );
         let count = self.pending_count();
         self.table_view.editing_cell = None;
@@ -292,17 +293,19 @@ impl Session {
                 self.close_form(|m| matches!(m, ModalState::CreateDatabase { .. }));
                 self.schema.databases = Loadable::NotLoaded;
                 self.schema.databases_info = Loadable::NotLoaded;
-                sh.toasts.success(format!("Base de datos «{name}» creada"));
+                sh.toasts.success(t!("database-created", db = name));
             }
             (Write::CreateTable { db, name }, Ok(())) => {
                 self.close_form(|m| matches!(m, ModalState::CreateTable { .. }));
                 self.invalidate_schema(&db);
-                sh.toasts.success(format!("Tabla «{db}.{name}» creada"));
+                sh.toasts
+                    .success(t!("table-created", table = format!("{db}.{name}")));
             }
             (Write::CloneTable { db, name }, Ok(())) => {
                 self.close_form(|m| matches!(m, ModalState::CloneTable { .. }));
                 self.invalidate_schema(&db);
-                sh.toasts.success(format!("Tabla «{db}.{name}» creada"));
+                sh.toasts
+                    .success(t!("table-created", table = format!("{db}.{name}")));
             }
             (
                 Write::CreateDatabase { .. } | Write::CreateTable { .. } | Write::CloneTable { .. },
@@ -312,34 +315,32 @@ impl Session {
             }
             (Write::DropDatabase { db }, Ok(())) => {
                 self.on_dropped(&db, None);
-                sh.toasts.success(format!("Base de datos «{db}» eliminada"));
+                sh.toasts.success(t!("database-dropped", db = db));
             }
             (Write::DropTable { db, table }, Ok(())) => {
                 self.on_dropped(&db, Some(&table));
-                sh.toasts.success(format!("«{db}.{table}» eliminada"));
+                sh.toasts
+                    .success(t!("table-dropped", table = format!("{db}.{table}")));
             }
             (Write::DropDatabase { db }, Err(message)) => {
-                self.show_error(format!("No se pudo eliminar «{db}»"), message);
+                self.show_error(t!("database-drop-failed", db = db), message);
             }
             (Write::DropTable { db, table }, Err(message)) => {
-                self.show_error(format!("No se pudo eliminar «{db}.{table}»"), message);
+                self.show_error(
+                    t!("table-drop-failed", table = format!("{db}.{table}")),
+                    message,
+                );
             }
             (Write::Truncate { db, tables, failed }, result) => {
                 self.after_truncate(sh, &db, &tables);
                 if let Err(message) = result {
-                    self.show_error(
-                        format!("No se pudieron listar las tablas de «{db}»"),
-                        message,
-                    );
+                    self.show_error(t!("tables-list-failed", db = db), message);
                 } else if !failed.is_empty() {
-                    self.show_error(
-                        format!("No se pudieron vaciar todas las tablas de «{db}»"),
-                        failed.join("\n"),
-                    );
+                    self.show_error(t!("tables-empty-failed", db = db), failed.join("\n"));
                 } else {
                     sh.toasts.success(match tables.as_slice() {
-                        [table] => format!("Tabla «{db}.{table}» vaciada"),
-                        tables => format!("{} tablas de «{db}» vaciadas", tables.len()),
+                        [table] => t!("table-emptied", table = format!("{db}.{table}")),
+                        tables => t!("tables-emptied", count = tables.len(), db = db),
                     });
                 }
             }
@@ -356,10 +357,8 @@ impl Session {
                 match result {
                     Ok(()) => {
                         self.discard_pending();
-                        sh.toasts.success(match count {
-                            1 => format!("1 cambio guardado en «{table}»"),
-                            n => format!("{n} cambios guardados en «{table}»"),
-                        });
+                        sh.toasts
+                            .success(t!("changes-saved", count = count, table = &table));
                         // If another table was opened meanwhile, what was waiting no longer applies
                         let still_open = matches!(
                             &self.schema.selected_node,
@@ -369,7 +368,7 @@ impl Session {
                             self.after_commit(sh, then);
                         }
                     }
-                    Err(message) => self.show_error("Error al guardar".into(), message),
+                    Err(message) => self.show_error(t!("save-failed-title"), message),
                 }
             }
         }
@@ -389,7 +388,7 @@ impl Session {
             ModalState::CreateDatabase { error, .. }
             | ModalState::CreateTable { error, .. }
             | ModalState::CloneTable { error, .. } => *error = Some(message),
-            _ => self.show_error("Error".into(), message),
+            _ => self.show_error(t!("error-title"), message),
         }
     }
 

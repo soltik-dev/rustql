@@ -12,12 +12,13 @@
 use std::collections::HashMap;
 
 use super::{
-    ExportDestination, ExportOptions, Job, RowBatch, SAME_TARGET_ERROR, Sink, Source, TableData,
-    TableScript, Totals, export_into, export_to_file, export_to_folder,
+    ExportDestination, ExportOptions, Job, RowBatch, Sink, Source, TableData, TableScript, Totals,
+    export_into, export_to_file, export_to_folder, same_target_error,
 };
 use crate::db::dialect::{PG_DEFAULT_SCHEMA, pg_split_table};
 use crate::db::postgres::{Dedicated, PostgresBackend};
 use crate::db::{ConnectionParams, DbBackend, DbResult, Engine};
+use crate::i18n::t;
 
 const SQL: Engine = Engine::Postgres;
 
@@ -29,10 +30,10 @@ pub(super) fn run(
     if let ExportDestination::SameServerDb { target_db } = destination
         && target_db == job.source_db
     {
-        return Err(SAME_TARGET_ERROR.into());
+        return Err(same_target_error());
     }
     let backend = PostgresBackend::connect_with_progress(params, |_| {})
-        .map_err(|e| format!("Conexión al origen: {e}"))?;
+        .map_err(|e| t!("export-source-connection", error = e.to_string()))?;
     let source = PgSource::open(&backend, job.source_db)?;
     match destination {
         ExportDestination::SqlFile { path } => export_to_file(&source, path, job),
@@ -43,15 +44,14 @@ pub(super) fn run(
         }
         ExportDestination::RemoteServer { params, target_db } => {
             let target = PostgresBackend::connect_with_progress(params, |_| {})
-                .map_err(|e| format!("Conexión al destino: {e}"))?;
+                .map_err(|e| t!("export-target-connection", error = e.to_string()))?;
             // Another profile (or another host name) may lead to the same server:
             // copying a database onto itself drops (DROP) or duplicates its data.
             if target_db == job.source_db
-                && same_server(&backend, &target).map_err(|e| {
-                    format!("No se pudo comprobar si el destino es el mismo servidor: {e}")
-                })?
+                && same_server(&backend, &target)
+                    .map_err(|e| t!("export-same-server-check-failed", error = e.to_string()))?
             {
-                return Err(SAME_TARGET_ERROR.into());
+                return Err(same_target_error());
             }
             export_into(&source, &mut PgSink::open(&target, target_db)?, job)
         }
@@ -75,9 +75,13 @@ struct PgSink<'a>(Dedicated<'a>);
 
 impl<'a> PgSink<'a> {
     fn open(backend: &'a PostgresBackend, target_db: &str) -> DbResult<Self> {
-        backend
-            .ensure_database(target_db)
-            .map_err(|e| format!("No se pudo crear la BBDD destino '{target_db}': {e}"))?;
+        backend.ensure_database(target_db).map_err(|e| {
+            t!(
+                "export-create-target-failed",
+                db = target_db,
+                error = e.to_string()
+            )
+        })?;
         backend.dedicated(target_db).map(Self)
     }
 }
@@ -141,7 +145,7 @@ impl<'a> PgSource<'a> {
         let row = result
             .rows
             .first()
-            .ok_or_else(|| format!("La tabla «{table}» ya no existe."))?;
+            .ok_or_else(|| t!("export-table-gone", table = table))?;
         Ok(Relation {
             oid: cell(row, 0).to_string(),
             kind: cell(row, 1).to_string(),
@@ -456,12 +460,8 @@ impl Source for PgSource<'_> {
         let rel = self.relation(table)?;
         match rel.kind.as_str() {
             "v" | "m" => self.view_script(&rel, options),
-            "f" => Err("Las tablas foráneas no se exportan.".into()),
-            "p" => Err(
-                "Las tablas particionadas no se exportan: sus particiones no se copiarían. \
-                 Usa pg_dump."
-                    .into(),
-            ),
+            "f" => Err(t!("export-foreign-table")),
+            "p" => Err(t!("export-partitioned-table")),
             _ => self.table_script(&rel, options),
         }
     }

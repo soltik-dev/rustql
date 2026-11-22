@@ -9,6 +9,7 @@ pub use self::export::{ExportPhase, ExportRunning, TableExportEntry, TableExport
 
 use crate::db::export::{ExportDestination, ExportOptions};
 use crate::db::{Engine, TableKind};
+use crate::i18n::t;
 use crate::profiles::ConnectionProfile;
 use crate::ui::icons::*;
 use crate::ui::results_grid::SortSpec;
@@ -50,17 +51,17 @@ pub enum FilterOperator {
 }
 
 impl FilterOperator {
-    fn label(&self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Self::Equals => "= igual a",
-            Self::NotEquals => "≠ distinto de",
-            Self::Contains => "LIKE '%…%' contiene",
-            Self::StartsWith => "LIKE '…%' empieza por",
-            Self::EndsWith => "LIKE '%…' termina en",
-            Self::GreaterThan => "> mayor que",
-            Self::LessThan => "< menor que",
-            Self::GreaterOrEqual => ">= mayor o igual",
-            Self::LessOrEqual => "<= menor o igual",
+            Self::Equals => format!("= {}", t!("filter-op-equals")),
+            Self::NotEquals => format!("≠ {}", t!("filter-op-not-equals")),
+            Self::Contains => format!("LIKE '%…%' {}", t!("filter-op-contains")),
+            Self::StartsWith => format!("LIKE '…%' {}", t!("filter-op-starts-with")),
+            Self::EndsWith => format!("LIKE '%…' {}", t!("filter-op-ends-with")),
+            Self::GreaterThan => format!("> {}", t!("filter-op-greater")),
+            Self::LessThan => format!("< {}", t!("filter-op-less")),
+            Self::GreaterOrEqual => format!(">= {}", t!("filter-op-greater-or-equal")),
+            Self::LessOrEqual => format!("<= {}", t!("filter-op-less-or-equal")),
         }
     }
 }
@@ -282,7 +283,7 @@ fn dialog(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     close_clicked = ui
                         .add(egui::Button::new("×").frame(false))
-                        .on_hover_text("Cerrar  Esc")
+                        .on_hover_text(format!("{}  Esc", t!("common-close")))
                         .clicked();
                 });
             }
@@ -308,7 +309,7 @@ fn form_buttons(ui: &mut egui::Ui, busy: bool, add_buttons: impl FnOnce(&mut egu
         ui.add_enabled_ui(!busy, add_buttons);
         if busy {
             ui.spinner();
-            ui.label("Ejecutando…");
+            ui.label(t!("sql-running"));
         }
     });
 }
@@ -364,8 +365,8 @@ pub fn show(
             preview,
         } => show_confirm_discard_sql(
             ctx,
-            &format!("Cerrar «{title}»"),
-            "Cerrar pestaña",
+            &t!("discard-sql-close-title", title = title.as_str()),
+            &t!("discard-sql-close"),
             preview,
             ModalAction::CloseSqlTab(*idx),
         ),
@@ -375,8 +376,8 @@ pub fn show(
             preview,
         } => show_confirm_discard_sql(
             ctx,
-            &format!("Limpiar «{title}»"),
-            "Limpiar",
+            &t!("discard-sql-clear-title", title = title.as_str()),
+            &t!("sql-clear"),
             preview,
             ModalAction::ClearSql(*idx),
         ),
@@ -429,54 +430,61 @@ fn show_create_database(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    dialog(ctx, "Crear base de datos", 280.0, Some(&mut open), |ui| {
-        egui::Grid::new("create_db_grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("Nombre:");
-                ui.add(
-                    egui::TextEdit::singleline(name)
-                        .desired_width(200.0)
-                        .hint_text("mi_base_de_datos"),
-                );
-                ui.end_row();
-
-                // Only for engines with a per-database charset
-                let charsets = engine.database_charsets();
-                if !charsets.is_empty() {
-                    ui.label("Charset:");
-                    egui::ComboBox::from_id_salt("charset_combo")
-                        .selected_text(charset.as_str())
-                        .show_ui(ui, |ui| {
-                            for &cs in charsets {
-                                ui.selectable_value(charset, cs.to_string(), cs);
-                            }
-                        });
+    dialog(
+        ctx,
+        &t!("tree-create-database"),
+        280.0,
+        Some(&mut open),
+        |ui| {
+            egui::Grid::new("create_db_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(t!("create-name"));
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .desired_width(200.0)
+                            .hint_text(t!("create-database-name-hint")),
+                    );
                     ui.end_row();
+
+                    // Only for engines with a per-database charset
+                    let charsets = engine.database_charsets();
+                    if !charsets.is_empty() {
+                        ui.label("Charset:");
+                        egui::ComboBox::from_id_salt("charset_combo")
+                            .selected_text(charset.as_str())
+                            .show_ui(ui, |ui| {
+                                for &cs in charsets {
+                                    ui.selectable_value(charset, cs.to_string(), cs);
+                                }
+                            });
+                        ui.end_row();
+                    }
+                });
+
+            if let Some(e) = error {
+                ui.separator();
+                theme::error_card(ui, &t!("common-error", error = e.as_str()));
+            }
+
+            ui.separator();
+            form_buttons(ui, busy, |ui| {
+                let create_clicked = theme::primary_button(ui, t!("create")).clicked();
+                let enter_pressed =
+                    ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (create_clicked || enter_pressed) && !name.trim().is_empty() {
+                    action = ModalAction::CreateDatabase {
+                        name: name.trim().to_string(),
+                        charset: charset.clone(),
+                    };
+                }
+                if ui.button(t!("common-cancel")).clicked() {
+                    action = ModalAction::Cancel;
                 }
             });
-
-        if let Some(e) = error {
-            ui.separator();
-            theme::error_card(ui, &format!("Error: {e}"));
-        }
-
-        ui.separator();
-        form_buttons(ui, busy, |ui| {
-            let create_clicked = theme::primary_button(ui, "Crear").clicked();
-            let enter_pressed = ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (create_clicked || enter_pressed) && !name.trim().is_empty() {
-                action = ModalAction::CreateDatabase {
-                    name: name.trim().to_string(),
-                    charset: charset.clone(),
-                };
-            }
-            if ui.button("Cancelar").clicked() {
-                action = ModalAction::Cancel;
-            }
-        });
-    });
+        },
+    );
 
     if !open {
         action = ModalAction::Cancel;
@@ -504,118 +512,139 @@ fn show_create_table(
         columns.push(NewColumnDef::new());
     }
 
-    dialog(ctx, "Crear tabla", 600.0, Some(&mut open), |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Base de datos:");
-            ui.strong(db);
+    dialog(
+        ctx,
+        &t!("tree-create-table"),
+        600.0,
+        Some(&mut open),
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label(t!("conn-database"));
+                ui.strong(db);
+                ui.separator();
+                ui.label(t!("create-table-name"));
+                ui.add(
+                    egui::TextEdit::singleline(name)
+                        .desired_width(180.0)
+                        .hint_text(t!("create-table-name-hint")),
+                );
+            });
             ui.separator();
-            ui.label("Nombre de tabla:");
-            ui.add(
-                egui::TextEdit::singleline(name)
-                    .desired_width(180.0)
-                    .hint_text("mi_tabla"),
-            );
-        });
-        ui.separator();
 
-        ui.strong("Columnas:");
-        ui.add_space(4.0);
+            ui.strong(t!("create-columns"));
+            ui.add_space(4.0);
 
-        use egui_extras::{Column, TableBuilder};
+            use egui_extras::{Column, TableBuilder};
 
-        let mut remove_idx: Option<usize> = None;
+            let mut remove_idx: Option<usize> = None;
 
-        TableBuilder::new(ui)
-            .resizable(false)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(160.0)) // name
-            .column(Column::exact(110.0)) // type
-            .column(Column::exact(70.0)) // length
-            .column(Column::exact(60.0)) // not null
-            .column(Column::exact(40.0)) // PK
-            .column(Column::exact(30.0)) // delete
-            .header(20.0, |mut header| {
-                for h in &["Nombre", "Tipo", "Longitud", "Not Null", "PK", ""] {
-                    header.col(|ui| {
-                        ui.strong(*h);
-                    });
-                }
-            })
-            .body(|body| {
-                let n = columns.len();
-                body.rows(24.0, n, |mut row| {
-                    let i = row.index();
-                    let col = &mut columns[i];
-                    row.col(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut col.name)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("columna"),
-                        );
-                    });
-                    row.col(|ui| {
-                        egui::ComboBox::from_id_salt(format!("type_{i}"))
-                            .selected_text(&col.col_type)
-                            .width(100.0)
-                            .show_ui(ui, |ui| {
-                                for &(t, _) in engine.column_types() {
-                                    ui.selectable_value(&mut col.col_type, t.to_string(), t);
-                                }
+            TableBuilder::new(ui)
+                .resizable(false)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(Column::exact(160.0)) // name
+                .column(Column::exact(110.0)) // type
+                .column(Column::exact(70.0)) // length
+                .column(Column::exact(60.0)) // not null
+                .column(Column::exact(40.0)) // PK
+                .column(Column::exact(30.0)) // delete
+                .header(20.0, |mut header| {
+                    let headers = [
+                        t!("create-col-name"),
+                        t!("structure-col-type"),
+                        t!("create-col-length"),
+                        "Not Null".to_owned(),
+                        "PK".to_owned(),
+                        String::new(),
+                    ];
+                    for h in &headers {
+                        header.col(|ui| {
+                            ui.strong(h.as_str());
+                        });
+                    }
+                })
+                .body(|body| {
+                    let n = columns.len();
+                    body.rows(24.0, n, |mut row| {
+                        let i = row.index();
+                        let col = &mut columns[i];
+                        row.col(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut col.name)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("columna"),
+                            );
+                        });
+                        row.col(|ui| {
+                            egui::ComboBox::from_id_salt(format!("type_{i}"))
+                                .selected_text(&col.col_type)
+                                .width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for &(t, _) in engine.column_types() {
+                                        ui.selectable_value(&mut col.col_type, t.to_string(), t);
+                                    }
+                                });
+                        });
+                        row.col(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut col.length)
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                        row.col(|ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.checkbox(&mut col.not_null, "");
                             });
-                    });
-                    row.col(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut col.length)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
-                    row.col(|ui| {
-                        ui.centered_and_justified(|ui| {
-                            ui.checkbox(&mut col.not_null, "");
                         });
-                    });
-                    row.col(|ui| {
-                        ui.centered_and_justified(|ui| {
-                            ui.checkbox(&mut col.primary_key, "");
+                        row.col(|ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.checkbox(&mut col.primary_key, "");
+                            });
                         });
-                    });
-                    row.col(|ui| {
-                        if ui.small_button("✖").clicked() {
-                            remove_idx = Some(i);
-                        }
+                        row.col(|ui| {
+                            if ui.small_button("✖").clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
                     });
                 });
-            });
 
-        if let Some(idx) = remove_idx {
-            columns.remove(idx);
-        }
+            if let Some(idx) = remove_idx {
+                columns.remove(idx);
+            }
 
-        if ui.button(format!("{PLUS} Añadir columna")).clicked() {
-            columns.push(NewColumnDef::new());
-        }
+            if ui
+                .button(format!("{PLUS} {}", t!("create-add-column")))
+                .clicked()
+            {
+                columns.push(NewColumnDef::new());
+            }
 
-        if let Some(e) = error {
+            if let Some(e) = error {
+                ui.separator();
+                theme::error_card(ui, &t!("common-error", error = e.as_str()));
+            }
+
             ui.separator();
-            theme::error_card(ui, &format!("Error: {e}"));
-        }
-
-        ui.separator();
-        form_buttons(ui, busy, |ui| {
-            let create_clicked = theme::primary_button(ui, "Crear tabla").clicked();
-            let enter_pressed = ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (create_clicked || enter_pressed) && !name.trim().is_empty() && !columns.is_empty() {
-                action = ModalAction::CreateTable {
-                    db: db.to_string(),
-                    name: name.trim().to_string(),
-                    columns: columns.clone(),
-                };
-            }
-            if ui.button("Cancelar").clicked() {
-                action = ModalAction::Cancel;
-            }
-        });
-    });
+            form_buttons(ui, busy, |ui| {
+                let create_clicked = theme::primary_button(ui, t!("tree-create-table")).clicked();
+                let enter_pressed =
+                    ui.is_enabled() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (create_clicked || enter_pressed)
+                    && !name.trim().is_empty()
+                    && !columns.is_empty()
+                {
+                    action = ModalAction::CreateTable {
+                        db: db.to_string(),
+                        name: name.trim().to_string(),
+                        columns: columns.clone(),
+                    };
+                }
+                if ui.button(t!("common-cancel")).clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        },
+    );
 
     if !open {
         action = ModalAction::Cancel;
@@ -630,32 +659,38 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
     let mut action = ModalAction::None;
     let mut open = true;
 
-    let (title, what, name) = match target {
-        DbObject::Database(db) => ("Eliminar base de datos", "la base de datos", db.clone()),
-        DbObject::Table { db, table, kind } => {
-            let title = if kind.is_view() {
-                "Eliminar vista"
-            } else {
-                "Eliminar tabla"
-            };
-            (title, kind.label(), format!("{db}.{table}"))
-        }
+    let (title, question, name) = match target {
+        DbObject::Database(db) => (
+            t!("tree-drop-database"),
+            t!("drop-confirm-database"),
+            db.clone(),
+        ),
+        DbObject::Table { db, table, kind } if kind.is_view() => (
+            t!("tree-drop-view"),
+            t!("drop-confirm-view"),
+            format!("{db}.{table}"),
+        ),
+        DbObject::Table { db, table, .. } => (
+            t!("tree-drop-table"),
+            t!("drop-confirm-table"),
+            format!("{db}.{table}"),
+        ),
     };
 
-    dialog(ctx, title, 300.0, Some(&mut open), |ui| {
-        ui.label(format!("¿Seguro que quieres eliminar {what}:"));
+    dialog(ctx, &title, 300.0, Some(&mut open), |ui| {
+        ui.label(question);
         ui.add_space(4.0);
         ui.strong(&name);
         ui.add_space(4.0);
         ui.colored_label(
             theme::get(ui).warning,
-            "⚠ Esta acción no se puede deshacer.",
+            format!("⚠ {}", t!("drop-cannot-undo")),
         );
         // A whole database is not dropped with a single click
         let confirmed = match target {
             DbObject::Database(db) => {
                 ui.add_space(6.0);
-                ui.label("Escribe su nombre para confirmar:");
+                ui.label(t!("drop-type-name"));
                 ui.add(egui::TextEdit::singleline(typed).desired_width(f32::INFINITY));
                 typed.trim() == db
             }
@@ -664,7 +699,7 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
         ui.separator();
         ui.horizontal(|ui| {
             let delete = ui
-                .add_enabled_ui(confirmed, |ui| red_btn(ui, "Eliminar"))
+                .add_enabled_ui(confirmed, |ui| red_btn(ui, &t!("common-delete")))
                 .inner;
             if delete {
                 action = match target.clone() {
@@ -672,7 +707,7 @@ fn show_confirm_drop(ctx: &egui::Context, target: &DbObject, typed: &mut String)
                     DbObject::Table { db, table, .. } => ModalAction::DropTable { db, table },
                 };
             }
-            if ui.button("Cancelar").clicked() {
+            if ui.button(t!("common-cancel")).clicked() {
                 action = ModalAction::Cancel;
             }
         });
@@ -691,29 +726,31 @@ fn show_confirm_truncate(ctx: &egui::Context, target: &DbObject) -> ModalAction 
     let mut action = ModalAction::None;
     let mut open = true;
 
-    let (what, name) = match target {
-        DbObject::Database(db) => ("todas las tablas de", db.clone()),
-        DbObject::Table { db, table, .. } => ("la tabla", format!("{db}.{table}")),
+    let (question, name) = match target {
+        DbObject::Database(db) => (t!("truncate-confirm-all"), db.clone()),
+        DbObject::Table { db, table, .. } => {
+            (t!("truncate-confirm-table"), format!("{db}.{table}"))
+        }
     };
 
-    dialog(ctx, "Vaciar datos", 280.0, Some(&mut open), |ui| {
-        ui.label(format!("¿Seguro que quieres vaciar {what}:"));
+    dialog(ctx, &t!("truncate-title"), 280.0, Some(&mut open), |ui| {
+        ui.label(question);
         ui.add_space(4.0);
         ui.strong(&name);
         ui.add_space(4.0);
         ui.colored_label(
             theme::get(ui).warning,
-            "⚠ Se eliminarán todos los datos. No se puede deshacer.",
+            format!("⚠ {}", t!("truncate-warning")),
         );
         ui.separator();
         ui.horizontal(|ui| {
-            if red_btn(ui, "Vaciar") {
+            if red_btn(ui, &t!("truncate-button")) {
                 action = match target.clone() {
                     DbObject::Database(db) => ModalAction::TruncateAllTables(db),
                     DbObject::Table { db, table, .. } => ModalAction::TruncateTable { db, table },
                 };
             }
-            if ui.button("Cancelar").clicked() {
+            if ui.button(t!("common-cancel")).clicked() {
                 action = ModalAction::Cancel;
             }
         });
@@ -743,7 +780,7 @@ const FILTER_OPERATORS: &[FilterOperator] = &[
 fn show_filter_input(
     ctx: &egui::Context,
     engine: Engine,
-    col_name: &mut String,
+    col_name: &str,
     value: &mut String,
     operator: &mut FilterOperator,
 ) -> ModalAction {
@@ -752,7 +789,7 @@ fn show_filter_input(
 
     dialog(
         ctx,
-        &format!("Filtrar por {col_name}"),
+        &t!("filter-by-title", column = col_name),
         320.0,
         Some(&mut open),
         |ui| {
@@ -760,7 +797,7 @@ fn show_filter_input(
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("Operador:");
+                    ui.label(t!("filter-operator"));
                     egui::ComboBox::from_id_salt("filter_op_combo")
                         .selected_text(operator.label())
                         .width(200.0)
@@ -771,11 +808,11 @@ fn show_filter_input(
                         });
                     ui.end_row();
 
-                    ui.label("Valor:");
+                    ui.label(t!("filter-value"));
                     let resp = ui.add(
                         egui::TextEdit::singleline(value)
                             .desired_width(200.0)
-                            .hint_text("valor a filtrar"),
+                            .hint_text(t!("filter-value-hint")),
                     );
                     // Auto-focus the text field
                     resp.request_focus();
@@ -784,13 +821,13 @@ fn show_filter_input(
 
             ui.separator();
             ui.horizontal(|ui| {
-                let apply_clicked = theme::primary_button(ui, "Aplicar").clicked();
+                let apply_clicked = theme::primary_button(ui, t!("filter-apply")).clicked();
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if apply_clicked || enter_pressed {
                     let frag = build_filter_fragment(engine, col_name, operator, value);
                     action = ModalAction::ApplyFilter { sql_fragment: frag };
                 }
-                if ui.button("Cancelar").clicked() {
+                if ui.button(t!("common-cancel")).clicked() {
                     action = ModalAction::Cancel;
                 }
             });
@@ -893,31 +930,36 @@ fn show_confirm_switch_table(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    dialog(ctx, "Cambios sin guardar", 280.0, Some(&mut open), |ui| {
-        ui.label(format!(
-            "Tienes {} cambio(s) sin guardar en «{}».",
-            pending_count, current_table
+    dialog(ctx, &t!("unsaved-title"), 280.0, Some(&mut open), |ui| {
+        ui.label(t!(
+            "unsaved-changes",
+            count = pending_count,
+            table = current_table
         ));
         ui.add_space(4.0);
-        ui.label(format!(
-            "¿Qué quieres hacer antes de abrir «{}.{}»?",
-            new_db, new_table
+        ui.label(t!(
+            "unsaved-switch-question",
+            table = format!("{new_db}.{new_table}")
         ));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if theme::primary_button(ui, format!("{CLONE} Guardar y cambiar")).clicked() {
+            if theme::primary_button(ui, format!("{CLONE} {}", t!("unsaved-save-and-switch")))
+                .clicked()
+            {
                 action = ModalAction::ApplyAndSwitch {
                     new_db: new_db.to_string(),
                     new_table: new_table.to_string(),
                 };
             }
-            if theme::warning_button(ui, format!("{TRASH}  Descartar y cambiar")).clicked() {
+            if theme::warning_button(ui, format!("{TRASH}  {}", t!("unsaved-discard-and-switch")))
+                .clicked()
+            {
                 action = ModalAction::DiscardAndSwitch {
                     new_db: new_db.to_string(),
                     new_table: new_table.to_string(),
                 };
             }
-            if ui.button("Cancelar").clicked() {
+            if ui.button(t!("common-cancel")).clicked() {
                 action = ModalAction::Cancel;
             }
         });
@@ -941,19 +983,21 @@ fn show_confirm_reload(
     // Changes go by row position: with other data they are not valid
     let (lost, save, discard) = match reload {
         Reload::Page(_) => (
-            "Al cambiar de página se perderían.",
-            "Guardar y cambiar",
-            "Descartar y cambiar",
+            t!("unsaved-lost-on-page"),
+            t!("unsaved-save-and-switch"),
+            t!("unsaved-discard-and-switch"),
         ),
         _ => (
-            "Al recargar los datos se perderían.",
-            "Guardar y recargar",
-            "Descartar y recargar",
+            t!("unsaved-lost-on-reload"),
+            t!("unsaved-save-and-reload"),
+            t!("unsaved-discard-and-reload"),
         ),
     };
-    dialog(ctx, "Cambios sin guardar", 280.0, Some(&mut open), |ui| {
-        ui.label(format!(
-            "Tienes {pending_count} cambio(s) sin guardar en «{current_table}»."
+    dialog(ctx, &t!("unsaved-title"), 280.0, Some(&mut open), |ui| {
+        ui.label(t!(
+            "unsaved-changes",
+            count = pending_count,
+            table = current_table
         ));
         ui.add_space(4.0);
         ui.label(lost);
@@ -965,7 +1009,7 @@ fn show_confirm_reload(
             if theme::warning_button(ui, format!("{TRASH}  {discard}")).clicked() {
                 action = ModalAction::DiscardAndReload(reload.clone());
             }
-            if ui.button("Cancelar").clicked() {
+            if ui.button(t!("common-cancel")).clicked() {
                 action = ModalAction::Cancel;
             }
         });
@@ -985,18 +1029,18 @@ fn show_confirm_close_session(
     let mut action = ModalAction::None;
     let mut open = true;
 
-    dialog(ctx, "Cerrar conexión", 280.0, Some(&mut open), |ui| {
-        ui.label(format!(
-            "Tienes {pending_count} cambio(s) sin guardar en «{title}»."
-        ));
+    dialog(ctx, &t!("conn-tabs-close"), 280.0, Some(&mut open), |ui| {
+        ui.label(t!("unsaved-changes", count = pending_count, table = title));
         ui.add_space(4.0);
-        ui.label("Si cierras la pestaña se perderán.");
+        ui.label(t!("unsaved-lost-on-close"));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if theme::warning_button(ui, format!("{TRASH}  Descartar y cerrar")).clicked() {
+            if theme::warning_button(ui, format!("{TRASH}  {}", t!("unsaved-discard-and-close")))
+                .clicked()
+            {
                 action = ModalAction::CloseSession;
             }
-            if ui.button("Cancelar").clicked() {
+            if ui.button(t!("common-cancel")).clicked() {
                 action = ModalAction::Cancel;
             }
         });
@@ -1012,22 +1056,28 @@ fn show_confirm_delete_profile(ctx: &egui::Context, name: &str) -> ModalAction {
     let mut action = ModalAction::None;
     let mut open = true;
 
-    dialog(ctx, "Eliminar favorito", 280.0, Some(&mut open), |ui| {
-        ui.label("¿Seguro que quieres eliminar el favorito:");
-        ui.add_space(4.0);
-        ui.strong(name);
-        ui.add_space(4.0);
-        ui.label("Se borrará también su contraseña del llavero.");
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if red_btn(ui, "Eliminar") {
-                action = ModalAction::DeleteProfile;
-            }
-            if ui.button("Cancelar").clicked() {
-                action = ModalAction::Cancel;
-            }
-        });
-    });
+    dialog(
+        ctx,
+        &t!("favourite-delete-title"),
+        280.0,
+        Some(&mut open),
+        |ui| {
+            ui.label(t!("favourite-delete-question"));
+            ui.add_space(4.0);
+            ui.strong(name);
+            ui.add_space(4.0);
+            ui.label(t!("favourite-delete-keyring"));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if red_btn(ui, &t!("common-delete")) {
+                    action = ModalAction::DeleteProfile;
+                }
+                if ui.button(t!("common-cancel")).clicked() {
+                    action = ModalAction::Cancel;
+                }
+            });
+        },
+    );
 
     if !open {
         action = ModalAction::Cancel;
@@ -1049,7 +1099,7 @@ fn show_confirm_discard_sql(
 
     dialog(ctx, title, 320.0, Some(&mut open), |ui| {
         ui.set_max_width(420.0);
-        ui.label("La consulta de esta pestaña se perderá:");
+        ui.label(t!("discard-sql-warning"));
         ui.add_space(4.0);
         ui.label(egui::RichText::new(preview).monospace().weak());
         ui.add_space(10.0);
@@ -1057,7 +1107,7 @@ fn show_confirm_discard_sql(
             if theme::warning_button(ui, format!("{TRASH}  {confirm}")).clicked() {
                 action = confirmed;
             }
-            if ui.button("Cancelar").clicked() {
+            if ui.button(t!("common-cancel")).clicked() {
                 action = ModalAction::Cancel;
             }
         });
@@ -1085,7 +1135,7 @@ fn show_clone_table(
 
     dialog(
         ctx,
-        &format!("Clonar tabla — {db}.{table}"),
+        &t!("clone-title", table = format!("{db}.{table}")),
         280.0,
         Some(&mut open),
         |ui| {
@@ -1093,28 +1143,28 @@ fn show_clone_table(
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("Nuevo nombre:");
+                    ui.label(t!("clone-new-name"));
                     let resp = ui.add(
                         egui::TextEdit::singleline(new_name)
                             .desired_width(220.0)
-                            .hint_text(format!("{table}_copia")),
+                            .hint_text(t!("clone-name-hint", table = table)),
                     );
                     ui.end_row();
-                    ui.label("Copiar datos:");
+                    ui.label(t!("clone-copy-data"));
                     ui.checkbox(copy_data, "INSERT INTO … SELECT *");
                     ui.end_row();
                     let _ = resp;
                 });
 
             if let Some(err) = error {
-                theme::error_card(ui, &format!("Error: {err}"));
+                theme::error_card(ui, &t!("common-error", error = err.as_str()));
             }
             ui.separator();
             form_buttons(ui, busy, |ui| {
                 let ok = theme::primary_button_enabled(
                     ui,
                     !new_name.is_empty(),
-                    format!("{CLONE}  Clonar"),
+                    format!("{CLONE}  {}", t!("clone-button")),
                 )
                 .clicked();
                 let enter_pressed =
@@ -1127,7 +1177,7 @@ fn show_clone_table(
                         copy_data: *copy_data,
                     };
                 }
-                if ui.button("Cancelar").clicked() {
+                if ui.button(t!("common-cancel")).clicked() {
                     action = ModalAction::Cancel;
                 }
             });
@@ -1149,7 +1199,7 @@ fn show_error(ctx: &egui::Context, title: &str, message: &str) -> ModalAction {
     dialog(ctx, title, 280.0, Some(&mut open), |ui| {
         theme::error_card(ui, message);
         ui.separator();
-        if ui.button("Cerrar").clicked() {
+        if ui.button(t!("common-close")).clicked() {
             close = true;
         }
     });

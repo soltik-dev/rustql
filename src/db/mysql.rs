@@ -12,6 +12,7 @@ use super::{
     QUERY_CANCELLED, QueryResult, Security, Statement, TableEntry, TableInfo, TableKind, TlsMode,
     tls, validate_charset,
 };
+use crate::i18n::t;
 
 // This backend's dialect, for it and for the export
 pub(super) fn quote_ident(s: &str) -> String {
@@ -159,10 +160,10 @@ impl MysqlBackend {
         on_status: impl Fn(&str),
     ) -> DbResult<Self> {
         if params.keyring_id.is_some() && params.password.is_empty() {
-            on_status("Leyendo la contraseña del llavero...");
+            on_status(&t!("connect-reading-keyring"));
         }
         let password = params.resolve_password()?;
-        on_status("Estableciendo conexión TCP...");
+        on_status(&t!("connect-tcp"));
         tls::install_provider();
         let strict = params.tls != TlsMode::Prefer;
         // When verifying: the system authorities and the one in the CA file,
@@ -212,7 +213,7 @@ impl MysqlBackend {
             Ok((pool, opts))
         };
 
-        on_status("Autenticando...");
+        on_status(&t!("connect-authenticating"));
         let (pool, opts) = match open(build(true)) {
             // "Encrypt if possible": if it cannot (the server offers no TLS, or
             // only old versions), unencrypted. A server error (password,
@@ -222,9 +223,10 @@ impl MysqlBackend {
         }
         .map_err(|e| {
             let error = e.to_string();
-            format!(
-                "No se pudo conectar: {error}{}",
-                tls::hint(params.tls, &error)
+            t!(
+                "connect-failed",
+                error = &error,
+                hint = tls::hint(params.tls, &error)
             )
         })?;
 
@@ -236,7 +238,7 @@ impl MysqlBackend {
             .unwrap_or_default();
         let encrypted = cipher.is_some_and(|(_, cipher)| !cipher.is_empty());
 
-        on_status("Conexión establecida.");
+        on_status(&t!("connect-established"));
         Ok(Self {
             pool,
             opts,
@@ -256,7 +258,7 @@ impl MysqlBackend {
     pub(super) fn conn(&self) -> DbResult<PooledConn> {
         self.pool
             .get_conn()
-            .map_err(|e| format!("Sin conexión con el servidor: {e}"))
+            .map_err(|e| t!("db-no-connection", error = e.to_string()))
     }
 
     /// Read with positional parameters (`?`).
@@ -264,7 +266,7 @@ impl MysqlBackend {
         let mut conn = self.conn()?;
         conn.exec_iter(sql, params)
             .and_then(|set| read_result(set, usize::MAX))
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| t!("db-query-error", error = e.to_string()))
     }
 }
 
@@ -283,7 +285,7 @@ impl DbBackend for MysqlBackend {
         }
         self.conn()?
             .query("SHOW DATABASES")
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| t!("db-query-error", error = e.to_string()))
     }
 
     fn list_tables(&self, database: &str) -> DbResult<Vec<TableEntry>> {
@@ -292,7 +294,7 @@ impl DbBackend for MysqlBackend {
         let rows: Vec<(String, String)> = self
             .conn()?
             .query(query)
-            .map_err(|e| format!("Error en query: {e}"))?;
+            .map_err(|e| t!("db-query-error", error = e.to_string()))?;
         Ok(rows
             .into_iter()
             .map(|(name, table_type)| table_entry(name, &table_type))
@@ -309,7 +311,7 @@ impl DbBackend for MysqlBackend {
                  ORDER BY TABLE_SCHEMA, TABLE_NAME",
                 (&self.only_database, &self.only_database),
             )
-            .map_err(|e| format!("Error en query: {e}"))?;
+            .map_err(|e| t!("db-query-error", error = e.to_string()))?;
         Ok(rows
             .into_iter()
             .map(|(db, name, table_type)| (db, table_entry(name, &table_type)))
@@ -324,7 +326,7 @@ impl DbBackend for MysqlBackend {
             .rows
             .first()
             .and_then(|row| row[0].clone())
-            .ok_or_else(|| format!("No se encuentra la definición de la vista «{view}»."))?;
+            .ok_or_else(|| t!("view-definition-missing", view = view))?;
         Ok(format!(
             "CREATE OR REPLACE VIEW {} AS\n{definition}",
             qualified(db, view)
@@ -335,7 +337,7 @@ impl DbBackend for MysqlBackend {
         let mut conn = self.conn()?;
         conn.query_iter(sql)
             .and_then(|set| read_result(set, usize::MAX))
-            .map_err(|e| format!("Error en query: {e}"))
+            .map_err(|e| t!("db-query-error", error = e.to_string()))
     }
 
     fn execute_in_session(
@@ -351,7 +353,7 @@ impl DbBackend for MysqlBackend {
             Some(conn) => conn,
             None => session.insert(
                 Conn::new(self.opts.clone())
-                    .map_err(|e| format!("No se pudo abrir la sesión del editor: {e}"))?,
+                    .map_err(|e| t!("editor-session-failed", error = e.to_string()))?,
             ),
         };
         if self.session_killed.swap(false, Ordering::SeqCst) {
@@ -388,7 +390,7 @@ impl DbBackend for MysqlBackend {
                 if conn.ping().is_err() {
                     *session = None;
                 }
-                Err(format!("Error en query: {e}"))
+                Err(t!("db-query-error", error = e.to_string()))
             }
         }
     }
@@ -409,13 +411,13 @@ impl DbBackend for MysqlBackend {
         // Through another connection: the editor's is busy with the query
         self.conn()?
             .query_drop(format!("KILL QUERY {conn_id}"))
-            .map_err(|e| format!("No se pudo cancelar la consulta: {e}"))
+            .map_err(|e| t!("cancel-query-failed", error = e.to_string()))
     }
 
     fn execute_write(&self, _db: Option<&str>, sql: &str) -> DbResult<u64> {
         let mut conn = self.conn()?;
         conn.query_drop(sql)
-            .map_err(|e| format!("Error en escritura: {e}"))?;
+            .map_err(|e| t!("db-write-error", error = e.to_string()))?;
         Ok(conn.affected_rows())
     }
 
@@ -522,26 +524,25 @@ impl DbBackend for MysqlBackend {
     fn execute_transaction(&self, _db: Option<&str>, stmts: &[Statement]) -> DbResult<()> {
         let mut conn = self.conn()?;
         conn.query_drop("START TRANSACTION")
-            .map_err(|e| format!("Error iniciando transacción: {e}"))?;
+            .map_err(|e| t!("db-begin-error", error = e.to_string()))?;
         for stmt in stmts {
             if let Err(e) = conn.exec_drop(stmt.sql.as_str(), stmt.params.clone()) {
                 let _ = conn.query_drop("ROLLBACK");
-                return Err(format!("Error en transacción (ROLLBACK): {e}"));
+                return Err(t!("db-transaction-error", error = e.to_string()));
             }
             // With CLIENT_FOUND_ROWS they are the rows found by the WHERE
             let found = conn.affected_rows();
             if stmt.single_row && found != 1 {
                 let _ = conn.query_drop("ROLLBACK");
                 return Err(format!(
-                    "No se ha guardado nada: una sentencia debía cambiar una fila y \
-                     encontró {found}. La fila puede haber cambiado o desaparecido en \
-                     el servidor; recarga la tabla (F5) y repite los cambios.\n\n{}",
+                    "{}\n\n{}",
+                    t!("save-row-not-found", found = found),
                     stmt.sql
                 ));
             }
         }
         conn.query_drop("COMMIT")
-            .map_err(|e| format!("Error en COMMIT: {e}"))
+            .map_err(|e| t!("db-commit-error", error = e.to_string()))
     }
 }
 
@@ -645,7 +646,7 @@ mod tests {
         let picker = picker.unwrap();
         assert!(picker.contains(&"rustql_test_only".to_string()));
         assert!(picker.contains(&"information_schema".to_string()));
-        let err = missing.err().expect("no existe");
+        let err = missing.err().expect("does not exist");
         assert!(err.contains("rustql_test_no_existe"), "{err}");
     }
 
@@ -675,7 +676,7 @@ mod tests {
         let unknown = connect(TlsMode::Verify, false)
             .err()
             .expect("CA desconocida");
-        assert!(unknown.contains("fichero de CA"), "{unknown}");
+        assert!(unknown.contains("CA file"), "{unknown}");
         // With its CA, the certificate is valid (and is for 127.0.0.1)
         let verified = connect(TlsMode::Verify, true).unwrap();
         assert_ne!(cipher(&verified), "");
@@ -749,7 +750,7 @@ mod tests {
             .unwrap();
 
         let err = missing.unwrap_err();
-        assert!(err.contains("encontró 0"), "{err}");
+        assert!(err.contains("found 0"), "{err}");
         unchanged.unwrap();
         assert_eq!(
             rows.unwrap().rows,

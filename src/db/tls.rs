@@ -10,6 +10,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use serde::{Deserialize, Serialize};
 
 use super::DbResult;
+use crate::i18n::t;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,30 +30,19 @@ pub enum TlsMode {
 impl TlsMode {
     pub const ALL: [TlsMode; 3] = [TlsMode::Prefer, TlsMode::Require, TlsMode::Verify];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            TlsMode::Prefer => "Cifrar si se puede",
-            TlsMode::Require => "Exigir cifrado",
-            TlsMode::Verify => "Verificar el servidor",
+            TlsMode::Prefer => t!("tls-prefer"),
+            TlsMode::Require => t!("tls-require"),
+            TlsMode::Verify => t!("tls-verify"),
         }
     }
 
-    pub fn description(self) -> &'static str {
+    pub fn description(self) -> String {
         match self {
-            TlsMode::Prefer => {
-                "Usa TLS si el servidor lo ofrece y, si no, conecta sin cifrar.\n\
-                 No comprueba el certificado."
-            }
-            TlsMode::Require => {
-                "No conecta si el servidor no ofrece TLS.\n\
-                 No comprueba el certificado: protege de quien escucha la red,\n\
-                 no de quien suplanta al servidor."
-            }
-            TlsMode::Verify => {
-                "No conecta sin TLS, y comprueba que el certificado es de ese\n\
-                 servidor y lo firma una autoridad en la que confía el sistema\n\
-                 o la del fichero de CA que indiques."
-            }
+            TlsMode::Prefer => t!("tls-prefer-description"),
+            TlsMode::Require => t!("tls-require-description"),
+            TlsMode::Verify => t!("tls-verify-description"),
         }
     }
 
@@ -92,41 +82,33 @@ impl Security {
     }
 
     /// Explanation for whoever hovers over the padlock.
-    pub fn description(self, mode: TlsMode) -> &'static str {
+    pub fn description(self, mode: TlsMode) -> String {
         match (self, mode) {
-            (Security::Encrypted, TlsMode::Verify) => {
-                "Conexión cifrada (TLS), con el certificado del servidor verificado."
-            }
-            (Security::Encrypted, _) => {
-                "Conexión cifrada (TLS). El certificado del servidor no se verifica:\n\
-                 para hacerlo, elige «Verificar el servidor» en la conexión."
-            }
-            (Security::Local, _) => "Conexión sin cifrar, pero no sale de este equipo.",
-            (Security::Plain, _) => {
-                "Conexión SIN cifrar: lo que se envía y se recibe, contraseña incluida,\n\
-                 puede leerse en la red. El servidor no ofrece TLS."
-            }
+            (Security::Encrypted, TlsMode::Verify) => t!("security-verified"),
+            (Security::Encrypted, _) => t!("security-encrypted", verify = TlsMode::Verify.label()),
+            (Security::Local, _) => t!("security-local"),
+            (Security::Plain, _) => t!("security-plain"),
         }
     }
 }
 
 /// What to add to a connection error so it is clear what to do, if it is
 /// a TLS one. `error` is the driver's text.
-pub fn hint(mode: TlsMode, error: &str) -> &'static str {
+pub fn hint(mode: TlsMode, error: &str) -> String {
     let lower = error.to_lowercase();
     if mode == TlsMode::Verify && (lower.contains("certificate") || lower.contains("cert")) {
-        "\n\nNo se ha podido verificar el certificado del servidor. Si lo firma una autoridad \
-         propia, indica su fichero de CA; si no necesitas verificarlo, elige otro nivel de \
-         seguridad."
+        format!("\n\n{}", t!("tls-hint-certificate"))
     } else if mode != TlsMode::Prefer
         && ["tls", "ssl", "secure connection"]
             .iter()
             .any(|word| lower.contains(word))
     {
-        "\n\nLa seguridad de esta conexión exige TLS. Si el servidor no lo ofrece, elige \
-         «Cifrar si se puede»."
+        format!(
+            "\n\n{}",
+            t!("tls-hint-required", prefer = TlsMode::Prefer.label())
+        )
     } else {
-        ""
+        String::new()
     }
 }
 
@@ -200,7 +182,7 @@ pub fn trusted_authorities(ca_file: Option<&str>) -> DbResult<Vec<CertificateDer
     let mut authorities = rustls_native_certs::load_native_certs().certs;
     if let Some(path) = ca_file {
         let unreadable =
-            |e: &dyn std::fmt::Display| format!("No se pudo leer el fichero de CA «{path}»: {e}");
+            |e: &dyn std::fmt::Display| t!("tls-ca-unreadable", path = path, error = e.to_string());
         let before = authorities.len();
         for cert in CertificateDer::pem_file_iter(path).map_err(|e| unreadable(&e))? {
             let cert = cert.map_err(|e| unreadable(&e))?;
@@ -210,7 +192,7 @@ pub fn trusted_authorities(ca_file: Option<&str>) -> DbResult<Vec<CertificateDer
             authorities.push(cert);
         }
         if authorities.len() == before {
-            return Err(unreadable(&"no contiene ningún certificado en formato PEM"));
+            return Err(unreadable(&t!("tls-ca-empty")));
         }
     }
     authorities.retain(|cert| rustls::RootCertStore::empty().add(cert.clone()).is_ok());
@@ -249,8 +231,7 @@ impl AuthorityBundle {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, pem)
-            .map_err(|e| format!("No se pudo preparar la verificación del certificado: {e}"))?;
+        std::fs::write(&path, pem).map_err(|e| t!("tls-verifier-failed", error = e.to_string()))?;
         Ok(Some(Self(path)))
     }
 
@@ -272,7 +253,7 @@ pub fn client_config(mode: TlsMode, ca_file: Option<&str>) -> DbResult<rustls::C
     let provider = provider();
     let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()
-        .map_err(|e| format!("No se pudo preparar TLS: {e}"))?;
+        .map_err(|e| t!("tls-setup-failed", error = e.to_string()))?;
     if mode.accepts_any_certificate() {
         return Ok(builder
             .dangerous()
@@ -299,7 +280,7 @@ mod tests {
         let empty = dir.join("vacio.pem");
         std::fs::write(&empty, "esto no es un certificado\n").unwrap();
         let err = client_config(TlsMode::Verify, empty.to_str()).unwrap_err();
-        assert!(err.contains("ningún certificado"), "{err}");
+        assert!(err.contains("no certificate"), "{err}");
 
         // Without verifying, the file is not even looked at
         client_config(TlsMode::Require, Some("/no/existe/ca.pem")).unwrap();
@@ -342,11 +323,11 @@ mod tests {
     #[test]
     fn la_pista_de_un_error_depende_del_nivel_de_seguridad() {
         let cert = "invalid peer certificate: UnknownIssuer";
-        assert!(hint(TlsMode::Verify, cert).contains("fichero de CA"));
-        assert!(hint(TlsMode::Require, "server does not support TLS").contains("exige TLS"));
+        assert!(hint(TlsMode::Verify, cert).contains("CA file"));
+        assert!(hint(TlsMode::Require, "server does not support TLS").contains("requires TLS"));
         // That is how the MySQL crate puts it
         let mysql = "Client requires secure connection but server does not have this capability";
-        assert!(hint(TlsMode::Verify, mysql).contains("exige TLS"));
+        assert!(hint(TlsMode::Verify, mysql).contains("requires TLS"));
         assert_eq!(hint(TlsMode::Prefer, "server does not support TLS"), "");
         assert_eq!(hint(TlsMode::Verify, "Access denied for user"), "");
     }

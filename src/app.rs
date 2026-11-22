@@ -115,7 +115,9 @@ fn start_keyring(
             for (id, label, password) in legacy {
                 match secrets::set(&id, &label, &password) {
                     Ok(()) => migrated.push(id),
-                    Err(e) => log::warn!("No se pasó al llavero la contraseña de «{label}»: {e}"),
+                    Err(e) => {
+                        log::warn!("Could not move the password of \"{label}\" to the keyring: {e}")
+                    }
                 }
             }
         }
@@ -487,7 +489,7 @@ mod tests {
         app.close_session(0);
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.active, 0);
-        assert_ne!(app.sessions[0].id, 0, "debe ser una sesión nueva");
+        assert_ne!(app.sessions[0].id, 0, "must be a new session");
     }
 
     #[test]
