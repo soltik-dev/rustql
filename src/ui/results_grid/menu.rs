@@ -4,6 +4,7 @@
 use eframe::egui;
 
 use super::{CellRef, EditingCell, Grid, GridAction, GridSelection, RowRef, Shown};
+use crate::i18n::t;
 use crate::settings::CopyFormat;
 use crate::ui::icons::{CLOCK, CLONE, COPY, EDIT, PLUS, SEARCH, TRASH, UNDO};
 use crate::ui::{CMD, ellipsize, theme};
@@ -63,7 +64,7 @@ pub(super) fn cell(
 
     // ── Copy ─────────────────────────────────────────────────────────────
     if sel.rows.is_empty() {
-        if item(ui, format!("{COPY}  Copiar valor")) {
+        if item(ui, format!("{COPY}  {}", t!("menu-copy-value"))) {
             let text = match shown {
                 Shown::Value(v) => v,
                 _ => "",
@@ -72,9 +73,9 @@ pub(super) fn cell(
         }
     } else {
         for (label, fmt) in [
-            ("Copiar en CSV", CopyFormat::Csv),
-            ("Copiar en TSV", CopyFormat::Tsv),
-            ("Copiar SQL Insert", CopyFormat::SqlInserts),
+            (t!("menu-copy-csv"), CopyFormat::Csv),
+            (t!("menu-copy-tsv"), CopyFormat::Tsv),
+            (t!("menu-copy-inserts"), CopyFormat::SqlInserts),
         ] {
             if item(ui, format!("{COPY}  {label}")) {
                 action = Some(GridAction::CopyRows(Some(fmt)));
@@ -85,25 +86,28 @@ pub(super) fn cell(
     // ── Cell value ───────────────────────────────────────────────────────
     if g.can_edit(cell) {
         ui.separator();
-        if item(ui, format!("{EDIT}  Editar celda  F2")) {
+        if item(ui, format!("{EDIT}  {}  F2", t!("menu-edit-cell"))) {
             sel.select_cell(cell);
             *editing = Some(EditingCell::new(cell, g.edit_text(cell)));
         }
         if g.nullable(col)
             && shown != Shown::Null
-            && item(ui, format!("∅  Establecer NULL  {CMD}N"))
+            && item(ui, format!("∅  {}  {CMD}N", t!("menu-set-null")))
         {
             action = Some(edited(None));
         }
-        if shown != Shown::Value("") && item(ui, "\"\"  Establecer vacío") {
+        if shown != Shown::Value("") && item(ui, format!("\"\"  {}", t!("menu-set-empty"))) {
             action = Some(edited(Some(String::new())));
         }
-        if is_datetime(g, col, shown) && item(ui, format!("{CLOCK}  Fecha/hora actual")) {
+        if is_datetime(g, col, shown) && item(ui, format!("{CLOCK}  {}", t!("menu-now"))) {
             action = Some(edited(Some(current_datetime())));
         }
         if let RowRef::Insert(insert_idx) = cell.row
             && shown != Shown::Default
-            && item(ui, format!("{UNDO}  Valor por defecto  Supr"))
+            && item(
+                ui,
+                format!("{UNDO}  {}  {}", t!("menu-default-value"), t!("key-delete")),
+            )
         {
             action = Some(GridAction::CellSetDefault {
                 insert_idx,
@@ -113,7 +117,7 @@ pub(super) fn cell(
         // Going back to the saved value removes the pending change
         if let RowRef::Existing(row) = cell.row
             && g.pending_edit(row, col).is_some()
-            && item(ui, format!("{UNDO}  Deshacer el cambio"))
+            && item(ui, format!("{UNDO}  {}", t!("menu-undo-change")))
         {
             action = Some(edited(g.stored(row, col).map(str::to_string)));
         }
@@ -146,12 +150,12 @@ pub(super) fn cell(
         if item(ui, format!("{SEARCH}  IS NOT NULL ({col_name})")) {
             action = filter(format!("{esc_col} IS NOT NULL"));
         }
-        if item(ui, format!("{SEARCH}  Por portapapeles")) {
+        if item(ui, format!("{SEARCH}  {}", t!("menu-filter-clipboard"))) {
             action = Some(GridAction::FilterByClipboard {
                 col_name: col_name.clone(),
             });
         }
-        if item(ui, format!("{SEARCH}  Por texto...")) {
+        if item(ui, format!("{SEARCH}  {}", t!("menu-filter-text"))) {
             action = Some(GridAction::FilterUserInput {
                 col_name: col_name.clone(),
             });
@@ -161,12 +165,12 @@ pub(super) fn cell(
     // ── Row ──────────────────────────────────────────────────────────────
     if g.editable {
         ui.separator();
-        if item(ui, format!("{PLUS}  Insertar fila  {CMD}Ins")) {
+        if item(ui, format!("{PLUS}  {}  {CMD}Ins", t!("menu-insert-row"))) {
             action = Some(GridAction::InsertRow);
         }
         match cell.row {
             RowRef::Existing(row_idx) => {
-                if item(ui, format!("{CLONE}  Clonar fila  {CMD}D")) {
+                if item(ui, format!("{CLONE}  {}  {CMD}D", t!("menu-clone-row"))) {
                     action = Some(GridAction::CloneRow { row_idx });
                 }
                 // Inside a row selection, all of them are deleted
@@ -176,11 +180,13 @@ pub(super) fn cell(
                     vec![row_idx]
                 };
                 let label = if g.is_deleted(cell.row) {
-                    format!("{UNDO}  Desmarcar eliminación")
-                } else if rows.len() > 1 {
-                    format!("{TRASH}  Eliminar {} filas  {CMD}Supr", rows.len())
+                    format!("{UNDO}  {}", t!("menu-undelete"))
                 } else {
-                    format!("{TRASH}  Eliminar fila  {CMD}Supr")
+                    format!(
+                        "{TRASH}  {}  {CMD}{}",
+                        t!("menu-delete-rows", count = rows.len()),
+                        t!("key-delete")
+                    )
                 };
                 // Without a primary key there would be no way to know which row to delete
                 if g.can_change_row(cell.row) && theme::danger_button(ui, label).clicked() {
@@ -189,7 +195,14 @@ pub(super) fn cell(
                 }
             }
             RowRef::Insert(insert_idx) => {
-                if item(ui, format!("{TRASH}  Quitar la fila nueva  {CMD}Supr")) {
+                if item(
+                    ui,
+                    format!(
+                        "{TRASH}  {}  {CMD}{}",
+                        t!("grid-remove-new-row"),
+                        t!("key-delete")
+                    ),
+                ) {
                     action = Some(GridAction::RemoveInsertRow { insert_idx });
                 }
             }

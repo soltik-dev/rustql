@@ -2,6 +2,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::db::TableInfo;
+use crate::i18n::t;
 use crate::ui::{format_bytes, theme};
 
 /// Returned by db_info::show when the user clicks a table.
@@ -17,9 +18,9 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
     let mut action = DbInfoAction::None;
 
     ui.horizontal(|ui| {
-        ui.strong(format!("Base de datos: {db}"));
+        ui.strong(t!("db-info-title", db = db));
         ui.label(
-            egui::RichText::new(format!("— {} tablas", tables.len()))
+            egui::RichText::new(t!("db-info-table-count", count = tables.len()))
                 .color(theme::get(ui).text_muted),
         );
     });
@@ -27,10 +28,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
 
     if tables.is_empty() {
         // Already loaded and with nothing to list (while loading it never gets here)
-        ui.label(
-            egui::RichText::new("Esta base de datos no tiene tablas.")
-                .color(theme::get(ui).text_muted),
-        );
+        ui.label(egui::RichText::new(t!("db-info-no-tables")).color(theme::get(ui).text_muted));
         return action;
     }
 
@@ -39,22 +37,22 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
     // Engine and collation only if the server has them per table (MySQL)
     let has_engine = tables.iter().any(|t| !t.engine.is_empty());
     let has_collation = tables.iter().any(|t| !t.collation.is_empty());
-    let mut headers = vec!["Tabla"];
+    let mut headers = vec![t!("db-info-col-table")];
     let mut builder = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::auto().at_least(150.0).clip(true));
     if has_engine {
-        headers.push("Motor");
+        headers.push(t!("db-info-col-engine"));
         builder = builder.column(Column::auto().at_least(70.0));
     }
-    headers.extend(["Filas", "Tamaño"]);
+    headers.extend([t!("db-info-col-rows"), t!("db-info-col-size")]);
     builder = builder
         .column(Column::auto().at_least(80.0))
         .column(Column::auto().at_least(80.0));
     if has_collation {
-        headers.push("Collation");
+        headers.push("Collation".to_owned());
         builder = builder.column(Column::remainder().at_least(140.0).clip(true));
     }
 
@@ -78,7 +76,7 @@ pub fn show(ui: &mut egui::Ui, db: &str, tables: &[TableInfo]) -> DbInfoAction {
                     if resp.double_clicked() {
                         clicked_table = Some(t.name.clone());
                     }
-                    resp.on_hover_text("Doble click para abrir tabla");
+                    resp.on_hover_text(t!("db-info-open-hint"));
                 });
                 if has_engine {
                     row.col(|ui| {

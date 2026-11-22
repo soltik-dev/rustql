@@ -17,6 +17,7 @@ use crate::db::{
     CancelFlag, ConnectEvent, ConnectionParams, DbBackend, DbResult, Engine, ExportDestination,
     ExportEvent, ExportOptions, ParamList, QueryResult, Security, Statement, TlsMode,
 };
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::log::LogEntry;
 use crate::profiles::{self, ConnColor, ConnectionProfile};
@@ -231,10 +232,10 @@ impl Session {
     }
 
     /// Text of the connection tab.
-    pub fn tab_title(&self) -> &str {
+    pub fn tab_title(&self) -> std::borrow::Cow<'_, str> {
         match self.state {
-            ConnState::Disconnected => "Nueva conexión",
-            _ => &self.title,
+            ConnState::Disconnected => t!("conn-tabs-new").into(),
+            _ => self.title.as_str().into(),
         }
     }
 
@@ -263,7 +264,9 @@ impl Session {
                 Some(format!("{}:{}", self.params.host, self.params.port)),
                 Some((backend.security(), self.params.tls)),
             ),
-            ConnState::Connecting { host, .. } => (Some(format!("Conectando a {}…", host)), None),
+            ConnState::Connecting { host, .. } => {
+                (Some(t!("status-connecting", host = host)), None)
+            }
             ConnState::Disconnected => (None, None),
         };
         ConnectionStatus {
@@ -520,27 +523,23 @@ impl Session {
     /// Existing rows are identified by their primary key.
     fn pending_statements(&self) -> Result<Vec<Statement>, String> {
         let Some(SelectedNode::Table { db, table }) = &self.schema.selected_node else {
-            return Err("No hay ninguna tabla abierta.".into());
+            return Err(t!("save-no-open-table"));
         };
         let tv = &self.table_view;
-        let data = tv.table_data.as_ref().ok_or("No hay datos cargados.")?;
+        let data = tv.table_data.as_ref().ok_or_else(|| t!("save-no-data"))?;
         let engine = self.engine();
         let target = engine.qualified(db, table);
         let edits_rows = !tv.pending_deletes.is_empty() || !tv.pending_edits.is_empty();
         if edits_rows && self.schema.open_table_columns().is_none() {
-            return Err(
-                "Aún se está leyendo la estructura de la tabla: inténtalo de nuevo.".into(),
-            );
+            return Err(t!("save-structure-loading"));
         }
         if edits_rows && tv.primary_keys.is_empty() {
-            return Err(
-                "La tabla no tiene clave primaria: no se pueden editar ni eliminar filas.".into(),
-            );
+            return Err(t!("save-no-primary-key"));
         }
         // Condition identifying the row, with its key as parameters
         let row_key = |row_idx: usize, params: &mut ParamList| {
             pk_condition(data, &tv.primary_keys, row_idx, engine, params)
-                .ok_or_else(|| format!("No se encuentra la clave primaria de la fila {row_idx}."))
+                .ok_or_else(|| t!("save-row-key-missing", row = row_idx))
         };
 
         let mut stmts = Vec::new();
@@ -568,7 +567,7 @@ impl Session {
                 let col = data
                     .columns
                     .get(edit.col_idx)
-                    .ok_or_else(|| format!("No existe la columna {}.", edit.col_idx))?;
+                    .ok_or_else(|| t!("save-no-column", index = edit.col_idx))?;
                 let value = params.push((!edit.is_null).then(|| edit.new_value.clone()));
                 sets.push(format!("{} = {value}", engine.quote_ident(col)));
             }
@@ -919,8 +918,7 @@ impl Session {
                         break;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        connect_result =
-                            Some(Err("El hilo de conexión terminó inesperadamente".into()));
+                        connect_result = Some(Err(t!("connect-thread-died")));
                         break;
                     }
                 }
@@ -971,14 +969,14 @@ impl Session {
                 ..
             } => {
                 sh.toasts
-                    .error(format!("No se pudo leer la definición de «{view}»: {e}"));
+                    .error(t!("view-definition-failed", view = view, error = e));
             }
             JobResult::EditorCancel(Ok(())) => {}
             // The query is still running: record why
             JobResult::EditorCancel(Err(e)) => {
                 sh.toasts
-                    .error(format!("No se pudo cancelar la consulta: {e}"));
-                self.push_log(LogEntry::err("Cancelar la consulta", 0, e));
+                    .error(t!("cancel-query-failed", error = e.as_str()));
+                self.push_log(LogEntry::err(t!("log-cancel-query"), 0, e));
             }
         }
     }
@@ -1008,7 +1006,7 @@ impl Session {
                 // them than to apply them to the rows now in those
                 // positions.
                 if self.pending_count() > 0 {
-                    log::warn!("Datos recargados con cambios pendientes: se descartan");
+                    log::warn!("Data reloaded with pending changes: they are discarded");
                     self.discard_pending();
                 }
                 let rows = data.rows.len();
@@ -1056,7 +1054,7 @@ impl Session {
                     Ok(ExportEvent::RowsCopied(rows)) => running.rows_done += rows,
                     Ok(ExportEvent::TableError { table, error }) => {
                         log_entries.push(LogEntry::err(
-                            format!("Exportar «{table}»"),
+                            t!("export-title-table", table = &table),
                             0,
                             error.as_str(),
                         ));
@@ -1071,7 +1069,7 @@ impl Session {
                         elapsed_ms,
                     }) => {
                         log_entries.push(LogEntry::ok(
-                            format!("Exportación finalizada: {total_tables} tablas"),
+                            t!("log-export-finished", count = total_tables),
                             elapsed_ms,
                             total_rows as usize,
                         ));
@@ -1087,7 +1085,7 @@ impl Session {
                         break;
                     }
                     Ok(ExportEvent::Failed(error)) => {
-                        log_entries.push(LogEntry::err("Exportación", 0, error.as_str()));
+                        log_entries.push(LogEntry::err(t!("log-export"), 0, error.as_str()));
                         new_phase = Some(ExportPhase::Failed(error));
                         break;
                     }
@@ -1096,9 +1094,7 @@ impl Session {
                         break;
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        new_phase = Some(ExportPhase::Failed(
-                            "El hilo de exportación terminó de forma inesperada.".to_string(),
-                        ));
+                        new_phase = Some(ExportPhase::Failed(t!("export-thread-died")));
                         break;
                     }
                 }
@@ -1203,9 +1199,7 @@ impl Session {
         let result = match rx.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("No se pudo leer la lista de bases de datos.".into())
-            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(t!("database-list-failed")),
         };
         self.db_picker.receiver = None;
         self.db_picker.list = match result {
@@ -1227,7 +1221,7 @@ impl Session {
                 }
                 Err(e) => {
                     // In the form and, in case it is no longer open, in a notification
-                    let message = format!("No se guardó la contraseña en el llavero: {e}");
+                    let message = t!("keyring-save-failed", error = e);
                     sh.toasts.error(message.clone());
                     self.error_message = Some(message);
                 }

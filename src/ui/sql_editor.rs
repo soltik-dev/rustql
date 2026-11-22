@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use eframe::egui;
 
 use crate::db::{CancelFlag, Engine, QUERY_CANCELLED, QueryResult};
+use crate::i18n::t;
 use crate::settings::{CopyFormat, SavedSqlTab};
 use crate::ui::results_grid::{self, GridAction, GridSelection};
 use crate::ui::{CMD, sql_highlight, theme};
@@ -94,7 +95,7 @@ impl SqlTab {
     pub fn title(&self, idx: usize) -> String {
         self.name
             .clone()
-            .unwrap_or_else(|| format!("SQL {}", idx + 1))
+            .unwrap_or_else(|| t!("sql-tab-title", number = idx + 1))
     }
 
     /// What the tab would run now: the editor selection if there is one and,
@@ -172,18 +173,19 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
         .is_some_and(|c| c.load(Ordering::SeqCst));
 
     ui.horizontal(|ui| {
-        ui.label("BD:");
+        ui.label(t!("sql-database"));
         let db_context = &mut tab.db_context;
+        let no_database = t!("sql-no-database");
         egui::ComboBox::from_id_salt("sql_db_context")
             .selected_text(if db_context.is_empty() {
-                "(ninguna)"
+                no_database.as_str()
             } else {
                 db_context.as_str()
             })
             .width(140.0)
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_label(db_context.is_empty(), "(ninguna)")
+                    .selectable_label(db_context.is_empty(), &no_database)
                     .clicked()
                 {
                     db_context.clear();
@@ -196,16 +198,16 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
             });
 
         ui.separator();
-        ui.label("SQL libre:");
+        ui.label(t!("sql-free-query"));
         // With text selected in the editor, only that runs
         let has_selection = tab
             .selected_sql
             .as_deref()
             .is_some_and(|sel| !sel.trim().is_empty());
         let label = if has_selection {
-            "Ejecutar selección"
+            t!("sql-run-selection")
         } else {
-            "Ejecutar"
+            t!("sql-run")
         };
         let execute = theme::primary_button_enabled(
             ui,
@@ -226,7 +228,7 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
         }
         let has_text = !tab.sql_text.trim().is_empty();
         if ui
-            .add_enabled(has_text, egui::Button::new("Limpiar"))
+            .add_enabled(has_text, egui::Button::new(t!("sql-clear")))
             .clicked()
         {
             action = SqlEditorAction::Clear;
@@ -234,12 +236,12 @@ fn toolbar(ui: &mut egui::Ui, tab: &mut SqlTab, databases: &[String]) -> (SqlEdi
         if running {
             ui.spinner();
             if cancelling {
-                ui.label("Cancelando…");
+                ui.label(t!("sql-cancelling"));
             } else {
-                ui.label("Ejecutando…");
+                ui.label(t!("sql-running"));
                 if ui
-                    .button("Cancelar")
-                    .on_hover_text("Interrumpe la consulta en el servidor")
+                    .button(t!("common-cancel"))
+                    .on_hover_text(t!("sql-cancel-hint"))
                     .clicked()
                 {
                     action = SqlEditorAction::Cancel;
@@ -289,7 +291,7 @@ fn editor(ui: &mut egui::Ui, tab: &mut SqlTab, execute_held: bool, engine: Engin
                         .code_editor()
                         .layouter(layouter)
                         .frame(egui::Frame::NONE)
-                        .hint_text("SELECT * FROM tabla LIMIT 100")
+                        .hint_text(t!("sql-editor-hint"))
                         .desired_width(f32::INFINITY)
                         // The whole box is the editor: a click on its empty
                         // part also gives it focus
@@ -350,34 +352,34 @@ fn result(ui: &mut egui::Ui, tab: &mut SqlTab) -> Option<Option<CopyFormat>> {
     match &tab.result {
         None => {
             ui.centered_and_justified(|ui| {
-                muted(
-                    ui,
-                    format!("Escribe una consulta y pulsa {CMD}Enter o el botón Ejecutar"),
-                );
+                muted(ui, t!("sql-empty", shortcut = format!("{CMD}Enter")));
             });
         }
         // Cancelling it was the user's doing: it is not an error
-        Some(Err(e)) if e == QUERY_CANCELLED => muted(ui, format!("Consulta cancelada{took}")),
-        Some(Err(e)) => theme::error_card(ui, &format!("Error: {e}")),
+        Some(Err(e)) if e == QUERY_CANCELLED => muted(ui, format!("{}{took}", t!("sql-cancelled"))),
+        Some(Err(e)) => theme::error_card(ui, &t!("common-error", error = e)),
         // INSERT, UPDATE, DDL…: nothing to show
         Some(Ok(data)) if data.columns.is_empty() => {
-            muted(ui, format!("Ejecutada, sin resultado que mostrar{took}"));
+            muted(ui, format!("{}{took}", t!("sql-done-no-result")));
         }
         Some(Ok(data)) => {
             ui.horizontal(|ui| {
                 muted(
                     ui,
                     format!(
-                        "{} filas, {} columnas{took}",
-                        data.rows.len(),
-                        data.columns.len()
+                        "{}{took}",
+                        t!(
+                            "sql-result-summary",
+                            rows = data.rows.len(),
+                            columns = data.columns.len()
+                        )
                     ),
                 );
                 if data.truncated {
                     ui.label(
                         egui::RichText::new(format!(
-                            "· solo las primeras {} (hay más; el tope se cambia en Ajustes)",
-                            data.rows.len()
+                            "· {}",
+                            t!("sql-result-truncated", count = data.rows.len())
                         ))
                         .color(p.warning),
                     );
@@ -497,7 +499,7 @@ mod tests {
         fn execute_button(&self) -> egui::Pos2 {
             self.ctx
                 .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("sql_execute_rect")))
-                .expect("el botón Ejecutar")
+                .expect("the Run button")
                 .center()
         }
     }

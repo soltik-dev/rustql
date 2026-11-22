@@ -42,6 +42,11 @@ rfd = "0.17"
 env_logger = "0.11"
 log = "0.4"
 keyring-core = "1"
+# Translations (src/i18n.rs): Fluent files from locales/, embedded at compile
+# time. walkdir instead of the default ignore: fewer dependencies.
+fluent-templates = { version = "0.15", default-features = false, features = ["macros", "walkdir"] }
+# The system language, to pick the translation by default
+sys-locale = "0.3"
 
 # System password store (see src/secrets.rs). Pure Rust only on Linux: no
 # libdbus or openssl, for the portable build with an old glibc.

@@ -7,11 +7,12 @@ use mysql::PooledConn;
 use mysql::prelude::Queryable;
 
 use super::{
-    ExportDestination, ExportEvent, ExportOptions, Job, RowBatch, SAME_TARGET_ERROR, Sink, Source,
-    TableData, TableScript, Totals, export_into, export_to_file, export_to_folder,
+    ExportDestination, ExportEvent, ExportOptions, Job, RowBatch, Sink, Source, TableData,
+    TableScript, Totals, export_into, export_to_file, export_to_folder, same_target_error,
 };
 use crate::db::mysql::{MysqlBackend, literal, qualified, quote_ident, sql_literal};
 use crate::db::{ConnectionParams, DbBackend, DbResult, Engine};
+use crate::i18n::t;
 
 pub(super) fn run(
     params: &ConnectionParams,
@@ -21,10 +22,10 @@ pub(super) fn run(
     if let ExportDestination::SameServerDb { target_db } = destination
         && target_db == job.source_db
     {
-        return Err(SAME_TARGET_ERROR.into());
+        return Err(same_target_error());
     }
     let backend = MysqlBackend::connect_with_progress(params, |_| {})
-        .map_err(|e| format!("Conexión al origen: {e}"))?;
+        .map_err(|e| t!("export-source-connection", error = e.to_string()))?;
     let source = MysqlSource::open(&backend, job.source_db)?;
     match destination {
         ExportDestination::SqlFile { path } => export_to_file(&source, path, job),
@@ -34,15 +35,14 @@ pub(super) fn run(
         }
         ExportDestination::RemoteServer { params, target_db } => {
             let target = MysqlBackend::connect_with_progress(params, |_| {})
-                .map_err(|e| format!("Conexión al destino: {e}"))?;
+                .map_err(|e| t!("export-target-connection", error = e.to_string()))?;
             // Another profile (or another host name) may lead to the same server:
             // copying a database onto itself drops (DROP) or duplicates its data.
             if target_db == job.source_db
-                && same_server(&backend, &target).map_err(|e| {
-                    format!("No se pudo comprobar si el destino es el mismo servidor: {e}")
-                })?
+                && same_server(&backend, &target)
+                    .map_err(|e| t!("export-same-server-check-failed", error = e.to_string()))?
             {
-                return Err(SAME_TARGET_ERROR.into());
+                return Err(same_target_error());
             }
             let mut sink = ConnSink::open(&target, target_db)?;
             export_into(&source, &mut sink, job)
@@ -64,7 +64,7 @@ impl<'a> MysqlSource<'a> {
     fn open(backend: &'a MysqlBackend, db: &'a str) -> DbResult<Self> {
         let mut conn = backend.conn()?;
         conn.query_drop(format!("USE {}", quote_ident(db)))
-            .map_err(|e| format!("Conexión al origen: {e}"))?;
+            .map_err(|e| t!("export-source-connection", error = e.to_string()))?;
         Ok(Self {
             backend,
             db,
@@ -92,7 +92,7 @@ impl<'a> MysqlSource<'a> {
             .query_first(sql)
             .map_err(|e| format!("SHOW CREATE TABLE: {e}"))?;
         row.and_then(|row| row.get::<String, _>(1))
-            .ok_or_else(|| format!("No se obtuvo DDL para la tabla '{table}'"))
+            .ok_or_else(|| t!("export-no-ddl", table = table))
     }
 }
 
@@ -184,7 +184,13 @@ impl ConnSink {
         let target = quote_ident(target_db);
         conn.query_drop(format!("CREATE DATABASE IF NOT EXISTS {target}"))
             .and_then(|()| conn.query_drop(format!("USE {target}")))
-            .map_err(|e| format!("No se pudo crear la BBDD destino '{target_db}': {e}"))?;
+            .map_err(|e| {
+                t!(
+                    "export-create-target-failed",
+                    db = target_db,
+                    error = e.to_string()
+                )
+            })?;
         Ok(Self(conn))
     }
 }
@@ -205,7 +211,13 @@ fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbRes
         "CREATE DATABASE IF NOT EXISTS {}",
         quote_ident(target_db)
     ))
-    .map_err(|e| format!("No se pudo crear la base de datos '{target_db}': {e}"))?;
+    .map_err(|e| {
+        t!(
+            "export-create-target-failed",
+            db = target_db,
+            error = e.to_string()
+        )
+    })?;
     // Without it, the order of tables with foreign keys makes CREATE
     // and INSERT fail
     conn.query_drop("SET FOREIGN_KEY_CHECKS = 0")
@@ -240,7 +252,7 @@ fn copy_within_server(source: &MysqlSource, target_db: &str, job: &Job) -> DbRes
             if view_sink.is_none() {
                 view_sink = Some(ConnSink::open(backend, target_db)?);
             }
-            let sink = view_sink.as_mut().expect("recién abierta");
+            let sink = view_sink.as_mut().expect("just opened");
             sink.run_all(&source.script(table, options)?.finish)?;
             return Ok(0);
         }
@@ -324,7 +336,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(events.as_slice(), [ExportEvent::Failed(e)] if e == SAME_TARGET_ERROR),
+            matches!(events.as_slice(), [ExportEvent::Failed(e)] if *e == same_target_error()),
             "debe abortar antes de tocar nada"
         );
         assert_eq!(

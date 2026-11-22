@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::db::{ConnectionParams, Engine, TlsMode};
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::profiles::{ConnColor, ConnectionProfile};
 use crate::secrets;
@@ -37,14 +38,14 @@ pub fn show_favorites(
     let mut connect_now = false;
 
     ui.add_space(8.0);
-    theme::section_label(ui, "Favoritos");
+    theme::section_label(ui, &t!("conn-favourites"));
     ui.separator();
 
     if profiles.is_empty() {
         ui.add_space(8.0);
-        ui.label("Sin conexiones guardadas.");
+        ui.label(t!("conn-no-favourites"));
         ui.add_space(4.0);
-        ui.label("Rellena el formulario\ny pulsa Guardar.");
+        ui.label(t!("conn-no-favourites-hint"));
     } else {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, profile) in profiles.iter().enumerate() {
@@ -112,7 +113,7 @@ pub fn show_form(ui: &mut egui::Ui, view: FormView<'_>) -> FormResult {
             ui.add_space(32.0);
             ui.vertical_centered(|ui| {
                 ui.heading("RustQL");
-                ui.label(egui::RichText::new("Conectar a base de datos").color(p.text_muted));
+                ui.label(egui::RichText::new(t!("conn-subtitle")).color(p.text_muted));
             });
             ui.add_space(20.0);
 
@@ -149,7 +150,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
         .spacing([16.0, 8.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
-            ui.label("Motor:");
+            ui.label(t!("conn-engine"));
             ui.horizontal(|ui| {
                 for engine in Engine::ALL {
                     let selected = params.engine == engine;
@@ -171,23 +172,23 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
                 }
             };
 
-            ui.label("Host:");
+            ui.label(t!("conn-host"));
             field(ui, egui::TextEdit::singleline(&mut params.host));
             ui.end_row();
 
-            ui.label("Puerto:");
+            ui.label(t!("conn-port"));
             field(ui, egui::TextEdit::singleline(port_str));
             ui.end_row();
 
-            ui.label("Usuario:");
+            ui.label(t!("conn-user"));
             field(ui, egui::TextEdit::singleline(&mut params.user));
             ui.end_row();
 
-            ui.label("Contraseña:");
+            ui.label(t!("conn-password"));
             let hint = if params.keyring_id.is_some() {
-                "Guardada en el llavero"
+                t!("conn-password-in-keyring")
             } else {
-                ""
+                String::new()
             };
             field(
                 ui,
@@ -198,14 +199,14 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
             ui.end_row();
 
             // The field and its pick button take up what the other fields do
-            ui.label("Base de datos:");
+            ui.label(t!("conn-database"));
             let row = egui::vec2(field_width, ui.spacing().interact_size.y);
             let layout = egui::Layout::right_to_left(egui::Align::Center);
             ui.allocate_ui_with_layout(row, layout, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 result.load_databases = database_picker(ui, &mut params.database, databases);
                 let edit = egui::TextEdit::singleline(&mut params.database)
-                    .hint_text("Todas")
+                    .hint_text(t!("conn-database-all"))
                     .desired_width(ui.available_width());
                 let resp = ui.add(edit);
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -214,7 +215,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
             });
             ui.end_row();
 
-            ui.label("Seguridad:");
+            ui.label(t!("conn-security"));
             egui::ComboBox::from_id_salt("tls_mode")
                 .selected_text(params.tls.label())
                 .width(field_width)
@@ -230,24 +231,21 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
 
             // Only when verifying: the authority that signs the certificate
             if params.tls == TlsMode::Verify {
-                ui.label("Fichero de CA:");
+                ui.label(t!("conn-ca-file"));
                 ui.allocate_ui_with_layout(row, layout, |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if ui.button("…").on_hover_text("Elegir el fichero").clicked()
+                    if ui.button("…").on_hover_text(t!("conn-ca-pick")).clicked()
                         && let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Certificados", &["pem", "crt", "cer"])
-                            .add_filter("Todos", &["*"])
+                            .add_filter(t!("conn-ca-filter-certificates"), &["pem", "crt", "cer"])
+                            .add_filter(t!("conn-ca-filter-all"), &["*"])
                             .pick_file()
                     {
                         params.tls_ca = path.to_string_lossy().to_string();
                     }
                     let edit = egui::TextEdit::singleline(&mut params.tls_ca)
-                        .hint_text("Las del sistema")
+                        .hint_text(t!("conn-ca-system"))
                         .desired_width(ui.available_width());
-                    let resp = ui.add(edit).on_hover_text(
-                        "Certificado (PEM) de la autoridad que firma el del servidor.\n\
-                         Vacío, se confía en las autoridades instaladas en el sistema.",
-                    );
+                    let resp = ui.add(edit).on_hover_text(t!("conn-ca-hint"));
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         connect = true;
                     }
@@ -262,14 +260,14 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
                     *save_password = false;
                     ui.add_enabled(
                         false,
-                        egui::Checkbox::new(save_password, "Guardar contraseña"),
+                        egui::Checkbox::new(save_password, t!("conn-save-password")),
                     );
-                    ui.colored_label(p.warning, "⚠ Sin llavero del sistema: no se guardará");
+                    ui.colored_label(p.warning, format!("⚠ {}", t!("conn-no-keyring")));
                 } else {
-                    ui.checkbox(save_password, "Guardar contraseña");
+                    ui.checkbox(save_password, t!("conn-save-password"));
                     if *save_password {
                         ui.label(
-                            egui::RichText::new("Se guarda cifrada en el llavero del sistema")
+                            egui::RichText::new(t!("conn-save-password-hint"))
                                 .color(p.text_muted)
                                 .small(),
                         );
@@ -289,33 +287,33 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
         .spacing([16.0, 8.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
-            ui.label("Nombre:");
+            ui.label(t!("conn-profile-name"));
             ui.add(
                 egui::TextEdit::singleline(profile_name)
-                    .hint_text("Mi servidor...")
+                    .hint_text(t!("conn-profile-name-hint"))
                     .min_size(egui::vec2(220.0, 0.0)),
             );
             ui.end_row();
 
-            ui.label("Color:");
+            ui.label(t!("conn-color"));
             color_swatches(ui, color);
             ui.end_row();
         });
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        if ui.button("Guardar").clicked() {
+        if ui.button(t!("conn-save")).clicked() {
             result.save_profile = Some(SaveProfile::Update);
         }
         if selected_idx.is_some() {
             if ui
-                .button("Guardar como nuevo")
-                .on_hover_text("Crea otro favorito con estos datos, sin tocar el seleccionado")
+                .button(t!("conn-save-as-new"))
+                .on_hover_text(t!("conn-save-as-new-hint"))
                 .clicked()
             {
                 result.save_profile = Some(SaveProfile::AsNew);
             }
-            if ui.button("Eliminar").clicked() {
+            if ui.button(t!("conn-delete")).clicked() {
                 result.delete_profile = true;
             }
         }
@@ -334,7 +332,7 @@ fn show_form_fields(ui: &mut egui::Ui, view: FormView<'_>, result: &mut FormResu
     let button = ui
         .vertical_centered(|ui| {
             ui.spacing_mut().button_padding = egui::vec2(48.0, 8.0);
-            let button = theme::primary_button(ui, "Conectar");
+            let button = theme::primary_button(ui, t!("conn-connect"));
             if button.clicked() {
                 result.connect = true;
             }
@@ -383,9 +381,7 @@ fn database_picker(
     databases: &Loadable<Vec<String>>,
 ) -> bool {
     let p = theme::get(ui);
-    let resp = ui
-        .button(DATABASE)
-        .on_hover_text("Elegir entre las bases de datos del servidor");
+    let resp = ui.button(DATABASE).on_hover_text(t!("conn-database-pick"));
     let popup = egui::Popup::menu(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(FIELD_WIDTH);
@@ -411,7 +407,7 @@ fn database_picker(
             Loadable::NotLoaded | Loadable::Loading(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Leyendo las bases de datos…");
+                    ui.label(t!("conn-database-reading"));
                 });
             }
             Loadable::Failed(e) => {
@@ -420,7 +416,7 @@ fn database_picker(
             }
             Loadable::Ready(list) => {
                 if ui
-                    .selectable_label(database.trim().is_empty(), "Todas")
+                    .selectable_label(database.trim().is_empty(), t!("conn-database-all"))
                     .clicked()
                 {
                     database.clear();
@@ -451,7 +447,7 @@ fn color_swatches(ui: &mut egui::Ui, color: &mut Option<ConnColor>) {
         ui.spacing_mut().item_spacing.x = 2.0;
 
         if swatch(ui, None, color.is_none(), None)
-            .on_hover_text("Sin color")
+            .on_hover_text(t!("conn-color-none"))
             .clicked()
         {
             *color = None;
@@ -468,7 +464,7 @@ fn color_swatches(ui: &mut egui::Ui, color: &mut Option<ConnColor>) {
         let custom = color.filter(|c| matches!(c, ConnColor::Custom(_)));
         let glyph = if custom.is_some() { None } else { Some("+") };
         let resp = swatch(ui, custom.map(|c| p.conn(c)), custom.is_some(), glyph)
-            .on_hover_text("Personalizado…");
+            .on_hover_text(t!("conn-color-custom"));
         egui::Popup::menu(&resp)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {

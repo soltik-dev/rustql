@@ -2,6 +2,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::db::DatabaseInfo;
+use crate::i18n::t;
 use crate::ui::{format_bytes, theme};
 
 /// "Server" panel: list of databases with statistics. `known_tables` says
@@ -15,20 +16,19 @@ pub fn show(
     known_tables: impl Fn(&str) -> Option<usize>,
 ) {
     ui.horizontal(|ui| {
-        ui.strong(format!("Servidor: {host}"));
+        ui.strong(t!("server-info-title", host = host));
         ui.label(
-            egui::RichText::new(match databases.len() {
-                1 => "— 1 base de datos".to_string(),
-                n => format!("— {n} bases de datos"),
-            })
-            .color(theme::get(ui).text_muted),
+            egui::RichText::new(t!("server-info-database-count", count = databases.len()))
+                .color(theme::get(ui).text_muted),
         );
     });
     ui.separator();
 
     if databases.is_empty() {
         // Already loaded and with nothing to list (while loading it never gets here)
-        ui.label(egui::RichText::new("(sin bases de datos)").color(theme::get(ui).text_muted));
+        ui.label(
+            egui::RichText::new(t!("server-info-no-databases")).color(theme::get(ui).text_muted),
+        );
         return;
     }
 
@@ -42,9 +42,16 @@ pub fn show(
         .column(Column::auto().at_least(60.0)) // tables
         .column(Column::auto().at_least(80.0)) // size
         .header(24.0, |mut header| {
-            for name in &["Base de datos", "Charset", "Collation", "Tablas", "Tamaño"] {
+            let names = [
+                t!("server-info-col-database"),
+                "Charset".to_owned(),
+                "Collation".to_owned(),
+                t!("server-info-col-tables"),
+                t!("server-info-col-size"),
+            ];
+            for name in &names {
                 header.col(|ui| {
-                    ui.label(egui::RichText::new(*name).color(theme::get(ui).text_muted));
+                    ui.label(egui::RichText::new(name.as_str()).color(theme::get(ui).text_muted));
                 });
             }
         })

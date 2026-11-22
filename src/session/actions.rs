@@ -13,6 +13,7 @@ use super::writes::AfterCommit;
 use super::{ConnState, FrameKeys, SelectedNode, Session, Shared};
 use crate::db::QueryResult;
 use crate::db::{Engine, connect_with_progress};
+use crate::i18n::t;
 use crate::loadable::Loadable;
 use crate::profiles::{self, ConnectionProfile};
 use crate::secrets;
@@ -257,7 +258,7 @@ impl Session {
                     // until the next reload
                     Err(e) => {
                         sh.toasts
-                            .error(format!("No se pudo leer el portapapeles: {e}"));
+                            .error(t!("clipboard-read-failed", error = e.to_string()));
                     }
                 }
             }
@@ -374,7 +375,7 @@ impl Session {
             }
             SidebarAction::ViewDefinition { db, table } => self.open_view_definition(db, table),
             SidebarAction::CopyTableName(name) => {
-                sh.toasts.info(format!("«{name}» copiado al portapapeles"));
+                sh.toasts.info(t!("name-copied", name = &name));
                 ctx.copy_text(name);
             }
             SidebarAction::Refresh => self.schema.clear(),
@@ -628,7 +629,7 @@ impl Session {
             self.profile_name.clear();
             profiles::save(&sh.profiles);
             sh.toasts
-                .info(format!("Favorito «{}» eliminado", profile.name));
+                .info(t!("favourite-deleted", name = &profile.name));
             removed = Some(idx);
         }
 
@@ -640,7 +641,7 @@ impl Session {
     fn save_profile(&mut self, ctx: &egui::Context, sh: &mut Shared, mode: SaveProfile) {
         let name = self.profile_name.trim().to_string();
         if name.is_empty() {
-            self.error_message = Some("Pon un nombre al favorito para guardarlo.".into());
+            self.error_message = Some(t!("favourite-name-missing"));
             return;
         }
         if !self.read_port() {
@@ -650,10 +651,7 @@ impl Session {
         let idx = match mode {
             SaveProfile::Update => self.selected_profile_idx.or(same_name),
             SaveProfile::AsNew if same_name.is_some() => {
-                self.error_message = Some(format!(
-                    "Ya hay un favorito llamado «{name}»: cambia el nombre para guardarlo \
-                     como otro."
-                ));
+                self.error_message = Some(t!("favourite-name-taken", name = name));
                 return;
             }
             SaveProfile::AsNew => None,
@@ -699,7 +697,7 @@ impl Session {
         self.selected_profile_idx = Some(idx.unwrap_or(sh.profiles.len() - 1));
         profiles::save(&sh.profiles);
         sh.toasts
-            .success(format!("Favorito «{}» guardado", self.profile_name.trim()));
+            .success(t!("favourite-saved", name = self.profile_name.trim()));
     }
 
     /// Moves the form's port into the parameters. If it is not a valid port,
@@ -712,10 +710,7 @@ impl Session {
                 true
             }
             _ => {
-                self.error_message = Some(format!(
-                    "Puerto no válido: «{}». Debe ser un número entre 1 y 65535.",
-                    self.port_str.trim()
-                ));
+                self.error_message = Some(t!("conn-port-invalid", port = self.port_str.trim()));
                 false
             }
         }
@@ -735,7 +730,7 @@ impl Session {
     /// credentials, to pick one. Each request replaces the previous one.
     pub(super) fn load_database_list(&mut self, ctx: &egui::Context) {
         if self.params.host.trim().is_empty() {
-            self.db_picker.list = Loadable::Failed("Indica el host del servidor.".into());
+            self.db_picker.list = Loadable::Failed(t!("conn-host-missing"));
             return;
         }
         if !self.read_port() {
@@ -756,7 +751,7 @@ impl Session {
     /// Starts the connection in the background with the form's parameters.
     pub(super) fn start_connect(&mut self, sh: &Shared) {
         if self.params.host.trim().is_empty() {
-            self.error_message = Some("Indica el host del servidor.".into());
+            self.error_message = Some(t!("conn-host-missing"));
             return;
         }
         if !self.read_port() {
@@ -776,7 +771,7 @@ impl Session {
         self.state = ConnState::Connecting {
             receiver: rx,
             host,
-            status: "Iniciando...".to_string(),
+            status: t!("connect-starting"),
             start: Instant::now(),
         };
         self.error_message = None;
@@ -802,7 +797,8 @@ fn copy_rows(
     };
     match copied {
         0 => {}
-        1 => sh.toasts.info(format!("1 fila copiada ({format})")),
-        n => sh.toasts.info(format!("{n} filas copiadas ({format})")),
+        n => sh
+            .toasts
+            .info(t!("rows-copied", count = n, format = format)),
     }
 }

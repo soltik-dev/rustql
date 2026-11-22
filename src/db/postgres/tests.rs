@@ -308,7 +308,7 @@ fn la_transaccion_convierte_los_parametros_al_tipo_de_su_columna() {
         "{err}"
     );
     let err = missing.unwrap_err();
-    assert!(err.contains("encontró 0"), "{err}");
+    assert!(err.contains("found 0"), "{err}");
     unchanged.unwrap();
     assert_eq!(
         after[0],
@@ -576,8 +576,8 @@ fn errores_de_conexion_legibles() {
         },
         |_| {},
     );
-    let err = wrong_password.err().expect("contraseña mala");
-    assert!(err.starts_with("No se pudo conectar: "), "{err}");
+    let err = wrong_password.err().expect("wrong password");
+    assert!(err.starts_with("Could not connect: "), "{err}");
 
     let nobody_listening = PostgresBackend::connect_with_progress(
         &ConnectionParams {
@@ -667,7 +667,7 @@ fn niveles_de_seguridad_de_la_conexion() {
     let unknown = connect(TlsMode::Verify, false)
         .err()
         .expect("CA desconocida");
-    assert!(unknown.contains("fichero de CA"), "{unknown}");
+    assert!(unknown.contains("CA file"), "{unknown}");
     // With its CA, the certificate is valid (and is for 127.0.0.1)
     let verified = connect(TlsMode::Verify, true).unwrap();
     assert!(encrypted(&verified));

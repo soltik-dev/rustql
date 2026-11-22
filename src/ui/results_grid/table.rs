@@ -6,6 +6,7 @@ use egui_extras::{Column, TableBuilder};
 use super::state::GridLayout;
 use super::{CellRef, EditingCell, Grid, GridAction, GridSelection, RowRef, Shown, SortDir, menu};
 use crate::db::QueryResult;
+use crate::i18n::t;
 use crate::ui::icons::KEY;
 use crate::ui::theme;
 
@@ -358,9 +359,9 @@ fn header_cell(ui: &mut egui::Ui, g: &Grid, col: usize) -> bool {
     }
 
     let hint = match sort_pos {
-        None => "Click: ordenar ↑",
-        Some(i) if g.sorts[i].dir == SortDir::Asc => "Click: ordenar ↓",
-        _ => "Click: quitar ordenación",
+        None => t!("grid-sort-asc-hint"),
+        Some(i) if g.sorts[i].dir == SortDir::Asc => t!("grid-sort-desc-hint"),
+        _ => t!("grid-sort-off-hint"),
     };
     ui.add(egui::Button::new(text).frame(false))
         .on_hover_text(hint)
@@ -648,7 +649,7 @@ fn remove_button(ui: &mut egui::Ui, cell_rect: egui::Rect) -> bool {
     );
     let resp = ui
         .allocate_rect(rect, egui::Sense::CLICK)
-        .on_hover_text("Quitar la fila nueva");
+        .on_hover_text(t!("grid-remove-new-row"));
     if resp.hovered() {
         ui.painter().rect_filled(rect, 3.0, p.danger);
     }

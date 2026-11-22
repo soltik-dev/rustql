@@ -31,6 +31,7 @@ use super::{
     QUERY_CANCELLED, QueryResult, Security, Statement, TableEntry, TableInfo, TableKind, TlsMode,
     tls,
 };
+use crate::i18n::t;
 
 const SQL: Engine = Engine::Postgres;
 
@@ -230,7 +231,7 @@ impl Pooled {
 impl std::ops::Deref for Pooled {
     type Target = Client;
     fn deref(&self) -> &Client {
-        self.client.as_ref().expect("solo falta al soltarla")
+        self.client.as_ref().expect("only missing once dropped")
     }
 }
 
@@ -352,7 +353,7 @@ impl PostgresBackend {
         on_status: impl Fn(&str),
     ) -> DbResult<Self> {
         if params.keyring_id.is_some() && params.password.is_empty() {
-            on_status("Leyendo la contraseña del llavero...");
+            on_status(&t!("connect-reading-keyring"));
         }
         let password = params.resolve_password()?;
         let mut config = Config::new();
@@ -374,7 +375,7 @@ impl PostgresBackend {
             .thread_name("rustql-postgres")
             .enable_all()
             .build()
-            .map_err(|e| format!("No se pudo preparar la conexión: {e}"))?;
+            .map_err(|e| t!("connect-setup-failed", error = e.to_string()))?;
         let mut backend = Self {
             rt,
             config,
@@ -390,7 +391,7 @@ impl PostgresBackend {
             .rt
             .spawn(close_idle_connections(Arc::downgrade(&backend.pools)));
 
-        on_status("Conectando con el servidor...");
+        on_status(&t!("connect-connecting"));
         let candidates: Vec<&str> = match params.only_database() {
             Some(only) => vec![only],
             None => HOME_DATABASES
@@ -415,7 +416,7 @@ impl PostgresBackend {
                     backend.security = Security::of(encrypted, &params.host);
                     backend.home = db.to_string();
                     lock(&backend.pool(db).idle).push((Instant::now(), client));
-                    on_status("Conexión establecida.");
+                    on_status(&t!("connect-established"));
                     return Ok(backend);
                 }
                 // "Encrypt if possible", and it is not: the server offers TLS but no
@@ -447,14 +448,11 @@ impl PostgresBackend {
             }
         }
         let error = first_error.map(|e| describe(&e)).unwrap_or_default();
-        let hint = match tls::hint(params.tls, &error) {
-            "" if params.only_database().is_none() => {
-                "\n\nSi el servidor solo te deja entrar en tu base de datos, indícala en el \
-                 campo «Base de datos»."
-            }
-            hint => hint,
-        };
-        Err(format!("No se pudo conectar: {error}{hint}"))
+        let mut hint = tls::hint(params.tls, &error);
+        if hint.is_empty() && params.only_database().is_none() {
+            hint = format!("\n\n{}", t!("connect-hint-database"));
+        }
+        Err(t!("connect-failed", error = &error, hint = hint))
     }
 
     /// Opens a new connection to `db`.
@@ -465,7 +463,7 @@ impl PostgresBackend {
         // The connection lives as long as its client
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                ::log::debug!("conexión de PostgreSQL cerrada: {e}");
+                ::log::debug!("PostgreSQL connection closed: {e}");
             }
         });
         Ok(client)
@@ -495,7 +493,7 @@ impl PostgresBackend {
         let client = self
             .open(db)
             .await
-            .map_err(|e| format!("Sin conexión con «{db}»: {}", describe(&e)))?;
+            .map_err(|e| t!("db-no-connection-to", db = db, error = describe(&e)))?;
         Ok(Pooled {
             client: Some(client),
             pool,
@@ -517,7 +515,7 @@ impl PostgresBackend {
         }
         result
             .map(|(result, _)| result)
-            .map_err(|e| format!("Error en query: {}", describe(&e)))
+            .map_err(|e| t!("db-query-error", error = describe(&e)))
     }
 
     /// Tables of `db` with the name they have in the tree: those of the
@@ -549,7 +547,7 @@ impl PostgresBackend {
         let client = self
             .rt
             .block_on(self.open(db))
-            .map_err(|e| format!("Sin conexión con «{db}»: {}", describe(&e)))?;
+            .map_err(|e| t!("db-no-connection-to", db = db, error = describe(&e)))?;
         Ok(Dedicated {
             backend: self,
             client,
@@ -630,15 +628,14 @@ impl DbBackend for PostgresBackend {
         let row = result
             .rows
             .first()
-            .ok_or_else(|| format!("No se encuentra la definición de la vista «{view}»."))?;
+            .ok_or_else(|| t!("view-definition-missing", view = view))?;
         let definition = col(row, 1);
         let definition = definition.trim().trim_end_matches(';');
         let reference = SQL.qualified(db, view);
         Ok(if col(row, 0) == "m" {
             format!(
-                "-- Una vista materializada no se puede reemplazar: para cambiarla hay\n\
-                 -- que eliminarla y volver a crearla.\n\
-                 CREATE MATERIALIZED VIEW {reference} AS\n{definition}"
+                "{}\nCREATE MATERIALIZED VIEW {reference} AS\n{definition}",
+                t!("view-materialized-comment")
             )
         } else {
             format!("CREATE OR REPLACE VIEW {reference} AS\n{definition}")
@@ -686,10 +683,10 @@ impl DbBackend for PostgresBackend {
             let client = self
                 .rt
                 .block_on(self.open(db))
-                .map_err(|e| format!("No se pudo abrir la sesión del editor: {}", describe(&e)))?;
+                .map_err(|e| t!("editor-session-failed", error = describe(&e)))?;
             *session = Some(client);
         }
-        let client = session.as_ref().expect("recién abierta");
+        let client = session.as_ref().expect("just opened");
         // Announce first and then check the signal: whoever cancels does the
         // opposite, so at least one of the two sees the other
         lock(&self.running).push((Arc::clone(cancel), client.cancel_token()));
@@ -703,7 +700,7 @@ impl DbBackend for PostgresBackend {
             None => Err(QUERY_CANCELLED.into()),
             Some(Ok((data, _))) => Ok(data),
             Some(Err(e)) if is_cancelled(&e) => Err(QUERY_CANCELLED.into()),
-            Some(Err(e)) => Err(format!("Error en query: {}", describe(&e))),
+            Some(Err(e)) => Err(t!("db-query-error", error = describe(&e))),
         }
     }
 
@@ -722,7 +719,7 @@ impl DbBackend for PostgresBackend {
         // query. If it arrives after the query finished, the server does nothing
         self.rt
             .block_on(token.cancel_query(self.tls.clone()))
-            .map_err(|e| format!("No se pudo cancelar la consulta: {}", describe(&e)))
+            .map_err(|e| t!("cancel-query-failed", error = describe(&e)))
     }
 
     fn get_databases_info(&self) -> DbResult<Vec<DatabaseInfo>> {
@@ -836,7 +833,7 @@ impl DbBackend for PostgresBackend {
             read_results(&client, sql, usize::MAX)
                 .await
                 .map(|(_, affected)| affected)
-                .map_err(|e| format!("Error en escritura: {}", describe(&e)))
+                .map_err(|e| t!("db-write-error", error = describe(&e)))
         })
     }
 
@@ -863,7 +860,7 @@ impl DbBackend for PostgresBackend {
                         attempts += 1;
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
-                    Err(e) => return Err(format!("Error en escritura: {}", describe(&e))),
+                    Err(e) => return Err(t!("db-write-error", error = describe(&e))),
                 }
             }
         })
@@ -885,7 +882,7 @@ impl DbBackend for PostgresBackend {
             client
                 .batch_execute("BEGIN")
                 .await
-                .map_err(|e| format!("Error iniciando transacción: {}", describe(&e)))?;
+                .map_err(|e| t!("db-begin-error", error = describe(&e)))?;
             let mut failure = None;
             for stmt in stmts {
                 let params = stmt.params.iter().map(|p| TextParam(p.as_deref()));
@@ -893,16 +890,14 @@ impl DbBackend for PostgresBackend {
                     // An UPDATE counts the rows it finds, whether they change or not
                     Ok(found) if stmt.single_row && found != 1 => {
                         failure = Some(format!(
-                            "No se ha guardado nada: una sentencia debía cambiar una fila y \
-                             encontró {found}. La fila puede haber cambiado o desaparecido en \
-                             el servidor; recarga la tabla (F5) y repite los cambios.\n\n{}",
+                            "{}\n\n{}",
+                            t!("save-row-not-found", found = found),
                             stmt.sql
                         ));
                     }
                     Ok(_) => continue,
                     Err(e) => {
-                        failure =
-                            Some(format!("Error en transacción (ROLLBACK): {}", describe(&e)));
+                        failure = Some(t!("db-transaction-error", error = describe(&e)));
                     }
                 }
                 break;
@@ -911,7 +906,7 @@ impl DbBackend for PostgresBackend {
                 return client
                     .batch_execute("COMMIT")
                     .await
-                    .map_err(|e| format!("Error en COMMIT: {}", describe(&e)));
+                    .map_err(|e| t!("db-commit-error", error = describe(&e)));
             };
             if client.batch_execute("ROLLBACK").await.is_err() {
                 client.discard();

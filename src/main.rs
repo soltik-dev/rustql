@@ -3,6 +3,7 @@
 mod app;
 mod config_file;
 mod db;
+mod i18n;
 mod loadable;
 mod log;
 mod profiles;
@@ -34,6 +35,8 @@ fn main() -> eframe::Result<()> {
     env_logger::init();
 
     let loaded = settings::load();
+    // Before anything builds a text
+    i18n::set_language(loaded.language.as_deref());
     let mut viewport = egui::ViewportBuilder::default()
         .with_app_id(APP_ID)
         .with_inner_size(window_size(loaded.window_size))
@@ -42,7 +45,7 @@ fn main() -> eframe::Result<()> {
         .with_title("RustQL");
     match eframe::icon_data::from_png_bytes(ICON_PNG) {
         Ok(icon) => viewport = viewport.with_icon(icon),
-        Err(e) => ::log::warn!("No se pudo leer el icono de la ventana: {e}"),
+        Err(e) => ::log::warn!("Could not read the window icon: {e}"),
     }
     let native_options = eframe::NativeOptions {
         viewport,

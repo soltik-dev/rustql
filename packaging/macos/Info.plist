@@ -11,6 +11,14 @@
 	<string>rustql</string>
 	<key>CFBundleIconFile</key>
 	<string>RustQL</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>es</string>
+		<string>fr</string>
+		<string>it</string>
+		<string>pt-BR</string>
+	</array>
 	<key>CFBundleIdentifier</key>
 	<string>com.rustql.RustQL</string>
 	<key>CFBundleInfoDictionaryVersion</key>

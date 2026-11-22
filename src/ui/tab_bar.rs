@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use crate::i18n::t;
 use crate::ui::icons::*;
 use crate::ui::{CMD, ellipsize, theme};
 
@@ -83,7 +84,10 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
         }
 
         // Database
-        let db_label = format!("{DATABASE} {}", ellipsize(db_name.unwrap_or("BBDD"), 18));
+        let db_label = format!(
+            "{DATABASE} {}",
+            ellipsize(db_name.unwrap_or(&t!("tab-database")), 18)
+        );
         if tab_btn(ui, &db_label, active == ActiveTab::Bbdd, has_db).clicked() {
             result.tab_clicked = Some(ActiveTab::Bbdd);
         }
@@ -91,17 +95,20 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
         // Structure and Data belong to the same table: its name only goes in
         // Data (both tabs used to say the same and only the icon told them
         // apart)
-        let struct_label = format!("{EDIT} Estructura");
+        let struct_label = format!("{EDIT} {}", t!("tab-structure"));
         let mut struct_tab = tab_btn(ui, &struct_label, active == ActiveTab::Tabla, has_table);
         if let Some(table) = table_name {
-            struct_tab = struct_tab.on_hover_text(format!("Estructura de {table}"));
+            struct_tab = struct_tab.on_hover_text(t!("tab-structure-of", table = table));
         }
         if struct_tab.clicked() {
             result.tab_clicked = Some(ActiveTab::Tabla);
         }
 
         // Data
-        let datos_label = format!("{GRID} {}", ellipsize(table_name.unwrap_or("Datos"), 18));
+        let datos_label = format!(
+            "{GRID} {}",
+            ellipsize(table_name.unwrap_or(&t!("tab-data")), 18)
+        );
         if tab_btn(ui, &datos_label, active == ActiveTab::Datos, has_table).clicked() {
             result.tab_clicked = Some(ActiveTab::Datos);
         }
@@ -124,20 +131,21 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
                 *rename = Some(TabRename::new(i, title.clone()));
             }
             tab.context_menu(|ui| {
-                if ui.button(format!("{EDIT}  Renombrar")).clicked() {
+                if ui.button(format!("{EDIT}  {}", t!("tab-rename"))).clicked() {
                     *rename = Some(TabRename::new(i, title.clone()));
                     ui.close();
                 }
-                if ui.button(format!("×  Cerrar  {CMD}W")).clicked() {
+                if ui
+                    .button(format!("×  {}  {CMD}W", t!("tab-close")))
+                    .clicked()
+                {
                     result.close_sql_tab = Some(i);
                     ui.close();
                 }
             });
             let close_resp = ui
                 .add(egui::Button::new("×").small().frame(false))
-                .on_hover_text(format!(
-                    "Cerrar pestaña SQL  {CMD}W (o clic central en la pestaña)"
-                ));
+                .on_hover_text(t!("tab-close-sql-hint", shortcut = format!("{CMD}W")));
             // Middle click, as on the connection tabs
             if close_resp.clicked() || tab.middle_clicked() {
                 result.close_sql_tab = Some(i);
@@ -147,7 +155,7 @@ pub fn show(ui: &mut egui::Ui, view: &TabBarView, rename: &mut Option<TabRename>
         // New SQL tab
         if ui
             .add(egui::Button::new("＋").small().frame(false))
-            .on_hover_text(format!("Nueva pestaña SQL  {CMD}T"))
+            .on_hover_text(format!("{}  {CMD}T", t!("tab-new-sql")))
             .clicked()
         {
             result.new_sql_tab = true;
@@ -166,7 +174,7 @@ fn rename_field(ui: &mut egui::Ui, rename: &mut Option<TabRename>, result: &mut 
     let resp = ui.add(
         egui::TextEdit::singleline(&mut state.buffer)
             .desired_width(130.0)
-            .hint_text("Nombre de la pestaña"),
+            .hint_text(t!("tab-name-hint")),
     );
     if state.needs_focus {
         state.needs_focus = false;
@@ -317,7 +325,7 @@ mod tests {
                 // So the next attempt is not a triple click
                 self.time += 1.0;
             }
-            panic!("ningún doble clic empezó a renombrar");
+            panic!("no double click started renaming");
         }
     }
 

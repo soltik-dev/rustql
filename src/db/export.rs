@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::{ConnectionParams, DbResult, Engine};
+use crate::i18n::t;
 
 // ── Public types ───────────────────────────────────────────────────────────────
 
@@ -122,8 +123,10 @@ pub fn spawn_export(
 /// Tables exported and rows copied.
 type Totals = (usize, u64);
 
-const SAME_TARGET_ERROR: &str = "El destino es la misma base de datos del mismo servidor que el origen: \
-     la copia borraría o duplicaría sus datos. Elige otra base de datos destino.";
+/// The destination is the source itself.
+fn same_target_error() -> String {
+    t!("export-same-target")
+}
 
 /// What gets exported and how it is counted.
 struct Job<'a> {
@@ -228,12 +231,17 @@ struct FileSink(BufWriter<std::fs::File>);
 
 impl FileSink {
     fn create(path: &Path, source_db: &str) -> DbResult<Self> {
-        let file = std::fs::File::create(path)
-            .map_err(|e| format!("No se pudo crear el fichero '{}': {e}", path.display()))?;
+        let file = std::fs::File::create(path).map_err(|e| {
+            t!(
+                "export-file-create-failed",
+                path = path.display().to_string(),
+                error = e.to_string()
+            )
+        })?;
         let mut sink = Self(BufWriter::new(file));
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        sink.comment(&format!("RustQL Export — Base de datos: {source_db}"))?;
-        sink.comment(&format!("Generado: {now}"))?;
+        sink.comment(&t!("export-dump-header", db = source_db))?;
+        sink.comment(&t!("export-dump-generated", date = now.to_string()))?;
         sink.comment(&"─".repeat(70))?;
         writeln!(sink.0).map_err(write_error)?;
         Ok(sink)
@@ -255,7 +263,7 @@ impl Sink for FileSink {
 }
 
 fn write_error(e: std::io::Error) -> String {
-    format!("Error escribiendo fichero: {e}")
+    t!("export-file-write-failed", error = e.to_string())
 }
 
 /// Header of a part of the dump, for whoever reads it.
@@ -280,7 +288,7 @@ fn export_table(
     let script = source.script(table, options)?;
     // Nothing to write now (a view, which goes at the end): no header
     if !script.create.is_empty() || script.data.is_some() || !script.after_data.is_empty() {
-        section(sink, &format!("Tabla: {table}"))?;
+        section(sink, &t!("export-dump-table", table = table))?;
     }
     sink.run_all(&script.create)?;
 
@@ -291,7 +299,7 @@ fn export_table(
         let mut write_batch = |columns: &[String], rows: Vec<Vec<String>>| {
             // A big table is many batches: it can be cancelled between them
             if job.cancelled() {
-                return Err("Exportación cancelada.".to_string());
+                return Err(t!("export-cancelled-error"));
             }
             let header = header.get_or_insert_with(|| {
                 let columns: Vec<String> = columns.iter().map(|c| engine.quote_ident(c)).collect();
@@ -326,13 +334,8 @@ fn export_into(source: &dyn Source, sink: &mut dyn Sink, job: &Job) -> DbResult<
         // on them (a foreign key, a view), the server refuses: it is not
         // forced, because that would drop it without warning
         let drops = source.drop_together(job.tables)?;
-        sink.run_all(&drops).map_err(|e| {
-            format!(
-                "No se pudieron eliminar del destino las tablas que ya existen: {e}\n\n\
-                 Si otras tablas o vistas del destino dependen de ellas, expórtalas también \
-                 o elimínalas antes."
-            )
-        })?;
+        sink.run_all(&drops)
+            .map_err(|e| t!("export-drop-existing-failed", error = e))?;
     }
 
     // Tables with something pending for the end are not counted as done
@@ -356,7 +359,7 @@ fn export_into(source: &dyn Source, sink: &mut dyn Sink, job: &Job) -> DbResult<
         }
     }
     if !pending.is_empty() {
-        section(sink, "Vistas y claves foráneas")?;
+        section(sink, &t!("export-dump-deferred"))?;
     }
     for (table, rows, finish) in pending {
         match sink.run_all(&finish) {
@@ -381,8 +384,13 @@ fn export_to_file(source: &dyn Source, path: &str, job: &Job) -> DbResult<Totals
 /// One file per table, each with everything it needs (including what a
 /// single destination leaves for the end).
 fn export_to_folder(source: &dyn Source, folder: &str, job: &Job) -> DbResult<Totals> {
-    std::fs::create_dir_all(folder)
-        .map_err(|e| format!("No se pudo crear la carpeta '{folder}': {e}"))?;
+    std::fs::create_dir_all(folder).map_err(|e| {
+        t!(
+            "export-folder-create-failed",
+            folder = folder,
+            error = e.to_string()
+        )
+    })?;
     Ok(job.for_each_table(|table| {
         let path = Path::new(folder).join(format!("{}.sql", file_name_for(table)));
         let mut sink = FileSink::create(&path, job.source_db)?;

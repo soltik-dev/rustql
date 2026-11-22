@@ -39,7 +39,9 @@ fn default_query_limit() -> usize {
     500
 }
 
-/// Name shown for the embedded UI font (Inter).
+/// Value of `font_family` for the embedded UI font (Inter). It is saved in
+/// settings.json, so it never changes; the settings panel shows a
+/// translated name instead.
 pub const EMBEDDED_FONT_NAME: &str = "Inter (integrada)";
 
 fn default_font_family() -> String {
@@ -51,6 +53,8 @@ fn default_font_family() -> String {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    /// Interface language (a code of `i18n::LANGUAGES`); `None` = the system's.
+    pub language: Option<String>,
     pub theme: Theme,
     pub font_size: f32,
     #[serde(default = "default_font_family")]
@@ -82,6 +86,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            language: None,
             theme: Theme::System,
             font_size: 13.0,
             font_family: default_font_family(),
@@ -345,11 +350,13 @@ pub fn save(s: &AppSettings) {
     crate::config_file::save(SETTINGS_FILE, s, false);
 }
 
-/// Applies the theme and font size to the egui context.
+/// Applies the language, the theme and the font size.
 /// Registers the style of both themes (set_visuals would only write the
 /// active one) and then selects which to use according to the settings.
 pub fn apply(ctx: &egui::Context, s: &AppSettings) {
     use crate::ui::theme;
+
+    crate::i18n::set_language(s.language.as_deref());
 
     ctx.set_style_of(egui::Theme::Dark, theme::style(true, s.font_size));
     ctx.set_style_of(egui::Theme::Light, theme::style(false, s.font_size));
