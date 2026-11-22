@@ -4,8 +4,7 @@ A fast, native desktop client for MySQL, MariaDB and PostgreSQL, written in Rust
 
 > **Public beta.** RustQL 0.9 is the first public release. Expect rough edges,
 > and please [open an issue](https://github.com/soltik-dev/rustql/issues) when
-> something breaks. The interface is in Spanish for now; English, French,
-> Italian and Portuguese are on the way.
+> something breaks.
 
 ## Features
 
@@ -22,6 +21,8 @@ A fast, native desktop client for MySQL, MariaDB and PostgreSQL, written in Rust
 - **Secure by default.** Encrypted connections (TLS) with certificate
   verification. Passwords live in the system keyring (Secret Service, Windows
   Credential Manager, macOS Keychain), never in a plain-text file.
+- **In five languages.** English, Spanish, French, Italian and Brazilian
+  Portuguese, following the system language or chosen in Settings.
 - **Light and dark themes.**
 
 ## Install
@@ -62,6 +63,14 @@ RUSTQL_TEST_POSTGRES='user:password@127.0.0.1:5432' \
 The TLS tests also need `RUSTQL_TEST_CA`, the CA certificate that signed both
 servers' certificates. [The CI workflow](.github/workflows/ci.yml) sets all of
 this up from scratch and is the reference.
+
+## Translations
+
+The texts of the interface live in `locales/<language>/rustql.ftl`, in
+[Fluent](https://projectfluent.org/) format. English is the reference: a new
+text is added there first and then to every other language. `cargo test`
+checks that every language has every text the code uses, with the same
+arguments, and that the files parse.
 
 ## License
 

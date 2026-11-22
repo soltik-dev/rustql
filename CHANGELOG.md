@@ -24,9 +24,11 @@ First public beta.
 - Encrypted connections (TLS) with certificate verification against the system
   authorities or a custom CA, and a padlock in the status bar.
 - Passwords stored in the system keyring.
+- Interface in English, Spanish, French, Italian and Brazilian Portuguese,
+  following the system language or chosen in Settings.
 - Light and dark themes, selectable fonts and remembered window size.
 - Packages for Windows (installer and portable zip), macOS (universal disk
   image for Apple Silicon and Intel) and Linux (AppImage, tarball, .deb, and
   a COPR repository for Fedora and Enterprise Linux 9 and 10).
 
-[Unreleased]: https://github.com/soltik-dev/rustql/commits/master
+[Unreleased]: https://github.com/soltik-dev/rustql/commits/main
